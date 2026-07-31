@@ -1,19 +1,117 @@
-CMakeLists.txt.user
+# Build directories
+build/
+build-*/
+out/
+bin/
+lib/
+cmake-build-*/
+
+# CMake generated files
 CMakeCache.txt
-CMakeFiles
-CMakeScripts
-Testing
+CMakeFiles/
+CMakeScripts/
+Testing/
 Makefile
 cmake_install.cmake
 install_manifest.txt
-compile_commands.json
 CTestTestfile.cmake
-_deps
+CPackConfig.cmake
+CPackSourceConfig.cmake
+compile_commands.json
+_deps/
+*.cmake.tmp
 CMakeUserPresets.json
+CMakeLists.txt.user
 
-# CLion
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#cmake-build-*
+# Native build outputs
+*.o
+*.obj
+*.lo
+*.la
+*.a
+*.lib
+*.so
+*.so.*
+*.dll
+*.dylib
+*.exe
+*.out
+*.app
+*.pdb
+*.ilk
+*.exp
+
+# IDE and editor state
+.idea/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.VC.opendb
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Runtime logs and temporary files
+logs/
+*.log
+*.tmp
+*.temp
+*.cache
+*.pid
+
+# Python helper caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Datasets, videos, and generated experiment outputs
+data/
+datasets/
+videos/
+results/
+outputs/
+runs/
+experiments/*
+!experiments/.gitkeep
+!experiments/README.md
+
+# Model weights and inference engines
+models/
+weights/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.plan
+*.trt
+
+# Docker and package artifacts
+*.tar
+*.tar.gz
+*.zip
+*.7z
+docker/*.tar
+
+# Keep source, build scripts, docs, and configuration templates tracked.
+!CMakeLists.txt
+!cmake/
+!src/
+!include/
+!apps/
+!tests/
+!tools/
+!docs/
+!docker/
+!*.example
+!*.template
