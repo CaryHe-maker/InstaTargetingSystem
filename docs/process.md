@@ -1,42 +1,41 @@
 # InstaTargetingSystem 运行流程与线程分配
 
-> 本文档定义逐帧处理顺序、线程职责、队列协议和停止语义。
-> 单目标跟踪存在帧间依赖。系统只并行无状态工作；球面状态更新严格按帧序执行。
+> 本文档定义逐帧处理顺序、线程职责、队列协议和停止语义。  
+> 单目标跟踪存在帧间依赖，系统只并行无状态工作；球面状态更新严格按帧序执行。
 
 ---
 
 ## 1. 总体流程
 
 ```text
-                    AirSim360 / Raw panoramic video
-                              |
-                              v
-                     +-----------------+
-                     | T1 DecodeWorker |
-                     +--------+--------+
-                              | FramePacket
-                              v
-                     [decodeQueue, cap=3]
-                              |
-                              v
-+------------------+  SearchRequest   +------------------+
-| T0 ControlThread |----------------->| T2 InferWorker   |
-| state / DTC      |<-----------------| crop / HiT       |
-+--------+---------+  InferResponse   +------------------+
+AirSim360 / Raw panoramic video
+          |
+          v
+   +-----------------+
+   | T1 DecodeWorker |
+   +--------+--------+
+            | FramePacket
+            v
+   [decodeQueue, cap=3]
+            |
+            v
++------------------+   SearchRequest   +------------------+
+| T0 ControlThread |------------------>| T2 InferWorker   |
+| DTC / gate       |<------------------| depth + HiT + MLP |
++--------+---------+   InferResponse   +------------------+
          |
          | ResultPacket
          v
- [resultQueue, cap=32]
+   [resultQueue, cap=32]
          |
          v
-+------------------+
-| T3 SinkWorker    |
-| serialize / log  |
-+------------------+
+   +-----------------+
+   | T3 SinkWorker   |
+   +-----------------+
 ```
 
-默认使用四个长生命周期线程。恢复阶段的多个 BFoV 候选由 `T2` 批量推理，不为每个
-候选创建线程。深度摘要由 `T0` 读取并交给 DTC 统一决策。
+默认使用四个长生命周期线程。恢复阶段的多个 BFoV 候选由 `T2` 批量推理，不为每个候选创建线程。  
+深度预处理、局部匹配和融合分数由 `T2` 统一生成；深度摘要、滑动窗口状态和最终候选选择由 `T0` 统一管理。
 
 ---
 
@@ -44,9 +43,9 @@
 
 | 线程 | 所有权 | 主要职责 | 禁止事项 |
 |------|--------|----------|----------|
-| `T0 ControlThread` | `TrackState`、状态机、球面运动状态、深度摘要 | 排序、搜索规划、回投影、融合、模板更新决策 | 直接操作 CUDA/HiT 会话 |
+| `T0 ControlThread` | `TrackState`、状态机、球面运动状态、深度摘要 | 多帧预测、搜索规划、回投影、模板更新决策、最终门控 | 直接操作 CUDA/HiT 会话 |
 | `T1 DecodeWorker` | 解码器 | 顺序解码、颜色转换、生成 `FramePacket` | 丢帧、修改跟踪状态 |
-| `T2 InferWorker` | HiT 会话、设备流、模板特征 | BFoV 投影、预处理、批推理、执行模板命令 | 自行改变状态机或输出结果 |
+| `T2 InferWorker` | HiT 会话、设备流、模板特征、深度编码器、MLP | BFoV 投影、深度预处理、批推理、融合打分、执行模板命令 | 自行改变状态机或输出结果 |
 | `T3 SinkWorker` | 输出文件、指标累加器 | 顺序写结果、可选可视化、统计耗时 | 阻塞控制线程、改写预测 |
 
 设备后端只允许 `T2` 访问。PyTorch、ONNX Runtime 或 TensorRT 会话不得跨线程调用。
@@ -65,7 +64,7 @@ T1                  T0                         T2                  T3
  |                   | depth summary if any     |                   |
  |                   |---- InitRequest -------->| crop template     |
  |                   |<--- InitResponse --------| cache template    |
- |                   |---- Result(0) ------------------------------>|
+ |                   |---- Result(0) -------------------------------->|
  |                   | TrackState = TRACKING    |                   |
 ```
 
@@ -76,17 +75,18 @@ T1                  T0                         T2                  T3
 ```text
 T1                  T0                         T2                  T3
  | Frame(n)          |                          |                   |
- |------------------>| predict spherical state |                   |
- |                   | DTC reads depth summary  |                   |
+ |------------------>| update window state      |                   |
+ |                   | predict center/FOV       |                   |
  |                   | build one SearchView    |                   |
  |                   |---- SearchRequest ------>| crop + HiT        |
  |                   |<--- InferResponse -------|                   |
- |                   | back-project + gate      |                   |
+ |                   | depth summary + fusedScore|                  |
  |                   | update TrackState        |                   |
- |                   |---- Result(n) ------------------------------>|
+ |                   |---- Result(n) ------------------------------->|
 ```
 
-`T0` 只有完成第 `n` 帧状态提交后，才为第 `n+1` 帧生成搜索计划。
+`T0` 只有完成第 `n` 帧状态提交后，才为第 `n+1` 帧生成搜索计划。  
+预测必须使用最近 `n` 帧窗口，不得用单帧直接决策。
 
 ### 3.3 低置信与恢复
 
@@ -110,8 +110,8 @@ T1                  T0                         T2                  T3
 | `inferResponseQueue` | `T2 -> T0` | 1 | 阻塞生产者 | `InitResponse` / `InferResponse` |
 | `resultQueue` | `T0 -> T3` | 32 | 阻塞生产者 | `ResultPacket` |
 
-比赛模式禁止丢帧。小容量队列提供背压并限制高分辨率帧的内存占用。队列传递只读帧
-句柄；最后一个消费者释放缓冲区。
+比赛模式禁止丢帧。小容量队列提供背压并限制高分辨率帧的内存占用。队列传递只读帧句柄；
+最后一个消费者释放缓冲区。
 
 ---
 
@@ -120,15 +120,14 @@ T1                  T0                         T2                  T3
 | 组件 | 运行线程 | 状态类型 |
 |------|----------|----------|
 | `AirSim360DataSource` | `T1` | 有状态、线程独占 |
-| `CompetitionAdapter.read()` | `T0` | 启动期 |
 | `SphericalMotionModel` | `T0` | 有状态、线程独占 |
 | `DTC` | `T0` | 有状态、线程独占 |
 | `RecoveryPlanner` | `T0` | 纯计算 |
+| `DepthProcessor` | `T2` | 纯计算或轻状态 |
+| `FusionHead` | `T2` | 纯计算 |
 | `BfovProjector` CPU 后端 | `T0` 或 `T2` | 无状态 |
 | `BfovProjector` GPU 后端 | `T2` | 设备独占 |
-| `DepthProcessor` | `T0` | 纯计算或轻状态 |
 | `HiTBackend` | `T2` | 有状态、设备独占 |
-| `ConfidenceFusion` | `T0` | 纯计算 |
 | `TrackStateMachine` | `T0` | 有状态、线程独占 |
 | `ResultWriter` | `T3` | 有状态、线程独占 |
 | `OtbEvaluator` | `T3` | 有状态、离线模式启用 |
@@ -142,9 +141,9 @@ CPU/GPU 投影由配置选择，但同一次运行只能启用一个实现。
 `TrackState` 使用单写者模型，仅 `T0` 可修改。每帧按以下顺序提交：
 
 1. 验证响应的 `sequenceId`、`frameIndex` 和 `stateRevision`。
-2. 读取深度摘要并计算深度门限。
+2. 读取窗口内深度摘要并计算深度门限。
 3. 回投影全部局部观测。
-4. 计算融合置信度并选择候选。
+4. 基于后端 `fusedScore`、运动连续性和尺度变化选择候选。
 5. 执行状态转移。
 6. 更新球面运动、目标尺度、深度状态和丢失计数。
 7. 生成模板命令；命令由下一次请求携带给 `T2`。

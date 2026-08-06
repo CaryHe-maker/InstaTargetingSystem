@@ -153,7 +153,8 @@ core <- geometry <- tracker <- controller <- app
 - `core` 不依赖 OpenCV、PyTorch 或具体模型。
 - `geometry` 不依赖 tracker。
 - `tracker` 不解释比赛文件格式。
-- `controller` 通过 `TrackerBackend` 协议使用模型。
+- `controller` 通过 `TrackerBackend` 协议使用模型，并独占最近 `n` 帧窗口、状态机和最终门控。
+- `tracker` 负责深度处理、局部跟踪和 MLP 融合，返回局部观测及融合分数。
 - `app` 是模块首次汇合点。
 - `eval` 可读取结果，不反向影响跟踪决策。
 
