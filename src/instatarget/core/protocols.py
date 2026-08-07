@@ -1,1 +1,202 @@
-# TODO: Shared protocol declarations.
+"""Structural interfaces between project modules."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Protocol, runtime_checkable
+
+from instatarget.core.types import (
+    AirSim360Record,
+    BBoxXYWH,
+    BFoV,
+    DepthSummary,
+    FramePacket,
+    InitializationPlan,
+    LocalObservation,
+    LocalView,
+    MotionState3D,
+    ProjectedObservation,
+    SearchPlan,
+    SphericalPoint,
+    TemplateCommand,
+    TrackResult,
+    ViewSpec,
+)
+
+
+@runtime_checkable
+class SphericalGeometry(Protocol):
+    """Convert between ERP pixels, spherical BFoVs, and local views."""
+
+    def bboxToBfov(
+        self,
+        bbox: BBoxXYWH,
+        frameWidthPx: int,
+        frameHeightPx: int,
+    ) -> BFoV: ...
+
+    def cropViews(
+        self,
+        frame: FramePacket,
+        specs: Sequence[ViewSpec],
+    ) -> Sequence[LocalView]: ...
+
+    def localBoxToBfov(
+        self,
+        localBox: BBoxXYWH,
+        spec: ViewSpec,
+    ) -> BFoV: ...
+
+    def bfovToBbox(
+        self,
+        bfov: BFoV,
+        frameWidthPx: int,
+        frameHeightPx: int,
+    ) -> BBoxXYWH: ...
+
+
+@runtime_checkable
+class DepthProcessor(Protocol):
+    """Produce target-region summaries without making tracking decisions."""
+
+    def summarize(
+        self,
+        frame: FramePacket,
+        bbox: BBoxXYWH,
+    ) -> DepthSummary | None: ...
+
+    def summarizeLocal(
+        self,
+        view: LocalView,
+        localBox: BBoxXYWH,
+    ) -> DepthSummary | None: ...
+
+
+@runtime_checkable
+class MotionEstimator(Protocol):
+    """Maintain and predict the controller-owned spherical motion state."""
+
+    def initialize(
+        self,
+        point: SphericalPoint,
+        depth: DepthSummary | None,
+        timestampNs: int,
+    ) -> MotionState3D: ...
+
+    def predict(self, timestampNs: int) -> MotionState3D: ...
+
+    def update(
+        self,
+        point: SphericalPoint,
+        depth: DepthSummary | None,
+        timestampNs: int,
+        observationConfidence: float,
+    ) -> MotionState3D: ...
+
+
+@runtime_checkable
+class TrackerBackend(Protocol):
+    """Own the local RGB/depth tracker and all device-side resources."""
+
+    def initialize(
+        self,
+        template: LocalView,
+        templateBox: BBoxXYWH,
+    ) -> None: ...
+
+    def infer(
+        self,
+        views: Sequence[LocalView],
+        command: TemplateCommand,
+    ) -> Sequence[LocalObservation]: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class TrackController(Protocol):
+    """Plan searches and atomically commit ordered tracking state."""
+
+    def buildInitialization(
+        self,
+        frame: FramePacket,
+        initialBox: BBoxXYWH,
+    ) -> InitializationPlan: ...
+
+    def commitInitialization(
+        self,
+        plan: InitializationPlan,
+        depthSummary: DepthSummary | None,
+    ) -> TrackResult: ...
+
+    def plan(self, frame: FramePacket) -> SearchPlan: ...
+
+    def update(
+        self,
+        plan: SearchPlan,
+        observations: Sequence[ProjectedObservation],
+    ) -> TrackResult: ...
+
+
+@runtime_checkable
+class FrameSource(Protocol):
+    """Read a strictly ordered sequence of aligned frame packets."""
+
+    def open(self, uri: str) -> None: ...
+
+    def read(self) -> FramePacket | None: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class ResultSink(Protocol):
+    """Write one ordered result per frame and publish it atomically."""
+
+    def open(self, destination: str) -> None: ...
+
+    def write(self, result: TrackResult) -> None: ...
+
+    def finalize(self, expectedFrameCount: int) -> None: ...
+
+
+@runtime_checkable
+class AirSim360DataSource(Protocol):
+    """Read an AirSim360 sequence through the common frame contract."""
+
+    def open(self, root: str, sequenceId: str) -> None: ...
+
+    def read(self) -> FramePacket | None: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class PseudoTrackBuilder(Protocol):
+    """Derive temporary training boxes from AirSim360 instance masks."""
+
+    def buildInitialBox(
+        self,
+        frame: FramePacket,
+        targetInstanceId: int,
+    ) -> BBoxXYWH: ...
+
+    def buildPseudoGroundTruth(
+        self,
+        frame: FramePacket,
+        targetInstanceId: int,
+    ) -> tuple[BBoxXYWH, bool]: ...
+
+
+__all__ = [
+    "AirSim360DataSource",
+    "AirSim360Record",
+    "DepthProcessor",
+    "FrameSource",
+    "MotionEstimator",
+    "PseudoTrackBuilder",
+    "ResultSink",
+    "SphericalGeometry",
+    "TrackController",
+    "TrackerBackend",
+]

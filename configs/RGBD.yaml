@@ -1,0 +1,33 @@
+schemaVersion: 1
+model:
+  backend: pytorch
+  variant: hit_small
+  weights: ../models/hit_small.pth
+  precision: fp16
+geometry:
+  viewWidthPx: 256
+  viewHeightPx: 256
+  minFovDeg: 20.0
+  maxFovDeg: 120.0
+depth:
+  enabled: true
+  minValidRatio: 0.35
+  maxDepthJumpRatio: 0.60
+backendFusion:
+  depthScoreWeight: 0.15
+decisionGate:
+  motionScoreWeight: 0.25
+  scaleScoreWeight: 0.15
+tracking:
+  acceptThreshold: 0.70
+  uncertainThreshold: 0.45
+  stableFramesBeforeUpdate: 8
+  windowLength: 5
+recovery:
+  maxViewsPerFrame: 12
+  globalSearchInterval: 5
+runtime:
+  decodeQueueCapacity: 3
+  inferRequestQueueCapacity: 1
+  inferResponseQueueCapacity: 1
+  resultQueueCapacity: 32

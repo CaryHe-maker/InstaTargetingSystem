@@ -540,7 +540,7 @@ python -m instatarget.track \
   --input input.mp4 \
   --init-box 120.0,80.0,64.0,96.0 \
   --output result.txt \
-  --config configs/hit_small_depth.yaml
+  --config configs/RGBD.yaml
 ```
 
 AirSim360 离线入口必须支持：
@@ -551,7 +551,7 @@ python -m instatarget.track_airsim360 \
   --sequence NYC_001 \
   --target-instance 305 \
   --output result.txt \
-  --config configs/hit_small_depth.yaml
+  --config configs/RGBD.yaml
 ```
 
 退出码：
@@ -576,7 +576,7 @@ schemaVersion: 1
 model:
   backend: pytorch
   variant: hit_small
-  weights: models/hit_small.pth
+  weights: ../models/hit_small.pth
   precision: fp16
 geometry:
   viewWidthPx: 256
@@ -596,16 +596,20 @@ tracking:
   acceptThreshold: 0.70
   uncertainThreshold: 0.45
   stableFramesBeforeUpdate: 8
+  windowLength: 5
 recovery:
   maxViewsPerFrame: 12
   globalSearchInterval: 5
 runtime:
   decodeQueueCapacity: 3
+  inferRequestQueueCapacity: 1
+  inferResponseQueueCapacity: 1
   resultQueueCapacity: 32
 ```
 
 未知字段默认报错；相对路径以配置文件目录为基准；角度配置可用 `Deg`，加载后立即转换为
-`Rad`。阈值必须满足 `0 <= uncertainThreshold < acceptThreshold <= 1`。
+`Rad`。阈值必须满足 `0 <= uncertainThreshold < acceptThreshold <= 1`；`windowLength >= 2`；
+所有队列容量必须为正整数。
 
 ---
 
