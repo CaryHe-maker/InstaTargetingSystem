@@ -61,26 +61,26 @@
 
 ## 3. 第三阶段：先做 RGB-only 后端
 
-- [ ] 完成 `src/instatarget/tracker/hit_backend.py`
-  - [ ] 只保留 HiT 主干推理接口
-  - [ ] 输出局部框与外观相关分数
+- [x] 完成 `src/instatarget/tracker/hit_backend.py`
+  - [x] 只保留 HiT 主干推理接口
+  - [x] 输出局部框与外观相关分数
 
-- [ ] 完成 `src/instatarget/tracker/observation.py`
-  - [ ] 定义后端输出结构
-  - [ ] 让 `modelScore / appearanceScore / depthScore / fusedScore` 可落地
+- [x] 完成 `src/instatarget/tracker/observation.py`
+  - [x] 定义后端输出结构
+  - [x] 让 `modelScore / appearanceScore / depthScore / fusedScore` 可落地
 
-- [ ] 完成 `src/instatarget/tracker/backend.py`
-  - [ ] 串起 `initialize / infer / close`
-  - [ ] 先支持 `rgb_only`
+- [x] 完成 `src/instatarget/tracker/backend.py`
+  - [x] 串起 `initialize / infer / close`
+  - [x] 先支持 `rgb_only`
 
-- [ ] 完成 `src/instatarget/tracker/template.py`
-  - [ ] 模板缓存
-  - [ ] 模板命令执行
+- [x] 完成 `src/instatarget/tracker/template.py`
+  - [x] 模板缓存
+  - [x] 模板命令执行
 
 验收：
 
-- [ ] 不接深度时也能输出稳定 `LocalObservation`
-- [ ] 后端可以独立被单测调用
+- [x] 不接深度时也能输出稳定 `LocalObservation`
+- [x] 后端可以独立被单测调用
 
 ---
 
