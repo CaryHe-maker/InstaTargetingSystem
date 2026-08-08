@@ -32,3 +32,11 @@ runtime:
   inferRequestQueueCapacity: 1
   inferResponseQueueCapacity: 1
   resultQueueCapacity: 32
+visualization:
+  enabled: false
+  outputRoot: ../outputs/visualization
+  stages:
+    - local_rgb
+    - depth_rgb
+    - backend_box
+    - geometry_box

@@ -17,6 +17,15 @@ class CoreConfigTest(unittest.TestCase):
         self.assertEqual(config.tracking.windowLength, 5)
         self.assertTrue(config.depth.enabled)
         self.assertEqual(config.model.weights, REPOSITORY_ROOT / "models" / "hit_small.pth")
+        self.assertFalse(config.visualization.enabled)
+        self.assertEqual(
+            config.visualization.outputRoot,
+            REPOSITORY_ROOT / "outputs" / "visualization",
+        )
+        self.assertEqual(
+            config.visualization.stages,
+            frozenset({"local_rgb", "depth_rgb", "backend_box", "geometry_box"}),
+        )
 
     def testLoadConfigRejectsUnknownFields(self) -> None:
         source = (REPOSITORY_ROOT / "configs" / "RGBonly.yaml").read_text(encoding="utf-8")
@@ -31,6 +40,16 @@ class CoreConfigTest(unittest.TestCase):
     def testLoadConfigRejectsInvertedThresholds(self) -> None:
         source = (REPOSITORY_ROOT / "configs" / "RGBonly.yaml").read_text(encoding="utf-8")
         source = source.replace("uncertainThreshold: 0.45", "uncertainThreshold: 0.80")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "invalid.yaml"
+            path.write_text(source, encoding="utf-8")
+            with self.assertRaises(ConfigError):
+                loadConfig(path)
+
+    def testLoadConfigRejectsUnknownVisualizationStage(self) -> None:
+        source = (REPOSITORY_ROOT / "configs" / "RGBonly.yaml").read_text(encoding="utf-8")
+        source = source.replace("    - geometry_box", "    - geometry_box\n    - unknown")
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "invalid.yaml"

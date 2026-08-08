@@ -10,6 +10,9 @@ from typing import cast
 from instatarget.core.errors import ConfigError
 
 SUPPORTED_SCHEMA_VERSION = 1
+VISUALIZATION_STAGES = frozenset(
+    {"local_rgb", "depth_rgb", "backend_box", "geometry_box"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +126,20 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class VisualizationConfig:
+    enabled: bool
+    outputRoot: Path
+    stages: frozenset[str]
+
+    def __post_init__(self) -> None:
+        unknown = self.stages - VISUALIZATION_STAGES
+        if unknown:
+            raise ConfigError(f"unsupported visualization stages: {sorted(unknown)}")
+        if self.enabled and not self.stages:
+            raise ConfigError("visualization.stages must not be empty when enabled")
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     schemaVersion: int
     model: ModelConfig
@@ -133,6 +150,7 @@ class AppConfig:
     tracking: TrackingConfig
     recovery: RecoveryConfig
     runtime: RuntimeConfig
+    visualization: VisualizationConfig
     sourcePath: Path
 
 
@@ -166,6 +184,7 @@ def loadConfig(path: str | Path) -> AppConfig:
             "tracking",
             "recovery",
             "runtime",
+            "visualization",
         },
     )
 
@@ -201,11 +220,17 @@ def loadConfig(path: str | Path) -> AppConfig:
             "resultQueueCapacity",
         },
     )
+    visualizationRaw = _section(root, "visualization", {"enabled", "outputRoot", "stages"})
 
     weightsValue = _requireStr("model.weights", modelRaw["weights"])
     weightsPath = Path(weightsValue).expanduser()
     if not weightsPath.is_absolute():
         weightsPath = (configPath.parent / weightsPath).resolve()
+
+    outputRootValue = _requireStr("visualization.outputRoot", visualizationRaw["outputRoot"])
+    outputRoot = Path(outputRootValue).expanduser()
+    if not outputRoot.is_absolute():
+        outputRoot = (configPath.parent / outputRoot).resolve()
 
     return AppConfig(
         schemaVersion=schemaVersion,
@@ -282,6 +307,11 @@ def loadConfig(path: str | Path) -> AppConfig:
                 "runtime.resultQueueCapacity", runtimeRaw["resultQueueCapacity"]
             ),
         ),
+        visualization=VisualizationConfig(
+            enabled=_requireBool("visualization.enabled", visualizationRaw["enabled"]),
+            outputRoot=outputRoot,
+            stages=_requireStringSet("visualization.stages", visualizationRaw["stages"]),
+        ),
         sourcePath=configPath,
     )
 
@@ -340,6 +370,16 @@ def _requireFloat(name: str, value: object) -> float:
     if not isfinite(result):
         raise ConfigError(f"{name} must be finite")
     return result
+
+
+def _requireStringSet(name: str, value: object) -> frozenset[str]:
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        raise ConfigError(f"{name} must be a list of non-empty strings")
+    if len(value) != len(set(value)):
+        raise ConfigError(f"{name} must not contain duplicates")
+    return frozenset(value)
 
 
 def _degreesToRadians(name: str, valueDeg: float) -> float:

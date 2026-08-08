@@ -48,6 +48,18 @@ FrameSource
    -> ResultSink
 ```
 
+人工诊断时，应用编排层可选择把各阶段的只读结果旁路到 `visualization`：
+
+```text
+geometry local RGB ----------------------\
+existing depth-to-RGB result -------------+-> visualization -> lossless PNG
+TrackerBackend local observations --------+
+geometry projected observations ----------/
+```
+
+该旁路默认关闭，不进入跟踪闭环，也不改变任何计算结果。深度 RGB 由主项目现有转换模块生成，
+`visualization` 只读取并原样保存，不维护第二套深度颜色化实现。
+
 第四阶段预留的后端拓扑是：
 
 ```text
@@ -63,6 +75,7 @@ depth -> relief color -> HiT-Depth -----/
 | `TrackerBackend` | 当前只负责局部 RGB 跟踪与模板执行；深度处理和 MLP 融合预留到下一阶段 |
 | `fusion` | 候选排序与最终门控 |
 | `ResultSink` | 输出比赛格式和诊断日志 |
+| `visualization` | 可选保存局部 RGB、已有深度 RGB、后端局部框和 geometry ERP 框 |
 
 模块依赖方向固定为：
 
@@ -70,7 +83,13 @@ depth -> relief color -> HiT-Depth -----/
 core <- geometry <- tracker <- controller <- app
                      ^              |
                      +--------------+
+
+core <- visualization <- app
 ```
+
+`geometry`、`tracker` 和 `controller` 不依赖 `visualization`。所有采集点由 `app` 调用，保证关闭
+可视化后现有模块框架和数据流不变。输出统一为无损 PNG，框颜色固定为荧光绿 `#39FF14`；目录、
+阶段选择和使用方法见 `docs/visualization.md`。
 
 ---
 
@@ -203,6 +222,7 @@ InstaTargetingSystem/
     controller/
     io/
     eval/
+    visualization/
 ```
 
 ---
@@ -224,3 +244,4 @@ InstaTargetingSystem/
 - `HiT` 主干当前只走 RGB。
 - 第四阶段的深度颜色化与融合头可以独立训练。
 - `rgb_only` 当前已跑通；`rgb_depth` 仍是后续目标。
+- 可按配置选择记录四类中间图，且关闭可视化时不改变原计算链路。
