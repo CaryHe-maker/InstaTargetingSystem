@@ -1,6 +1,6 @@
 # InstaTargetingSystem 超参数索引
 
-> 本文档登记当前实现中会改变模型选择、计算精度、几何视野、深度门控、决策、恢复或运行资源的全部配置项。
+> 本文档登记当前配置文件和预留设计中会改变模型选择、计算精度、几何视野、深度门控、决策、恢复或运行资源的全部配置项。
 > 行号以当前仓库版本为准；配置结构调整后必须同步更新。实验记录中的指标建议至少填写 `AUC`、`Success Rate@0.5` 和 `FPS`。
 
 ---
@@ -25,7 +25,7 @@
 
 ## 2. `configs/RGBD.yaml`
 
-该文件是第一阶段的 RGB-D 主配置。
+该文件是未来 RGB-D 形态的主配置草案；当前第三阶段主要以 `configs/RGBonly.yaml` 作为运行配置。
 
 | 参数名 | 当前行 | 当前值 | 简要职能 | 调大或切换后的主要影响 |
 |---|---:|---|---|---|
@@ -38,10 +38,10 @@
 | `geometry.boundarySamplesPerEdge` | 10 | `65` | 控制每条边界的采样预算 | 调大可提高极区与跨经线边界的包络精度，但增加几何计算成本 |
 | `geometry.minFovDeg` | 11 | `20.0` | 限制最小搜索视场 | 调大可覆盖更大位移，但目标像素占比下降 |
 | `geometry.maxFovDeg` | 12 | `120.0` | 限制最大搜索视场 | 调大有利于恢复大位移目标，但畸变、误匹配和成本上升 |
-| `depth.enabled` | 14 | `true` | 开关完整深度链路 | 开启后可做距离与恢复门控，同时增加计算和数据依赖 |
-| `depth.minValidRatio` | 15 | `0.35` | 深度摘要最小有效像素比例 | 调大可提高深度可靠性，但会更频繁退化为 RGB-only |
-| `depth.maxDepthJumpRatio` | 16 | `0.60` | 允许的相邻深度跳变比例 | 调大可容忍快速距离变化，但更易接受异常深度 |
-| `backendFusion.depthScoreWeight` | 18 | `0.15` | 控制深度分数在后端融合中的权重 | 调大增强深度影响，也会放大深度噪声风险 |
+| `depth.enabled` | 14 | `true` | 未来完整深度链路开关 | 当前第三阶段不生效；第四阶段开启后才增加计算和数据依赖 |
+| `depth.minValidRatio` | 15 | `0.35` | 未来深度摘要最小有效像素比例 | 当前第三阶段不参与打分；第四阶段调大可提高深度可靠性 |
+| `depth.maxDepthJumpRatio` | 16 | `0.60` | 未来允许的相邻深度跳变比例 | 当前第三阶段不参与打分；第四阶段调大可容忍快速距离变化 |
+| `backendFusion.depthScoreWeight` | 18 | `0.15` | 未来深度分数在后端融合中的权重 | 当前第三阶段不生效；第四阶段调大增强深度影响，也会放大深度噪声风险 |
 | `decisionGate.motionScoreWeight` | 20 | `0.25` | 控制运动连续性门控权重 | 调大更偏好预测轨迹附近候选，可能抑制突变运动 |
 | `decisionGate.scaleScoreWeight` | 21 | `0.15` | 控制尺度连续性门控权重 | 调大更排斥尺度突变，也可能错过快速接近目标 |
 | `tracking.acceptThreshold` | 23 | `0.70` | 直接接受观测的最低置信度 | 调大可减少误接受，但会增加不确定和恢复状态 |
@@ -91,7 +91,7 @@
 
 ## 3. `configs/RGBonly.yaml`
 
-该文件是第一阶段的 RGB-only 退化配置。参数职责与 RGB-D 配置相同，差异值重点用于对照实验。
+该文件是当前第三阶段的 RGB-only 运行配置。参数职责与 RGB-D 配置相同，差异值重点用于对照实验。
 
 | 参数名 | 当前行 | 当前值 | 简要职能 | 与 RGB-D 主配置的差异 |
 |---|---:|---|---|---|
@@ -104,10 +104,10 @@
 | `geometry.boundarySamplesPerEdge` | 10 | `65` | 控制每条边界的采样预算 | 相同 |
 | `geometry.minFovDeg` | 11 | `20.0` | 限制最小搜索视场 | 相同 |
 | `geometry.maxFovDeg` | 12 | `120.0` | 限制最大搜索视场 | 相同 |
-| `depth.enabled` | 14 | `false` | 开关完整深度链路 | 关闭深度链路 |
-| `depth.minValidRatio` | 15 | `0.35` | 深度摘要最小有效像素比例 | 深度关闭时保留，便于切换配置 |
-| `depth.maxDepthJumpRatio` | 16 | `0.60` | 允许的相邻深度跳变比例 | 深度关闭时保留，便于切换配置 |
-| `backendFusion.depthScoreWeight` | 18 | `0.0` | 控制深度分数在后端融合中的权重 | 深度权重归零 |
+| `depth.enabled` | 14 | `false` | 深度链路预留开关 | 当前第三阶段保持关闭 |
+| `depth.minValidRatio` | 15 | `0.35` | 未来深度摘要最小有效像素比例 | 当前后端不读取；保留用于后续切换配置 |
+| `depth.maxDepthJumpRatio` | 16 | `0.60` | 未来允许的相邻深度跳变比例 | 当前后端不读取；保留用于后续切换配置 |
+| `backendFusion.depthScoreWeight` | 18 | `0.0` | 未来深度分数融合权重 | 当前 RGB-only 后端固定为零 |
 | `decisionGate.motionScoreWeight` | 20 | `0.25` | 控制运动连续性门控权重 | 相同 |
 | `decisionGate.scaleScoreWeight` | 21 | `0.15` | 控制尺度连续性门控权重 | 相同 |
 | `tracking.acceptThreshold` | 23 | `0.70` | 直接接受观测的最低置信度 | 相同 |
@@ -187,3 +187,29 @@ HiT 的模型、权重、精度仍由现有 `model.*` 参数控制；RGB-only �
 以下固定行为也不计入超参数：锚点/近期/稳定三个模板槽位、模板特征传递顺序、命令 revision
 校验规则、局部框裁剪规则以及 `latencyNs` 的单调时钟来源。任何将来改变这些行为的数值配置，
 必须先新增 YAML 字段，再在本文档登记。
+
+---
+
+## 7. 第四阶段深度颜色化与双 HiT 融合预留
+
+以下条目目前不进入现有 YAML，只作为下一阶段的设计占位。等深度伪彩色分支和双 HiT 融合头真正落地后，
+必须先把它们写进配置文件，再回填到本表。
+
+| 参数名 | 建议默认值 | 简要职能 | 备注 |
+|---|---:|---|---|
+| `depth.colorization.mode` | `relief` | 选择深度到颜色的编码方式 | 推荐浮雕式单调映射 |
+| `depth.colorization.nearBrightness` | `0.95` | 近处亮度上限 | 站立前景更亮 |
+| `depth.colorization.farBrightness` | `0.20` | 远处亮度下限 | 地面与背景更暗 |
+| `depth.colorization.reliefGain` | `1.00` | 浮雕起伏增益 | 控制前景“凸出”强度 |
+| `depth.colorization.edgeGain` | `0.35` | 轮廓增强增益 | 控制边缘锐化程度 |
+| `depth.colorization.smoothingKernel` | `7` | 背景平滑核尺寸 | 估计地面/背景平面 |
+| `fusionHead.rgbInitWeight` | `0.70` | 融合头初始 RGB 权重 | 初值偏向主视觉分支 |
+| `fusionHead.depthInitWeight` | `0.20` | 融合头初始深度权重 | 深度作为辅助判别 |
+| `fusionHead.contextInitWeight` | `0.10` | 融合头初始上下文权重 | 模板 / 运动 / 尺度残差 |
+
+### 7.1 设计说明
+
+- 这些参数只服务于第四阶段，不会改变当前第三阶段行为。
+- `depth.colorization.*` 用于把深度图转成更容易被 HiT 分辨轮廓的伪彩色图。
+- `fusionHead.*` 只用于 MLP 融合头的初始值和训练起点，不代表最终固定权重。
+- 若后续选择改成显式深度编码器，也应保留同一组接口命名，以免文档和实验记录断裂。

@@ -154,7 +154,7 @@ core <- geometry <- tracker <- controller <- app
 - `geometry` 不依赖 tracker。
 - `tracker` 不解释比赛文件格式。
 - `controller` 通过 `TrackerBackend` 协议使用模型，并独占最近 `n` 帧窗口、状态机和最终门控。
-- `tracker` 负责深度处理、局部跟踪和 MLP 融合，返回局部观测及融合分数。
+- `tracker` 当前负责 RGB 局部跟踪、模板命令和观测规范化；第四阶段才扩展深度处理和 MLP 融合。
 - `app` 是模块首次汇合点。
 - `eval` 可读取结果，不反向影响跟踪决策。
 
@@ -241,7 +241,7 @@ if frame.frameIndex != expectedFrameIndex:
 
 ## 8. 配置与资源
 
-- 所有超参数进入 YAML，不写死在算法代码中。
+- 已落地运行超参数进入 YAML；新增或预留超参数必须先登记到 `docs/hyperparameters.md`，实现落地时再同步写入 YAML。
 - 配置包含 `schemaVersion`，未知字段报错。
 - 路径使用 `pathlib.Path`，相对配置文件解析。
 - 权重、数据集、推理引擎和结果大文件不提交 Git。

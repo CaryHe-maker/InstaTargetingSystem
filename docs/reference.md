@@ -61,6 +61,22 @@
 
    GitHub 仓库地址：[https://github.com/DepthAnything/Depth-Anything-V2](https://github.com/DepthAnything/Depth-Anything-V2)
 
+8. 项目名：space-stream
+
+   借鉴技术：深度 codec、`Linear` / `UniformHue` / `InverseHue` 编码、深度流伪彩色表达。
+
+   技术简要介绍：用于参考“把深度转成更容易被视觉主干消费的颜色图”的做法。它更接近当前阶段想要的浮雕式深度颜色化路线，而不是单纯给深度图染色。
+
+   GitHub 仓库地址：[https://github.com/cansik/space-stream](https://github.com/cansik/space-stream)
+
+9. 项目名：Intel RealSense / librealsense examples
+
+   借鉴技术：`align-depth2color`、深度与彩色对齐、深度伪彩色显示。
+
+   技术简要介绍：用于参考深度与彩色对齐、深度图可视化和伪彩色转换的基础做法，适合作为深度转颜色前处理的工程参照。
+
+   GitHub 仓库地址：[https://github.com/IntelRealSense/librealsense](https://github.com/IntelRealSense/librealsense)
+
 ---
 
 ## 说明

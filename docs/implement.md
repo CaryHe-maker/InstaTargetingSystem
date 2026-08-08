@@ -88,24 +88,28 @@
 
 - [ ] 完成 `src/instatarget/tracker/depth_preprocessor.py`
   - [ ] 深度归一化
-  - [ ] 裁剪
+  - [ ] 估计局部背景面
+  - [ ] 浮雕式深度颜色化
+  - [ ] 轮廓增强
   - [ ] 缺失值掩码
-  - [ ] 生成 `DepthSummary`
 
 - [ ] 完成 `src/instatarget/tracker/depth_encoder.py`
-  - [ ] 深度特征编码
+  - [ ] 深度伪彩色图编码
+  - [ ] 第二个 HiT 深度分支适配
 
 - [ ] 完成 `src/instatarget/tracker/fusion_head.py`
-  - [ ] 融合 RGB 特征、深度特征、模板上下文
+  - [ ] 融合 RGB HiT、深度 HiT、模板上下文与轻量几何参数
   - [ ] 输出 `fusedScore`
 
 - [ ] 回填 `src/instatarget/tracker/backend.py`
+  - [ ] 保持 `rgb_only` 退化路径
   - [ ] 支持 `rgb_depth`
   - [ ] 输出 `depthScore` 和 `fusedScore`
 
 验收：
 
 - [ ] `rgb_only` 和 `rgb_depth` 都能走通
+- [ ] 深度颜色化能明显增强轮廓对比
 - [ ] `fusedScore` 由后端统一产生
 
 ---

@@ -13,8 +13,8 @@
 | 初始框 | 属于第 0 帧，格式为像素 `xywh` |
 | 数据入口 | AirSim360 入口必须至少提供 ERP RGB；Depth 可缺省 |
 | 内部位置 | 使用单位球面坐标、BFoV 和可选深度状态 |
-| 跟踪模型 | HiT 只接收局部透视 RGB 图，深度在后端内先预处理后再参与融合 |
-| 深度使用 | 深度图处理、HiT 跟踪和 MLP 融合统一封装进 `TrackerBackend` |
+| 跟踪模型 | 当前第三阶段 HiT 只接收局部透视 RGB 图；深度分支为第四阶段预留 |
+| 深度使用 | 当前不参与后端主链路；未来深度预处理、第二个 HiT 和 MLP 融合统一封装进 `TrackerBackend` |
 | 输出 | 每个输入帧恰好一个 `TrackResult` |
 | 日志 | 比赛输出与日志分离；日志写 `stderr` |
 | 配置 | 启动时完成校验，运行期间只读 |
@@ -279,6 +279,9 @@ class MotionEstimator(Protocol):
     ) -> MotionState3D: ...
 ```
 
+`DepthProcessor` 是第四阶段预留协议。当前第三阶段可以保留类型定义，但运行链路不调用它；
+`DepthSummary` 只作为结果和消息字段中的可选占位。
+
 `MotionEstimator` 可用常速度模型或 Kalman Filter。无深度时只更新球面方向；深度无效时
 不得用默认距离污染速度。控制层内部按最近 `n` 帧窗口维护预测状态，单帧只是窗口中的一项观测，
 不是独立决策依据。
@@ -337,7 +340,8 @@ class TrackerBackend(Protocol):
 - `initialize()` 每个序列恰好调用一次；重复调用必须先 `close()`。
 - `infer()` 输出与输入视图一一对应且顺序一致。
 - 局部框必须已裁剪到视图有效区域。
-- 后端内部可以读取深度并完成深度预处理、编码与融合，但不得生成 BFoV、改变状态机或执行全局搜索规划。
+- 当前第三阶段的实现只消费 `LocalView.rgb`，并将 `depthScore` 固定为 `0.0`、`fusedScore` 固定为 `appearanceScore`、`depthSummary` 固定为 `None`。
+- 第四阶段若启用 RGB-D，后端内部可以读取深度并完成深度预处理、编码与融合，但不得生成 BFoV、改变状态机或执行全局搜索规划。
 - 同一后端实例只允许设备线程调用。
 - 不支持在线模板的后端必须只接受 `KEEP`，其能力在启动时声明。
 
@@ -404,8 +408,8 @@ class TrackController(Protocol):
 `buildInitialization()` 生成首帧模板视图和该视图中的模板框；
 `commitInitialization()` 仅在后端初始化成功后提交第 0 帧。`plan()` 必须使用最近 `n` 帧的
 运动状态、深度摘要和置信度生成搜索视图。`update()` 必须校验帧号和 revision，并原子提交
-状态；失败时原状态保持不变。控制层在 `update()` 内只做候选选择、状态更新和轻量门控，
-不再承担深度神经网络或 MLP 融合。
+状态；失败时原状态保持不变。控制层在 `update()` 内只做候选选择、状态更新和轻量门控。
+当前第三阶段没有深度神经网络或 MLP 融合；第四阶段启用后也不得把这些后端计算上移到控制层。
 
 `ProjectedObservation.depthScore` 和 `ProjectedObservation.fusedScore` 由 `TrackerBackend` 产生；
 `motionScore` 与 `scaleScore` 由控制层补充。
@@ -495,6 +499,8 @@ class FatalError:
     frameIndex: FrameIndex | None
 ```
 
+当前第三阶段的 `InferResponse.depthSummaries` 必须为空字典；深度摘要字典只给第四阶段预留。
+
 所有请求和响应必须携带帧号与 revision。`T0` 不接受旧响应；工作线程不捕获并吞掉
 异常，而是转换为一次 `FatalError`。
 
@@ -540,7 +546,7 @@ python -m instatarget.track \
   --input input.mp4 \
   --init-box 120.0,80.0,64.0,96.0 \
   --output result.txt \
-  --config configs/RGBD.yaml
+  --config configs/RGBonly.yaml
 ```
 
 AirSim360 离线入口必须支持：
@@ -551,7 +557,7 @@ python -m instatarget.track_airsim360 \
   --sequence NYC_001 \
   --target-instance 305 \
   --output result.txt \
-  --config configs/RGBD.yaml
+  --config configs/RGBonly.yaml
 ```
 
 退出码：
@@ -577,18 +583,18 @@ model:
   backend: pytorch
   variant: hit_small
   weights: ../models/hit_small.pth
-  precision: fp16
+  precision: fp32
 geometry:
   viewWidthPx: 256
   viewHeightPx: 256
   minFovDeg: 20.0
   maxFovDeg: 120.0
 depth:
-  enabled: true
+  enabled: false
   minValidRatio: 0.35
   maxDepthJumpRatio: 0.60
 backendFusion:
-  depthScoreWeight: 0.15
+  depthScoreWeight: 0.0
 decisionGate:
   motionScoreWeight: 0.25
   scaleScoreWeight: 0.15
