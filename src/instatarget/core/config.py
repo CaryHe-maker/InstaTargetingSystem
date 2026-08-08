@@ -32,12 +32,15 @@ class ModelConfig:
 class GeometryConfig:
     viewWidthPx: int
     viewHeightPx: int
+    boundarySamplesPerEdge: int
     minFovRad: float
     maxFovRad: float
 
     def __post_init__(self) -> None:
         if self.viewWidthPx <= 0 or self.viewHeightPx <= 0:
             raise ConfigError("geometry view dimensions must be positive")
+        if self.boundarySamplesPerEdge < 2:
+            raise ConfigError("geometry.boundarySamplesPerEdge must be at least 2")
         if not 0.0 < self.minFovRad < self.maxFovRad < pi:
             raise ConfigError("geometry FOV must satisfy 0 < minFovRad < maxFovRad < pi")
 
@@ -175,7 +178,9 @@ def loadConfig(path: str | Path) -> AppConfig:
 
     modelRaw = _section(root, "model", {"backend", "variant", "weights", "precision"})
     geometryRaw = _section(
-        root, "geometry", {"viewWidthPx", "viewHeightPx", "minFovDeg", "maxFovDeg"}
+        root,
+        "geometry",
+        {"viewWidthPx", "viewHeightPx", "boundarySamplesPerEdge", "minFovDeg", "maxFovDeg"},
     )
     depthRaw = _section(root, "depth", {"enabled", "minValidRatio", "maxDepthJumpRatio"})
     fusionRaw = _section(root, "backendFusion", {"depthScoreWeight"})
@@ -213,6 +218,9 @@ def loadConfig(path: str | Path) -> AppConfig:
         geometry=GeometryConfig(
             viewWidthPx=_requireInt("geometry.viewWidthPx", geometryRaw["viewWidthPx"]),
             viewHeightPx=_requireInt("geometry.viewHeightPx", geometryRaw["viewHeightPx"]),
+            boundarySamplesPerEdge=_requireInt(
+                "geometry.boundarySamplesPerEdge", geometryRaw["boundarySamplesPerEdge"]
+            ),
             minFovRad=_degreesToRadians(
                 "geometry.minFovDeg", _requireFloat("geometry.minFovDeg", geometryRaw["minFovDeg"])
             ),

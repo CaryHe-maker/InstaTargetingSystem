@@ -37,25 +37,25 @@
 
 ## 2. 第二阶段：先把几何跑通
 
-- [ ] 完成 `src/instatarget/geometry/spherical_geometry.py`
-  - [ ] 球面坐标与单位向量转换
-  - [ ] yaw / pitch 规范化
+- [x] 完成 `src/instatarget/geometry/spherical_geometry.py`
+  - [x] 球面坐标与单位向量转换
+  - [x] yaw / pitch 规范化
 
-- [ ] 完成 `src/instatarget/geometry/bfov_projector.py`
-  - [ ] ERP 到 BFoV 的裁剪
-  - [ ] BFoV 到局部框的回投影
+- [x] 完成 `src/instatarget/geometry/bfov_projector.py`
+  - [x] ERP 到 BFoV 的裁剪
+  - [x] BFoV 到局部框的回投影
 
-- [ ] 完成 `src/instatarget/geometry/projection_math.py`
-  - [ ] 视场、角度、像素之间的转换
+- [x] 完成 `src/instatarget/geometry/projection_math.py`
+  - [x] 视场、角度、像素之间的转换
 
-- [ ] 完成 `src/instatarget/geometry/seam.py`
-  - [ ] 跨经线框处理
+- [x] 完成 `src/instatarget/geometry/seam.py`
+  - [x] 跨经线框处理
 
 验收：
 
-- [ ] RGB 裁剪结果稳定
-- [ ] 深度和 RGB 能同步裁剪到同一视场
-- [ ] 不引入状态机逻辑
+- [x] RGB 裁剪结果稳定
+- [x] 深度和 RGB 能同步裁剪到同一视场
+- [x] 不引入状态机逻辑
 
 ---
 

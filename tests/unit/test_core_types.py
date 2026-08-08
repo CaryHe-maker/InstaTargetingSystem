@@ -1,6 +1,7 @@
 import unittest
 
 import numpy as np
+
 from instatarget.core.errors import DepthError, ProtocolError
 from instatarget.core.types import (
     BBoxXYWH,

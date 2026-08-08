@@ -13,6 +13,7 @@ class CoreConfigTest(unittest.TestCase):
         config = loadConfig(REPOSITORY_ROOT / "configs" / "RGBD.yaml")
 
         self.assertAlmostEqual(config.geometry.minFovRad, 0.3490658503988659)
+        self.assertEqual(config.geometry.boundarySamplesPerEdge, 65)
         self.assertEqual(config.tracking.windowLength, 5)
         self.assertTrue(config.depth.enabled)
         self.assertEqual(config.model.weights, REPOSITORY_ROOT / "models" / "hit_small.pth")
