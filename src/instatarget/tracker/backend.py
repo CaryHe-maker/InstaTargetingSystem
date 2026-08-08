@@ -1,13 +1,24 @@
-"""RGB-only TrackerBackend facade with template command execution."""
+"""TrackerBackend facade supporting RGB-only and optional RGB-D inference."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from time import perf_counter_ns
 
-from instatarget.core.errors import ProtocolError
+import numpy as np
+
+from instatarget.core.errors import ModelError, ProtocolError
 from instatarget.core.protocols import TrackerBackend as TrackerBackendProtocol
-from instatarget.core.types import BBoxXYWH, LocalObservation, LocalView, TemplateCommand
+from instatarget.core.types import (
+    BBoxXYWH,
+    DepthPlane,
+    LocalObservation,
+    LocalView,
+    TemplateCommand,
+)
+from instatarget.tracker.depth_encoder import DepthEncoder, DepthPrediction
+from instatarget.tracker.depth_preprocessor import DepthPreprocessor
+from instatarget.tracker.fusion_head import FusionHead
 from instatarget.tracker.hit_backend import HiTBackend
 from instatarget.tracker.observation import buildRgbObservation
 from instatarget.tracker.template import TemplateCache
@@ -16,10 +27,29 @@ from instatarget.tracker.template import TemplateCache
 class TrackerBackendImpl(TrackerBackendProtocol):
     """Own the HiT session, template slots, and local RGB observations."""
 
-    def __init__(self, hitBackend: HiTBackend) -> None:
+    def __init__(
+        self,
+        hitBackend: HiTBackend,
+        depthProcessor: DepthPreprocessor | None = None,
+        depthEncoder: DepthEncoder | None = None,
+        fusionHead: FusionHead | None = None,
+        *,
+        depthBackend: DepthEncoder | None = None,
+        depthEnabled: bool | None = None,
+        depthScoreWeight: float = 0.15,
+    ) -> None:
         self._hitBackend = hitBackend
         self._templates = TemplateCache()
         self._previousViews: dict[int, LocalView] = {}
+        self._depthProcessor = depthProcessor
+        self._depthEncoder = depthEncoder if depthEncoder is not None else depthBackend
+        self._fusionHead = fusionHead or FusionHead(depthScoreWeight=depthScoreWeight)
+        self._depthEnabled = (
+            bool(depthEnabled)
+            if depthEnabled is not None
+            else self._depthProcessor is not None or self._depthEncoder is not None
+        )
+        self._depthTemplates: list[object] = []
         self._initialized = False
         self._closed = False
 
@@ -33,6 +63,8 @@ class TrackerBackendImpl(TrackerBackendProtocol):
         if self._initialized:
             raise ProtocolError("tracker backend is already initialized")
         self._templates.initialize(self._hitBackend, template, templateBox)
+        if self._depthEnabled and template.depth is not None and self._depthEncoder is not None:
+            self._depthTemplates = [self._encodeDepthTemplate(template, templateBox)]
         self._initialized = True
         self._previousViews = {template.spec.viewId: _copyView(template)}
 
@@ -46,14 +78,46 @@ class TrackerBackendImpl(TrackerBackendProtocol):
         if not self._initialized:
             raise ProtocolError("tracker backend has not been initialized")
         _validateViewSequence(views)
+        pendingDepthFeature = self._prepareDepthCommand(command)
         self._templates.apply(self._hitBackend, command, self._previousViews)
+        self._commitDepthCommand(command, pendingDepthFeature)
         snapshot = self._templates.snapshot()
         observations: list[LocalObservation] = []
         for view in views:
             startedNs = perf_counter_ns()
             prediction = self._hitBackend.infer(view.rgb, snapshot.features)
+            if not self._depthEnabled or view.depth is None:
+                observations.append(
+                    buildRgbObservation(view, prediction, perf_counter_ns() - startedNs)
+                )
+                continue
+            depthSummary = (
+                self._depthProcessor.summarizeLocal(view, prediction.bbox)
+                if self._depthProcessor is not None
+                else None
+            )
+            depthScore = self._inferDepthScore(view, tuple(self._depthTemplates))
+            if depthSummary is None:
+                depthScore = 0.0
+            elif self._depthProcessor is not None and self._depthEncoder is None:
+                depthScore = self._depthProcessor.score(depthSummary)
+            fusedScore = self._fusionHead.fuse(
+                prediction.appearanceScore,
+                depthScore,
+                contextScore=prediction.modelScore,
+                depthAvailable=depthSummary is not None,
+            )
             observations.append(
-                buildRgbObservation(view, prediction, perf_counter_ns() - startedNs)
+                LocalObservation(
+                    viewId=view.spec.viewId,
+                    bbox=buildRgbObservation(view, prediction, 0).bbox,
+                    modelScore=prediction.modelScore,
+                    appearanceScore=prediction.appearanceScore,
+                    depthScore=depthScore,
+                    fusedScore=fusedScore,
+                    depthSummary=depthSummary,
+                    latencyNs=perf_counter_ns() - startedNs,
+                )
             )
         self._previousViews = {view.spec.viewId: _copyView(view) for view in views}
         return observations
@@ -62,9 +126,81 @@ class TrackerBackendImpl(TrackerBackendProtocol):
         if self._closed:
             return
         self._hitBackend.close()
+        if self._depthEncoder is not None and hasattr(self._depthEncoder, "close"):
+            self._depthEncoder.close()
         self._templates.clear()
         self._previousViews.clear()
+        self._depthTemplates.clear()
         self._closed = True
+
+    def _encodeDepthTemplate(self, view: LocalView, bbox: BBoxXYWH | None = None) -> object:
+        if self._depthProcessor is None or self._depthEncoder is None or view.depth is None:
+            raise ProtocolError("depth template requires a depth processor, encoder and depth view")
+        image = self._depthProcessor.colorize(view.depth)
+        encoder = self._depthEncoder
+        if hasattr(encoder, "encodeTemplate"):
+            try:
+                return encoder.encodeTemplate(image, bbox)
+            except TypeError:
+                return encoder.encodeTemplate(image)
+        if hasattr(encoder, "encode"):
+            return encoder.encode(image)
+        raise ProtocolError("depth encoder must implement encode or encodeTemplate")
+
+    def _inferDepthScore(self, view: LocalView, templateFeatures: tuple[object, ...]) -> float:
+        if self._depthProcessor is None or self._depthEncoder is None or view.depth is None:
+            return 0.0
+        image = self._depthProcessor.colorize(view.depth)
+        try:
+            result = self._depthEncoder.infer(image, templateFeatures)
+        except (ProtocolError, ModelError):
+            raise
+        except Exception as error:
+            raise ModelError(f"depth branch inference failed: {error}") from error
+        if isinstance(result, DepthPrediction):
+            return result.depthScore
+        score = getattr(result, "depthScore", getattr(result, "appearanceScore", result))
+        try:
+            score = float(score)
+        except (TypeError, ValueError) as error:
+            raise ModelError("depth branch returned an invalid score") from error
+        if not np.isfinite(score) or not 0.0 <= score <= 1.0:
+            raise ModelError("depth branch score must be in [0, 1]")
+        return score
+
+    def _prepareDepthCommand(self, command: TemplateCommand) -> object | None:
+        if not self._depthEnabled or self._depthEncoder is None:
+            return None
+        if command.kind.name == "RESET_TO_ANCHOR":
+            return None
+        if command.kind.name not in {"UPDATE_RECENT", "UPDATE_STABLE"}:
+            return None
+        if not getattr(self._depthEncoder, "supportsOnlineTemplates", True):
+            raise ProtocolError("depth HiT session does not support online template commands")
+        if command.viewId is None or command.localBox is None:
+            return None
+        view = self._previousViews.get(command.viewId)
+        if view is None or view.depth is None or self._depthProcessor is None:
+            return None
+        return self._encodeDepthTemplate(view, command.localBox)
+
+    def _commitDepthCommand(self, command: TemplateCommand, feature: object | None) -> None:
+        if not self._depthEnabled or self._depthEncoder is None:
+            return
+        if command.kind.name == "RESET_TO_ANCHOR":
+            self._depthTemplates = self._depthTemplates[:1]
+            return
+        if feature is None or command.kind.name not in {"UPDATE_RECENT", "UPDATE_STABLE"}:
+            return
+        if command.kind.name == "UPDATE_RECENT":
+            if len(self._depthTemplates) == 1:
+                self._depthTemplates.append(feature)
+            else:
+                self._depthTemplates[1] = feature
+        else:
+            while len(self._depthTemplates) < 3:
+                self._depthTemplates.append(self._depthTemplates[0])
+            self._depthTemplates[2] = feature
 
 
 def _validateViewSequence(views: Sequence[LocalView]) -> None:
@@ -76,7 +212,14 @@ def _validateViewSequence(views: Sequence[LocalView]) -> None:
 def _copyView(view: LocalView) -> LocalView:
     rgb = view.rgb.copy()
     rgb.setflags(write=False)
-    return LocalView(spec=view.spec, rgb=rgb)
+    depth = view.depth
+    if depth is not None:
+        values = depth.values.copy()
+        mask = depth.validMask.copy()
+        values.setflags(write=False)
+        mask.setflags(write=False)
+        depth = DepthPlane(values=values, validMask=mask, unit=depth.unit)
+    return LocalView(spec=view.spec, rgb=rgb, depth=depth)
 
 
 TrackerBackend = TrackerBackendImpl

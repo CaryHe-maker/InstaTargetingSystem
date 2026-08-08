@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import isfinite, pi
 from pathlib import Path
 from typing import cast
@@ -49,10 +49,35 @@ class GeometryConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class DepthColorizationConfig:
+    mode: str = "relief"
+    nearBrightness: float = 0.95
+    farBrightness: float = 0.20
+    reliefGain: float = 1.0
+    edgeGain: float = 0.35
+    smoothingKernel: int = 7
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"relief", "grayscale"}:
+            raise ConfigError(f"unsupported depth.colorization.mode: {self.mode}")
+        for name, value in (
+            ("nearBrightness", self.nearBrightness),
+            ("farBrightness", self.farBrightness),
+            ("reliefGain", self.reliefGain),
+            ("edgeGain", self.edgeGain),
+        ):
+            if not isfinite(value) or value < 0.0:
+                raise ConfigError(f"depth.colorization.{name} must be finite and non-negative")
+        if self.smoothingKernel < 1 or self.smoothingKernel % 2 == 0:
+            raise ConfigError("depth.colorization.smoothingKernel must be a positive odd integer")
+
+
+@dataclass(frozen=True, slots=True)
 class DepthConfig:
     enabled: bool
     minValidRatio: float
     maxDepthJumpRatio: float
+    colorization: DepthColorizationConfig = field(default_factory=DepthColorizationConfig)
 
     def __post_init__(self) -> None:
         _requireProbability("depth.minValidRatio", self.minValidRatio)
@@ -65,6 +90,20 @@ class BackendFusionConfig:
 
     def __post_init__(self) -> None:
         _requireProbability("backendFusion.depthScoreWeight", self.depthScoreWeight)
+
+
+@dataclass(frozen=True, slots=True)
+class FusionHeadConfig:
+    rgbInitWeight: float = 0.70
+    depthInitWeight: float = 0.20
+    contextInitWeight: float = 0.10
+
+    def __post_init__(self) -> None:
+        weights = (self.rgbInitWeight, self.depthInitWeight, self.contextInitWeight)
+        if any(not isfinite(value) or value < 0.0 for value in weights):
+            raise ConfigError("fusionHead weights must be finite and non-negative")
+        if sum(weights) <= 0.0:
+            raise ConfigError("fusionHead must contain a positive weight")
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +185,7 @@ class AppConfig:
     geometry: GeometryConfig
     depth: DepthConfig
     backendFusion: BackendFusionConfig
+    fusionHead: FusionHeadConfig
     decisionGate: DecisionGateConfig
     tracking: TrackingConfig
     recovery: RecoveryConfig
@@ -180,6 +220,7 @@ def loadConfig(path: str | Path) -> AppConfig:
             "geometry",
             "depth",
             "backendFusion",
+            "fusionHead",
             "decisionGate",
             "tracking",
             "recovery",
@@ -201,8 +242,24 @@ def loadConfig(path: str | Path) -> AppConfig:
         "geometry",
         {"viewWidthPx", "viewHeightPx", "boundarySamplesPerEdge", "minFovDeg", "maxFovDeg"},
     )
-    depthRaw = _section(root, "depth", {"enabled", "minValidRatio", "maxDepthJumpRatio"})
+    depthRoot = _requireMapping("depth", root["depth"])
+    _requireKeys(
+        "depth",
+        depthRoot,
+        {"enabled", "minValidRatio", "maxDepthJumpRatio", "colorization"},
+    )
+    depthRaw = cast(dict[str, object], depthRoot)
+    colorizationRaw = _section(
+        depthRaw,
+        "colorization",
+        {"mode", "nearBrightness", "farBrightness", "reliefGain", "edgeGain", "smoothingKernel"},
+    )
     fusionRaw = _section(root, "backendFusion", {"depthScoreWeight"})
+    fusionHeadRaw = _section(
+        root,
+        "fusionHead",
+        {"rgbInitWeight", "depthInitWeight", "contextInitWeight"},
+    )
     gateRaw = _section(root, "decisionGate", {"motionScoreWeight", "scaleScoreWeight"})
     trackingRaw = _section(
         root,
@@ -259,11 +316,38 @@ def loadConfig(path: str | Path) -> AppConfig:
             maxDepthJumpRatio=_requireFloat(
                 "depth.maxDepthJumpRatio", depthRaw["maxDepthJumpRatio"]
             ),
+            colorization=DepthColorizationConfig(
+                mode=_requireStr("depth.colorization.mode", colorizationRaw["mode"]),
+                nearBrightness=_requireFloat(
+                    "depth.colorization.nearBrightness", colorizationRaw["nearBrightness"]
+                ),
+                farBrightness=_requireFloat(
+                    "depth.colorization.farBrightness", colorizationRaw["farBrightness"]
+                ),
+                reliefGain=_requireFloat(
+                    "depth.colorization.reliefGain", colorizationRaw["reliefGain"]
+                ),
+                edgeGain=_requireFloat("depth.colorization.edgeGain", colorizationRaw["edgeGain"]),
+                smoothingKernel=_requireInt(
+                    "depth.colorization.smoothingKernel", colorizationRaw["smoothingKernel"]
+                ),
+            ),
         ),
         backendFusion=BackendFusionConfig(
             depthScoreWeight=_requireFloat(
                 "backendFusion.depthScoreWeight", fusionRaw["depthScoreWeight"]
             )
+        ),
+        fusionHead=FusionHeadConfig(
+            rgbInitWeight=_requireFloat(
+                "fusionHead.rgbInitWeight", fusionHeadRaw["rgbInitWeight"]
+            ),
+            depthInitWeight=_requireFloat(
+                "fusionHead.depthInitWeight", fusionHeadRaw["depthInitWeight"]
+            ),
+            contextInitWeight=_requireFloat(
+                "fusionHead.contextInitWeight", fusionHeadRaw["contextInitWeight"]
+            ),
         ),
         decisionGate=DecisionGateConfig(
             motionScoreWeight=_requireFloat(
