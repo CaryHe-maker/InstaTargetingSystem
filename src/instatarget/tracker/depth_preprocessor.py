@@ -90,7 +90,10 @@ class DepthPreprocessor(DepthProcessor):
         maxDepth = float(np.nanmax(values[mask])) if mask.any() else 1.0
         relief = np.clip((background - values) / max(maxDepth, 1e-6), -1.0, 1.0)
         relief[~mask] = 0.0
-        edge = _edgeMagnitude(normalized, mask)
+        # Relative depth changes are more meaningful than absolute metre changes:
+        # log depth keeps a large distant background from dominating the edge map.
+        logDepth = np.log1p(np.where(mask, values, 0.0))
+        edge = _edgeMagnitude(self.normalize(logDepth, mask), mask)
         depthRgb = self._colorizeArrays(normalized, mask, relief, edge)
         return DepthPreprocessResult(normalized, mask, background, relief, edge, depthRgb)
 
@@ -191,16 +194,63 @@ class DepthPreprocessor(DepthProcessor):
         relief: NDArray[np.float32],
         edge: NDArray[np.float32],
     ) -> NDArray[np.uint8]:
-        # Inverse depth is bright/near and dark/far; relief and edges add shape.
+        if self.colorizationMode == "grayscale":
+            return self._grayscaleArrays(normalized, mask, relief, edge)
+
+        # This view is deliberately not a metric colormap.  The near range gets
+        # several cyclic hue bands so adjacent depth layers can be separated even
+        # when the same hue is reused later.  The far range is compressed into a
+        # dark, nearly neutral background.
+        foreground = 1.0 - _smoothstep(0.70, 0.90, normalized)
+        foregroundDepth = np.clip(normalized / 0.70, 0.0, 1.0)
+        proximity = np.clip(1.0 - foregroundDepth, 0.0, 1.0)
+
+        cycles = 2.75
+        foregroundHue = np.mod(0.04 + cycles * (1.0 - foregroundDepth), 1.0)
+        backgroundHue = np.full_like(normalized, 0.62)
+        hue = backgroundHue + foreground * (foregroundHue - backgroundHue)
+
+        # A sharp jump receives roughly a half-cycle hue rotation, which makes
+        # the border visibly different from either smooth side of the surface.
+        edgeImpact = np.clip(
+            edge * (0.15 + 0.85 * foreground) * (1.45 + 0.35 * self.reliefGain),
+            0.0,
+            1.0,
+        )
+        hue = np.mod(hue + 0.50 * edgeImpact, 1.0)
+
+        backgroundSaturation = 0.08
+        saturation = (
+            backgroundSaturation * (1.0 - foreground)
+            + (0.84 + 0.16 * edgeImpact) * foreground
+            + 0.12 * edgeImpact
+        )
+        saturation = np.clip(saturation, 0.0, 1.0)
+
+        near = np.clip(self.nearBrightness, 0.0, 1.0)
+        far = np.clip(self.farBrightness, 0.0, 1.0)
+        foregroundValue = far + (near - far) * (0.20 + 0.80 * proximity**0.55)
+        backgroundValue = np.clip(far * 0.35, 0.03, 0.16)
+        value = backgroundValue * (1.0 - foreground) + foreground * foregroundValue
+        value = np.clip(value + 0.30 * self.edgeGain * edgeImpact, 0.0, 1.0)
+
+        rgb = _hsvToRgb(hue, saturation, value)
+        rgb[~mask] = 0
+        return np.rint(rgb * 255.0).astype(np.uint8)
+
+    def _grayscaleArrays(
+        self,
+        normalized: NDArray[np.float32],
+        mask: NDArray[np.bool_],
+        relief: NDArray[np.float32],
+        edge: NDArray[np.float32],
+    ) -> NDArray[np.uint8]:
         brightness = self.farBrightness + (
             self.nearBrightness - self.farBrightness
         ) * (1.0 - normalized)
-        if self.colorizationMode == "relief":
-            brightness = brightness + self.reliefGain * 0.15 * np.maximum(relief, 0.0)
-        brightness = np.clip(brightness + self.edgeGain * edge, 0.0, 1.0)
+        brightness = brightness + self.edgeGain * edge
         brightness[~mask] = 0.0
-        gray = np.rint(brightness * 255.0).astype(np.uint8)
-        # A neutral RGB image is intentional: the depth encoder must not infer a rainbow palette.
+        gray = np.rint(np.clip(brightness, 0.0, 1.0) * 255.0).astype(np.uint8)
         return np.repeat(gray[..., None], 3, axis=2)
 
 
@@ -230,8 +280,36 @@ def _edgeMagnitude(normalized: NDArray[np.float32], mask: NDArray[np.bool_]) -> 
     gy, gx = np.gradient(normalized.astype(np.float32, copy=False))
     edge = np.sqrt(gx * gx + gy * gy)
     edge[~mask] = 0.0
-    maximum = float(edge.max(initial=0.0))
-    return np.clip(edge / max(maximum, 1e-6), 0.0, 1.0).astype(np.float32)
+    validEdges = edge[mask & np.isfinite(edge)]
+    if validEdges.size == 0:
+        return np.zeros(normalized.shape, dtype=np.float32)
+    scale = float(np.percentile(validEdges, 99.0))
+    if not np.isfinite(scale) or scale <= 1e-6:
+        scale = float(validEdges.max(initial=0.0))
+    scale = max(scale, 1e-6)
+    return np.clip(edge / scale, 0.0, 1.0).astype(np.float32)
+
+
+def _smoothstep(edge0: float, edge1: float, value: NDArray[np.float32]) -> NDArray[np.float32]:
+    scaled = np.clip((value - edge0) / max(edge1 - edge0, 1e-6), 0.0, 1.0)
+    return scaled * scaled * (3.0 - 2.0 * scaled)
+
+
+def _hsvToRgb(
+    hue: NDArray[np.float32],
+    saturation: NDArray[np.float32],
+    value: NDArray[np.float32],
+) -> NDArray[np.float32]:
+    """Convert aligned HSV planes to RGB without an imaging dependency."""
+    sector = np.floor(np.mod(hue, 1.0) * 6.0).astype(np.int32)
+    fraction = np.mod(hue, 1.0) * 6.0 - sector
+    chromaLow = value * (1.0 - saturation)
+    descending = value * (1.0 - fraction * saturation)
+    ascending = value * (1.0 - (1.0 - fraction) * saturation)
+    red = np.choose(sector, (value, descending, chromaLow, chromaLow, ascending, value))
+    green = np.choose(sector, (ascending, value, value, descending, chromaLow, chromaLow))
+    blue = np.choose(sector, (chromaLow, chromaLow, ascending, value, value, descending))
+    return np.stack((red, green, blue), axis=-1).astype(np.float32)
 
 
 def _boxSmooth(values: NDArray[np.float32], kernel: int) -> NDArray[np.float32]:
