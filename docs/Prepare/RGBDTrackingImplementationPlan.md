@@ -1,7 +1,10 @@
 # RGB-D 跟踪路线说明
 
-> 这是一份路线提案，不代表当前第三阶段代码实现。
-> 当前仓库只落地 RGB-only 后端，深度伪彩色、双 HiT 和 MLP 融合仍是后续阶段预留。
+> 这是一份路线提案，不是当前实现清单。RGB-D 深度伪彩色、深度分支和融合头已经由
+> `TrackerBackend` 落地；第五阶段控制层的实现以 `docs/modules/controller.md` 为准。
+>
+> 本文中关于“DTC 直接消费整块 BFoV 深度”或“控制层完成融合”的早期设想不再适用：DTC
+> 只消费 `DepthSummary/depthScore/fusedScore`，整张深度图和融合头均留在 `TrackerBackend`。
 
 ## 1. 结论
 

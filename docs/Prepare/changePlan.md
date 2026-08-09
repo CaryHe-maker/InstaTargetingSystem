@@ -2,7 +2,10 @@
 
 > 本文档仅覆盖 `changeRecommend.md` 中的问题 1、2、3、4、5、6。  
 > 目标是把项目整理成一条可直接实现的统一链路，并作为后续改代码的执行模板。
-> 这是一份历史提案，不代表当前第三阶段实现状态；当前仓库只落地 RGB-only 后端，深度伪彩色、双 HiT 和 MLP 融合仍属后续阶段预留。
+> 这是一份历史提案。前四阶段的实现状态以 `docs/implement.md`、`docs/interface.md` 和
+> `docs/modules/tracker.md` 为准；其中 RGB-D 深度伪彩色、深度分支和融合头已经落地。
+> 第五阶段 DTC 的现行蓝图以 `docs/ReplySugg.md` 和 `docs/modules/controller.md` 为准，本文
+> 中与“DTC 直接读取 BFoV 深度块”“单视图正常跟踪”冲突的描述均已废止。
 
 ---
 

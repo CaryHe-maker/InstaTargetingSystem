@@ -1,8 +1,8 @@
 # InstaTargetingSystem 总体设计
 
-> 当前第三阶段以 **360VOT** 处理球面几何，以 **RGB-only TrackerBackend** 完成 HiT 观测和模板协议，
-> 以 **DepthAwareTrackController**（简称 **DTC**）统一多帧预测、结果选择和后续深度预留接口。
-> 深度伪彩色 + 双 HiT + MLP 融合属于第四阶段预留方案，尚未进入当前代码实现。
+> 当前基线以 **360VOT** 处理球面几何，以 **TrackerBackend** 完成 RGB-only/RGB-D HiT 观测、
+> 深度处理、融合和模板协议，以 **DepthAwareTrackController**（简称 **DTC**）统一多视图计划、
+> 多帧预测、候选聚合、结果选择和恢复。第五阶段只实现控制层，不把后端融合逻辑上移。
 
 ---
 
@@ -12,11 +12,11 @@
 |------|------|
 | 输入 | AirSim360 全景序列或等价 ERP 视频 + 初始框 |
 | 输出 | 每帧目标框、状态、置信度；比赛模式只输出官方格式 |
-| 主线 | `360VOT + RGB-only TrackerBackend + DTC` |
-| 深度 | 当前实现不进入后端主链路，第四阶段预留深度伪彩色双流方案 |
-| 退化 | 当前阶段只跑 `rgb_only`；`rgb_depth` 作为后续扩展目标 |
-| 训练 | 当前只保持 HiT 既有能力；深度分支和融合头单独设计、单独训练 |
-| 实时性 | 常规帧单视图，低置信时才扩窗或全景搜索 |
+| 主线 | `360VOT + geometry + TrackerBackend(RGB/RGB-D) + DTC` |
+| 深度 | geometry 同步裁剪；TrackerBackend 内完成深度伪彩色、深度分支和融合头 |
+| 退化 | `depth.enabled=false` 时严格退化为 `rgb_only`，输出契约不变 |
+| 训练 | HiT 主干可冻结；深度分支和融合头独立训练并回灌后端 |
+| 实时性 | 每帧固定 guard triplet，额外视图按状态和预算批量推理 |
 
 系统不把整张 ERP 直接送入后端主干。后端只看低畸变局部视图；球面状态由 DTC 统一维护。
 
@@ -27,12 +27,12 @@
 | 层级 | 选型 | 作用 |
 |------|------|------|
 | 几何 | 360VOT 风格 BFoV | ERP / 局部视图 / 回投影 |
-| 跟踪后端 | TrackerBackend | 当前为 RGB-only HiT；深度伪彩色 + 双 HiT + MLP 预留 |
+| 跟踪后端 | TrackerBackend | RGB HiT + 可选深度分支 + 融合头；只输出局部观测 |
 | RGB 主干 | HiT-Small | 主 RGB 跟踪 |
 | 加速备选 | HiT-Tiny / DyHiT | 更轻或更快的后端变体 |
-| 控制层 | DTC | 当前负责多帧预测、候选选择和恢复规划；深度门控预留 |
-| 深度初始化 | Depth-Anything-V2-Small | 第四阶段深度模块 warm start 候选 |
-| 融合头 | 后端内 MLP | 第四阶段预留；融合 RGB、深度、模板上下文和轻量几何参数 |
+| 控制层 | DTC | 负责多视图计划、单帧候选聚合、多帧预测、恢复和模板策略 |
+| 深度初始化 | Depth-Anything-V2-Small | 深度编码器 warm start 候选 |
+| 融合头 | 后端内 MLP | 融合 RGB、深度、模板上下文和轻量几何参数 |
 
 LightTrack 只作为轻量 baseline。360VOT 是全景表示与评测基础，不是主跟踪器。
 
@@ -43,8 +43,8 @@ LightTrack 只作为轻量 baseline。360VOT 是全景表示与评测基础，�
 ```text
 FrameSource
    -> geometry(BFoV / sync crop)
-   -> DTC(window state + RGB gate)
-   -> TrackerBackend(RGB-only HiT)
+   -> DTC(window state + multi-view plan)
+   -> TrackerBackend(RGB/RGB-D HiT + fusion)
    -> ResultSink
 ```
 
@@ -57,10 +57,10 @@ TrackerBackend local observations --------+
 geometry projected observations ----------/
 ```
 
-该旁路默认关闭，不进入跟踪闭环，也不改变任何计算结果。深度 RGB 由主项目现有转换模块生成，
-`visualization` 只读取并原样保存，不维护第二套深度颜色化实现。
+该旁路默认关闭，不进入跟踪闭环，也不改变任何计算结果。深度 RGB 由 `TrackerBackend` 的
+深度链路生成，`visualization` 只读取并原样保存，不维护第二套深度颜色化实现。
 
-第四阶段预留的后端拓扑是：
+后端拓扑是：
 
 ```text
 local RGB -> HiT-RGB ----\
@@ -72,8 +72,8 @@ depth -> relief color -> HiT-Depth -----/
 |------|------|
 | `geometry` | 同步裁剪 RGB 和 Depth，生成局部视图 |
 | `DTC` | 维护状态、做多帧预测、生成搜索计划 |
-| `TrackerBackend` | 当前只负责局部 RGB 跟踪与模板执行；深度处理和 MLP 融合预留到下一阶段 |
-| `fusion` | 候选排序与最终门控 |
+| `TrackerBackend` | 局部 RGB/RGB-D 跟踪、深度处理、后端融合与模板执行 |
+| `DTC` | 候选排序、单帧聚合、状态门控与全局恢复 |
 | `ResultSink` | 输出比赛格式和诊断日志 |
 | `visualization` | 可选保存局部 RGB、已有深度 RGB、后端局部框和 geometry ERP 框 |
 
@@ -119,22 +119,16 @@ core <- visualization <- app
 3. 结合连续性、尺度变化和历史置信度决定下一帧搜索中心和 FOV。
 4. 输出 `SearchPlan` 和 `TemplateCommand`。
 
-第四阶段才会把深度摘要、深度边缘和伪彩色深度分支并入控制闭环。
+深度摘要由 TrackerBackend 生成后进入控制闭环；DTC 不再处理整张深度图。
 
-### 4.3 后端内部融合
+### 4.3 后端内部融合（第四阶段已完成）
 
-当前第三阶段的 `TrackerBackend` 内部只完成：
-
-1. RGB 局部图编码。
-2. HiT 局部匹配。
-3. 局部框裁剪与输出规范化。
-
-第四阶段预留的后端融合思路是：
+`TrackerBackend` 内部固定执行：
 
 1. 深度图先做对齐、归一化、背景浮雕化和轮廓增强，再转成单调伪彩色。
 2. 同一局部视图再走一条深度 HiT 分支。
 3. 将 RGB HiT 输出、深度 HiT 输出、模板上下文和轻量几何参数送入 MLP。
-4. 融合头单独训练，初值偏向 RGB，深度作为辅助判别分支。
+4. 融合头单独训练，初值偏向 RGB，深度作为辅助判别分支；`fusedScore` 由后端统一产生。
 
 ### 4.4 状态机与恢复
 
@@ -148,12 +142,13 @@ INIT -> TRACKING -> UNCERTAIN -> RECOVERING -> TRACKING
 
 | 状态 | 行为 | 模板更新 |
 |------|------|----------|
-| `TRACKING` | 单视图跟踪 | 允许稳定更新 |
+| `TRACKING` | guard triplet + 主预测/尺度视图，多视图候选聚合 | 允许稳定更新 |
 | `UNCERTAIN` | 扩窗验证 | 禁止 |
 | `RECOVERING` | 环搜 / 全景粗搜 | 禁止 |
 | `LOST` | 降频搜索并输出预测 | 禁止 |
 
-恢复阶段只改变搜索范围，不改变模块职责边界。
+恢复阶段只改变搜索范围和预测假设，不改变 geometry、TrackerBackend 和 DTC 的职责边界；
+同一帧不允许无限重试。
 
 ---
 
@@ -170,8 +165,8 @@ INIT -> TRACKING -> UNCERTAIN -> RECOVERING -> TRACKING
 
 ### 5.2 训练策略
 
-1. 当前第三阶段只验证 RGB-only 后端与模板协议。
-2. 第四阶段如果启用深度分支，优先复用伪彩色深度编码初始化，而不是从零学完整深度表征。
+1. RGB-only 和 RGB-D 共用同一套 `LocalView`/`LocalObservation` 契约。
+2. 深度分支优先复用伪彩色深度编码初始化，而不是从零学习完整深度表征。
 3. 融合头单独训练，先固定两个 HiT 分支，再微调融合参数。
 4. 先在 `rgb_depth` 上校准，再回到 `rgb_only` 验证退化路径不崩。
 
@@ -181,9 +176,9 @@ INIT -> TRACKING -> UNCERTAIN -> RECOVERING -> TRACKING
 |------|------|------|
 | A | 跑通 HiT 基线 | 可复现普通视频结果 |
 | B | 接入 BFoV | 全景几何基线 |
-| C | RGB-only 后端与模板协议 | 当前可运行版本 |
-| D | 深度伪彩色 + 双 HiT + MLP | 第四阶段预留融合版本 |
-| E | 加入恢复和模板门控 | 长时版本 |
+| C | RGB-only 后端与模板协议 | 已完成基线 |
+| D | 深度伪彩色 + 双 HiT + MLP | 已完成 RGB-D 后端 |
+| E | 多视图 DTC、候选聚合、恢复和模板门控 | 第五阶段控制层 |
 | F | 导出 ONNX / TensorRT | 部署权重 |
 
 ---
@@ -231,17 +226,18 @@ InstaTargetingSystem/
 
 1. 先跑通 `TrackerBackend + 360VOT` 基线。
 2. 再接入 `geometry` 的同步裁剪。
-3. 再接入 `DTC` 的多帧预测。
-4. 再训练后端深度模块和融合头。
-5. 最后做恢复、部署和性能优化。
+3. 已完成 RGB-D 后端、深度摘要和融合头，并验证 RGB-only 退化。
+4. 当前接入 DTC 的多视图计划、候选聚合、多帧预测和恢复。
+5. 最后做 app/io、评测、训练回灌、部署和性能优化。
 
 ---
 
 ## 9. 完成定义
 
 - `geometry` 同步输出 RGB 和 Depth。
-- `DTC` 当前第三阶段只消费 RGB-only 后端输出，深度分支为预留设计。
-- `HiT` 主干当前只走 RGB。
-- 第四阶段的深度颜色化与融合头可以独立训练。
-- `rgb_only` 当前已跑通；`rgb_depth` 仍是后续目标。
+- `DTC` 只消费 TrackerBackend 的局部观测、融合分数和深度摘要，不实现后端融合。
+- `HiT` RGB 主干保留；深度分支通过后端可选接入。
+- 深度颜色化与融合头已实现，并可在独立训练链路中更新权重。
+- `rgb_only` 和 `rgb_depth` 均保持同一接口可运行。
+- 第五阶段完成定义还包括每帧 guard triplet、单帧聚合和有界恢复。
 - 可按配置选择记录四类中间图，且关闭可视化时不改变原计算链路。

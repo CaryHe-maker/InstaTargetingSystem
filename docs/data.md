@@ -39,8 +39,8 @@ AirSim360 的同帧数据应按同一 `frameIndex` 对齐读取：
 
 | 模式 | 输入 | 行为 |
 |------|------|------|
-| `rgb_only` | 只有颜色图 | 当前第三阶段运行模式：RGB HiT + 球面几何 |
-| `rgb_depth` | 颜色图 + 深度图 | 第四阶段预留模式；当前代码不启用完整深度链路 |
+| `rgb_only` | 只有颜色图 | RGB HiT + 球面几何；深度权重退化为 0 |
+| `rgb_depth` | 颜色图 + 深度图 | RGB HiT + 深度预处理/分支 + 后端融合头；DTC 只消费摘要和分数 |
 
 ---
 
@@ -60,8 +60,13 @@ AirSim360 的同帧数据应按同一 `frameIndex` 对齐读取：
 
 ### 4.3 深度摘要
 
-`frame_depth` 当前第三阶段不进入 HiT，也不参与后端打分。数据层只负责提供深度原图和有效掩码。
-第四阶段若启用深度分支，深度摘要或深度伪彩色图由后端/控制层按接口分工派生，数据层仍不做跟踪决策。
+`frame_depth` 由数据层以 `DepthPlane(values, validMask, unit)` 提供；数据层不做颜色化或跟踪决策。
+局部深度摘要由 `TrackerBackend` 的 `DepthProcessor` 根据局部预测框生成，并通过
+`LocalObservation.depthSummary` 返回给 DTC。摘要至少包含中位数、均值、有效率、最小/最大深度
+和置信度。有效率不足、值非有限或深度跳变异常时返回 `None` 或低置信摘要，DTC 不更新 range 状态。
+
+RGB-only 序列必须令 `FramePacket.depth=None`，而不是创建形状相同的零深度图；后端和 DTC
+应自动退化为 RGB-only + 球面运动预测。
 
 ---
 

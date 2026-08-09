@@ -1,6 +1,7 @@
 # InstaTargetingSystem 实现清单
 
-> 目标：按最小可运行链路推进，先跑通 `rgb_only`，再补 `depth`、融合和恢复。
+> 目标：保留已完成的 geometry、RGB-only、RGB-D 和 visualization 链路，在第五阶段补齐
+> 多视图 DTC、候选聚合、运动预测和有界恢复；后续阶段只负责应用入口、评测和训练。
 
 ---
 
@@ -33,6 +34,9 @@
 - [x] 所有模块都能只依赖 `core` 契约写代码
 - [x] `docs/interface.md` 与 `src/instatarget/core` 语义一致
 
+第五阶段开始前必须在保持严格 schema 校验的前提下，向 `tracking`/`recovery` 增加 DTC 参数；
+这属于配置契约的向后兼容扩展，不得在 controller 内私自读取未登记字段。
+
 ---
 
 ## 2. 第二阶段：先把几何跑通
@@ -59,7 +63,7 @@
 
 ---
 
-## 3. 第三阶段：先做 RGB-only 后端
+## 3. 第三阶段：RGB-only 后端（已完成）
 
 - [x] 完成 `src/instatarget/tracker/hit_backend.py`
   - [x] 只保留 HiT 主干推理接口
@@ -71,7 +75,7 @@
 
 - [x] 完成 `src/instatarget/tracker/backend.py`
   - [x] 串起 `initialize / infer / close`
-  - [x] 先支持 `rgb_only`
+  - [x] 支持 `rgb_only`，并保留 RGB-D 扩展接口
 
 - [x] 完成 `src/instatarget/tracker/template.py`
   - [x] 模板缓存
@@ -84,7 +88,7 @@
 
 ---
 
-## 4. 第四阶段：补深度链路和融合
+## 4. 第四阶段：深度链路和融合（已完成）
 
 - [x] 完成 `src/instatarget/tracker/depth_preprocessor.py`
   - [x] 深度归一化
@@ -111,40 +115,61 @@
 - [x] `rgb_only` 和 `rgb_depth` 都能走通
 - [x] 深度颜色化能明显增强轮廓对比
 - [x] `fusedScore` 由后端统一产生
+- [x] 深度到 RGB 的转换留在 `TrackerBackend`，geometry 只负责 RGB/Depth 同步裁剪
+- [x] 深度无效的单视图自动退化为 RGB-only，不影响同一 batch 的其他视图
 
 ---
 
 ## 5. 第五阶段：控制层 DTC
 
 - [ ] 完成 `src/instatarget/controller/motion_estimator.py`
-  - [ ] 常速度 / Kalman 预测
-  - [ ] `MotionState3D` 更新
+  - [ ] 常速度 Alpha-Beta 基线；Kalman 作为可替换实现
+  - [ ] 在单位向量空间处理 yaw wrap
+  - [ ] 深度无效时只更新方向，不污染 range 状态
+  - [ ] `MotionState3D` 更新及窗口历史维护
 
 - [ ] 完成 `src/instatarget/controller/decision_gate.py`
-  - [ ] 接收阈值
-  - [ ] 处理 `acceptThreshold / uncertainThreshold`
+  - [ ] `candidateMinScore` 单图候选过滤
+  - [ ] 组合 `fusedScore`、运动、尺度和可用深度一致性
+  - [ ] 处理 `uncertainThreshold / acceptThreshold / recoverAcceptThreshold`
+  - [ ] 连续帧计数和滞回，避免状态抖动
+
+- [ ] 完成 DTC 单帧候选聚合（可先放在 `depth_aware_track_controller.py` 的私有组件）
+  - [ ] 每帧固定生成 yaw `-120°/0°/+120°` 的 guard triplet
+  - [ ] 生成预测中心、尺度和恢复环视图，去重并遵守 `maxViewsPerFrame >= 3`
+  - [ ] 将局部结果回投影为 `ProjectedObservation`
+  - [ ] 按球面角距离/尺度聚类，输出单帧预测框和单帧置信度
 
 - [ ] 完成 `src/instatarget/controller/state_machine.py`
   - [ ] `INIT -> TRACKING -> UNCERTAIN -> RECOVERING -> TRACKING`
   - [ ] `LOST` 分支
+  - [ ] 找回后从当前帧重建运动窗口，丢弃未来预测假设
+  - [ ] 预测输出使用 `valid=false`，不得伪装成观测
 
 - [ ] 完成 `src/instatarget/controller/recovery_planner.py`
-  - [ ] 扩窗
-  - [ ] 环搜
-  - [ ] 全景粗搜
+  - [ ] 上下文宽高至少为初始/预测框对应尺寸的 2 倍
+  - [ ] 扩窗、环搜、全景粗搜的有限预算
+  - [ ] 同一帧最多一次 batch，不在单图上无限重试
+  - [ ] 跨后续帧维护有限预测假设
 
 - [ ] 完成 `src/instatarget/controller/template_policy.py`
   - [ ] 模板更新条件
   - [ ] 模板保护
+  - [ ] `UNCERTAIN / RECOVERING / LOST` 阶段强制 `KEEP`
+  - [ ] anchor 永久保留，recent/stable 按连续高置信更新
 
 - [ ] 完成 `src/instatarget/controller/depth_aware_track_controller.py`
-  - [ ] 串起窗口预测、候选选择、状态更新
-  - [ ] 只消费后端分数，不重做后端融合
+  - [ ] 串起初始化、窗口预测、guard/自适应多视图、候选聚合和状态更新
+  - [ ] 只消费后端分数和深度摘要，不重做后端融合
+  - [ ] 校验 `sequenceId / frameIndex / stateRevision`
 
 验收：
 
-- [ ] 正常跟踪和恢复模式都能切换
-- [ ] 控制层不再直接做深度编码或 MLP 融合
+- [ ] 每帧至少三张 guard 视图且不超过视图预算
+- [ ] 正常跟踪、短时遮挡恢复和 LOST 降频搜索都能切换
+- [ ] 单图低分不污染单帧聚合，单帧结果来自多视图一致性
+- [ ] 控制层不直接做深度编码或 MLP 融合
+- [ ] RGB-only 与 RGB-D 的 DTC 行为均可运行
 
 ---
 

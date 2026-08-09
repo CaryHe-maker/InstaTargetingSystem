@@ -1,6 +1,6 @@
 # InstaTargetingSystem 超参数索引
 
-> 本文档登记当前配置文件和预留设计中会改变模型选择、计算精度、几何视野、深度门控、决策、恢复或运行资源的全部配置项。
+> 本文档登记当前配置文件和第五阶段 DTC 设计中会改变模型选择、计算精度、几何视野、深度门控、决策、恢复或运行资源的全部配置项。
 > 行号以当前仓库版本为准；配置结构调整后必须同步更新。实验记录中的指标建议至少填写 `AUC`、`Success Rate@0.5` 和 `FPS`。
 
 ---
@@ -25,7 +25,8 @@
 
 ## 2. `configs/RGBD.yaml`
 
-该文件是未来 RGB-D 形态的主配置草案；当前第三阶段主要以 `configs/RGBonly.yaml` 作为运行配置。
+该文件是 RGB-D 运行配置；`configs/RGBonly.yaml` 用于无深度对照。两种模式保持相同配置结构，
+只有 `depth.enabled` 和深度权重不同。
 
 | 参数名 | 当前行 | 当前值 | 简要职能 | 调大或切换后的主要影响 |
 |---|---:|---|---|---|
@@ -38,18 +39,30 @@
 | `geometry.boundarySamplesPerEdge` | 10 | `65` | 控制每条边界的采样预算 | 调大可提高极区与跨经线边界的包络精度，但增加几何计算成本 |
 | `geometry.minFovDeg` | 11 | `20.0` | 限制最小搜索视场 | 调大可覆盖更大位移，但目标像素占比下降 |
 | `geometry.maxFovDeg` | 12 | `120.0` | 限制最大搜索视场 | 调大有利于恢复大位移目标，但畸变、误匹配和成本上升 |
-| `depth.enabled` | 14 | `true` | 未来完整深度链路开关 | 当前第三阶段不生效；第四阶段开启后才增加计算和数据依赖 |
-| `depth.minValidRatio` | 15 | `0.35` | 未来深度摘要最小有效像素比例 | 当前第三阶段不参与打分；第四阶段调大可提高深度可靠性 |
-| `depth.maxDepthJumpRatio` | 16 | `0.60` | 未来允许的相邻深度跳变比例 | 当前第三阶段不参与打分；第四阶段调大可容忍快速距离变化 |
-| `backendFusion.depthScoreWeight` | 18 | `0.15` | 未来深度分数在后端融合中的权重 | 当前第三阶段不生效；第四阶段调大增强深度影响，也会放大深度噪声风险 |
+| `depth.enabled` | 14 | `true` | RGB-D 后端深度链路开关 | 关闭后严格退化为 RGB-only |
+| `depth.minValidRatio` | 15 | `0.35` | 深度摘要最小有效像素比例 | 调大提高深度可靠性，但会使可用深度帧减少 |
+| `depth.maxDepthJumpRatio` | 16 | `0.60` | 允许的深度跳变比例 | 调大容忍快速距离变化，也会放宽异常深度 |
+| `backendFusion.depthScoreWeight` | 18 | `0.15` | 后端融合中深度分支的基准权重 | 调大增强深度影响，也会放大深度噪声风险 |
 | `decisionGate.motionScoreWeight` | 20 | `0.25` | 控制运动连续性门控权重 | 调大更偏好预测轨迹附近候选，可能抑制突变运动 |
 | `decisionGate.scaleScoreWeight` | 21 | `0.15` | 控制尺度连续性门控权重 | 调大更排斥尺度突变，也可能错过快速接近目标 |
 | `tracking.acceptThreshold` | 23 | `0.70` | 直接接受观测的最低置信度 | 调大可减少误接受，但会增加不确定和恢复状态 |
 | `tracking.uncertainThreshold` | 24 | `0.45` | 区分不确定与低置信观测 | 调大更早触发恢复，成本和找回机会同时增加 |
 | `tracking.stableFramesBeforeUpdate` | 25 | `8` | 更新稳定模板前要求的连续稳定帧数 | 调大可降低模板污染，但外观适应速度变慢 |
 | `tracking.windowLength` | 26 | `5` | 多帧运动预测使用的历史窗口长度 | 调大可平滑噪声，但增加滞后并减弱急转响应 |
-| `recovery.maxViewsPerFrame` | 28 | `12` | 限制每帧恢复候选视图数 | 调大提高搜索覆盖率，同时增加延迟与显存占用 |
+| `tracking.recoverAcceptThreshold` | - | `0.80` | 恢复成功的高置信门限 | 调大减少误找回，但延长恢复时间 |
+| `tracking.candidateMinScore` | - | `0.40` | 单图候选进入聚合的最低分数 | 调大减少离群候选，但可能漏掉弱目标 |
+| `tracking.uncertainPatience` | - | `2` | 连续不确定帧数后进入恢复 | 调大减少短暂恢复开销，但可能延迟找回 |
+| `tracking.maxRecoveryFrames` | - | `30` | 单次恢复最多持续帧数 | 调大提高找回机会，但增加无效输出时长 |
+| `tracking.contextScale` | - | `2.0` | 初始/预测框宽高的最小放大倍数 | 小于 2 会违背局部面积至少 4 倍的约束 |
+| `tracking.contextMarginRatio` | - | `0.15` | 上下文额外边界比例 | 调大减少截断，增加背景干扰和计算量 |
+| `tracking.scaleClusterTolerance` | - | `0.50` | 候选尺度聚类容差 | 调大更容易合并不同尺度候选 |
+| `tracking.maxPredictionHorizon` | - | `3` | 未来预测假设的最大帧数 | 调大可覆盖更长遮挡，但预测误差累积 |
+| `tracking.guardYawStepDeg` | - | `120` | 三张 guard 视图的水平偏移 | 需保持三视图覆盖约束 |
+| `tracking.minViewsForCommit` | - | `2` | 单帧有效提交的最少支持视图数 | 调大降低单图误接受，但弱目标可能无法提交 |
+| `recovery.maxViewsPerFrame` | 28 | `12` | 每帧所有视图的硬预算 | 必须 `>=3`；调大提高覆盖率并增加延迟/显存 |
 | `recovery.globalSearchInterval` | 29 | `5` | 控制全景粗搜的帧间隔 | 调大降低恢复成本，但目标找回可能更慢 |
+| `recovery.ringRadii` | - | `[1.0, 1.75, 2.5]` | 恢复环相对上下文半径 | 调大扩大搜索范围，增加重复/误匹配风险 |
+| `recovery.viewsPerRing` | - | `[4, 8, 12]` | 各恢复环的候选视图数 | 最终受 `maxViewsPerFrame` 限制 |
 | `runtime.decodeQueueCapacity` | 31 | `3` | 解码到控制线程的队列容量 | 调大可吸收短时抖动，但增加全景帧内存占用 |
 | `runtime.inferRequestQueueCapacity` | 32 | `1` | 控制到推理线程的请求队列容量 | 调大增加排队和状态过期风险，通常保持单槽 |
 | `runtime.inferResponseQueueCapacity` | 33 | `1` | 推理到控制线程的响应队列容量 | 调大增加未提交响应驻留，通常保持单槽 |
@@ -91,7 +104,7 @@
 
 ## 3. `configs/RGBonly.yaml`
 
-该文件是当前第三阶段的 RGB-only 运行配置。参数职责与 RGB-D 配置相同，差异值重点用于对照实验。
+该文件是 RGB-only 运行配置。参数职责与 RGB-D 配置相同，用于验证无深度时的退化路径和性能基线。
 
 | 参数名 | 当前行 | 当前值 | 简要职能 | 与 RGB-D 主配置的差异 |
 |---|---:|---|---|---|
@@ -104,18 +117,30 @@
 | `geometry.boundarySamplesPerEdge` | 10 | `65` | 控制每条边界的采样预算 | 相同 |
 | `geometry.minFovDeg` | 11 | `20.0` | 限制最小搜索视场 | 相同 |
 | `geometry.maxFovDeg` | 12 | `120.0` | 限制最大搜索视场 | 相同 |
-| `depth.enabled` | 14 | `false` | 深度链路预留开关 | 当前第三阶段保持关闭 |
-| `depth.minValidRatio` | 15 | `0.35` | 未来深度摘要最小有效像素比例 | 当前后端不读取；保留用于后续切换配置 |
-| `depth.maxDepthJumpRatio` | 16 | `0.60` | 未来允许的相邻深度跳变比例 | 当前后端不读取；保留用于后续切换配置 |
-| `backendFusion.depthScoreWeight` | 18 | `0.0` | 未来深度分数融合权重 | 当前 RGB-only 后端固定为零 |
+| `depth.enabled` | 14 | `false` | 深度链路开关 | 关闭并退化为 RGB-only |
+| `depth.minValidRatio` | 15 | `0.35` | 深度摘要有效率门限 | RGB-only 下不参与计算 |
+| `depth.maxDepthJumpRatio` | 16 | `0.60` | 深度跳变门限 | RGB-only 下不参与计算 |
+| `backendFusion.depthScoreWeight` | 18 | `0.0` | 深度融合权重 | RGB-only 契约固定为零 |
 | `decisionGate.motionScoreWeight` | 20 | `0.25` | 控制运动连续性门控权重 | 相同 |
 | `decisionGate.scaleScoreWeight` | 21 | `0.15` | 控制尺度连续性门控权重 | 相同 |
 | `tracking.acceptThreshold` | 23 | `0.70` | 直接接受观测的最低置信度 | 相同 |
 | `tracking.uncertainThreshold` | 24 | `0.45` | 区分不确定与低置信观测 | 相同 |
 | `tracking.stableFramesBeforeUpdate` | 25 | `8` | 更新稳定模板前要求的连续稳定帧数 | 相同 |
 | `tracking.windowLength` | 26 | `5` | 多帧运动预测使用的历史窗口长度 | 相同 |
+| `tracking.recoverAcceptThreshold` | - | `0.80` | 恢复成功的高置信门限 | 相同；无深度时只使用 RGB/几何分数 |
+| `tracking.candidateMinScore` | - | `0.40` | 单图候选过滤门限 | 相同 |
+| `tracking.uncertainPatience` | - | `2` | 进入恢复前的连续不确定帧数 | 相同 |
+| `tracking.maxRecoveryFrames` | - | `30` | 单次恢复最大帧数 | 相同 |
+| `tracking.contextScale` | - | `2.0` | 上下文宽高放大倍数 | 相同 |
+| `tracking.contextMarginRatio` | - | `0.15` | 上下文额外边界 | 相同 |
+| `tracking.scaleClusterTolerance` | - | `0.50` | 候选尺度聚类容差 | 相同 |
+| `tracking.maxPredictionHorizon` | - | `3` | 未来预测假设帧数 | 相同 |
+| `tracking.guardYawStepDeg` | - | `120` | guard 视图角步长 | 相同 |
+| `tracking.minViewsForCommit` | - | `2` | 单帧最少支持视图数 | 相同 |
 | `recovery.maxViewsPerFrame` | 28 | `12` | 限制每帧恢复候选视图数 | 相同 |
 | `recovery.globalSearchInterval` | 29 | `5` | 控制全景粗搜的帧间隔 | 相同 |
+| `recovery.ringRadii` | - | `[1.0, 1.75, 2.5]` | 恢复环半径 | 相同 |
+| `recovery.viewsPerRing` | - | `[4, 8, 12]` | 恢复环视图预算 | 相同 |
 | `runtime.decodeQueueCapacity` | 31 | `3` | 解码到控制线程的队列容量 | 相同 |
 | `runtime.inferRequestQueueCapacity` | 32 | `1` | 控制到推理线程的请求队列容量 | 相同 |
 | `runtime.inferResponseQueueCapacity` | 33 | `1` | 推理到控制线程的响应队列容量 | 相同 |
@@ -178,11 +203,11 @@
 
 ---
 
-## 6. 第三阶段 tracker 后端登记
+## 6. 已实现 tracker 后端登记
 
-第三阶段只实现 RGB-only 后端协议、HiT 会话适配、观测规范化和模板命令执行，未新增可调超参数。
-HiT 的模型、权重、精度仍由现有 `model.*` 参数控制；RGB-only 的 `depthScore=0` 和
-`fusedScore=appearanceScore` 是模式契约，不是可调权重。
+当前后端已实现 RGB-only 和 RGB-D 两种模式：RGB-only 的 `depthScore=0` 和
+`fusedScore=appearanceScore` 是退化契约；RGB-D 的深度预处理、深度分支和 `FusionHead` 在
+`TrackerBackend` 内完成。HiT 的模型、权重、精度仍由现有 `model.*` 参数控制。
 
 以下固定行为也不计入超参数：锚点/近期/稳定三个模板槽位、模板特征传递顺序、命令 revision
 校验规则、局部框裁剪规则以及 `latencyNs` 的单调时钟来源。任何将来改变这些行为的数值配置，
@@ -190,7 +215,7 @@ HiT 的模型、权重、精度仍由现有 `model.*` 参数控制；RGB-only �
 
 ---
 
-## 7. 第四阶段深度颜色化与双 HiT 融合
+## 7. 已实现深度颜色化与双 HiT 融合
 
 以下条目已进入 `configs/RGBD.yaml` 和 `configs/RGBonly.yaml`。RGB-only 配置仍关闭深度链路，
 但保留相同字段以保证模式切换时配置结构稳定。
@@ -209,7 +234,16 @@ HiT 的模型、权重、精度仍由现有 `model.*` 参数控制；RGB-only �
 
 ### 7.1 设计说明
 
-- 这些参数只服务于第四阶段；关闭深度链路时不会改变 RGB-only 行为。
+- 这些参数服务于已实现的 RGB-D 后端；关闭深度链路时不会改变 RGB-only 行为。
 - `depth.colorization.*` 用于把深度图转成更容易被 HiT 分辨轮廓的伪彩色图。
 - `fusionHead.*` 只用于 MLP 融合头的初始值和训练起点，不代表最终固定权重。
 - 若后续选择改成显式深度编码器，也应保留同一组接口命名，以免文档和实验记录断裂。
+
+---
+
+## 8. 第五阶段 DTC 参数约束
+
+第五阶段新增参数必须加入 `core/config.py` 的严格 schema 校验，并同步到 `configs/RGBD.yaml`、
+`configs/RGBonly.yaml` 和配置单测。`recovery.maxViewsPerFrame` 必须不小于 3，因为 guard triplet
+是每帧硬性要求；`uncertainThreshold < acceptThreshold <= recoverAcceptThreshold`；
+`contextScale >= 2.0`；所有权重和置信度仍在 `[0,1]`。

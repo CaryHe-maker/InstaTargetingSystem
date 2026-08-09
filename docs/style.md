@@ -154,7 +154,7 @@ core <- geometry <- tracker <- controller <- app
 - `geometry` 不依赖 tracker。
 - `tracker` 不解释比赛文件格式。
 - `controller` 通过 `TrackerBackend` 协议使用模型，并独占最近 `n` 帧窗口、状态机和最终门控。
-- `tracker` 当前负责 RGB 局部跟踪、模板命令和观测规范化；第四阶段才扩展深度处理和 MLP 融合。
+- `tracker` 负责 RGB/RGB-D 局部跟踪、深度处理、后端融合、模板命令和观测规范化；控制层只消费统一观测契约。
 - `app` 是模块首次汇合点。
 - `eval` 可读取结果，不反向影响跟踪决策。
 

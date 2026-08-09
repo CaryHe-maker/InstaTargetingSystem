@@ -10,14 +10,20 @@
 | stage | 输入 | 输出图 |
 |---|---|---|
 | `local_rgb` | `LocalView.rgb` | 每一步 geometry 生成的局部 RGB 视图 |
-| `depth_rgb` | 主项目深度转换模块生成的 RGB 数组 | 已转换深度 RGB 图的无损副本 |
+| `depth_rgb` | `TrackerBackend` 深度预处理生成的 RGB 数组 | 已转换深度 RGB 图的无损副本 |
 | `backend_box` | `LocalView.rgb + LocalObservation.bbox` | 后端局部目标框 |
 | `geometry_box` | `FramePacket.rgb + ProjectedObservation.bbox` | geometry 回投影后位于 ERP 原图上的目标框 |
+| `dtc_candidates`（计划新增） | DTC 的候选簇和 `decisionScore` | 单帧候选聚合诊断 |
+| `dtc_state`（计划新增） | `TrackResult.status`、门控分数和视图角色 | 状态机与视图预算诊断 |
+| `dtc_prediction`（计划新增） | `predictedMotion`、预测 BFoV 和恢复半径 | 多帧预测诊断 |
 
 所有目标框固定使用荧光绿 `#39FF14`。`geometry_box` 支持跨 ERP 经线的框，框会同时出现在
 原图左右边界。原始数组不会被原地修改。
 
-深度 RGB 的生成不属于本模块。`recordDepthRgb()` 只接受并原样保存已有模块输出的
+`dtc_*` 是第五阶段的可选旁路，不参与候选排序、状态提交或结果输出；启用前必须同步扩展
+`VISUALIZATION_STAGES`、配置 schema、记录器方法和路径测试。当前实现默认只承诺前四个 stage。
+
+深度 RGB 的生成不属于本模块。它由 `TrackerBackend` 的深度链路完成；`recordDepthRgb()` 只接受并原样保存已有模块输出的
 `uint8 [H, W, 3]` RGB 数组，不执行归一化、伪彩色映射或其他深度处理。
 
 ---

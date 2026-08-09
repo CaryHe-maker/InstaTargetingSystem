@@ -13,8 +13,8 @@
 | 初始框 | 属于第 0 帧，格式为像素 `xywh` |
 | 数据入口 | AirSim360 入口必须至少提供 ERP RGB；Depth 可缺省 |
 | 内部位置 | 使用单位球面坐标、BFoV 和可选深度状态 |
-| 跟踪模型 | 当前第三阶段 HiT 只接收局部透视 RGB 图；深度分支为第四阶段预留 |
-| 深度使用 | 当前不参与后端主链路；未来深度预处理、第二个 HiT 和 MLP 融合统一封装进 `TrackerBackend` |
+| 跟踪模型 | `TrackerBackend` 接收局部透视 `LocalView`，支持 RGB-only 与可选 RGB-D |
+| 深度使用 | RGB、Depth 在 geometry 中同步裁剪；深度预处理、伪彩色、深度分支和融合头统一封装在 `TrackerBackend` |
 | 输出 | 每个输入帧恰好一个 `TrackResult` |
 | 日志 | 比赛输出与日志分离；日志写 `stderr` |
 | 配置 | 启动时完成校验，运行期间只读 |
@@ -279,8 +279,8 @@ class MotionEstimator(Protocol):
     ) -> MotionState3D: ...
 ```
 
-`DepthProcessor` 是第四阶段预留协议。当前第三阶段可以保留类型定义，但运行链路不调用它；
-`DepthSummary` 只作为结果和消息字段中的可选占位。
+`DepthProcessor` 是后端内部使用的深度摘要协议。它不负责状态机或候选选择；DTC 只消费
+`DepthSummary`，不读取整张深度图。深度缺失时，后端和 DTC 都必须退化为 RGB-only + 球面几何。
 
 `MotionEstimator` 可用常速度模型或 Kalman Filter。无深度时只更新球面方向；深度无效时
 不得用默认距离污染速度。控制层内部按最近 `n` 帧窗口维护预测状态，单帧只是窗口中的一项观测，
@@ -340,8 +340,9 @@ class TrackerBackend(Protocol):
 - `initialize()` 每个序列恰好调用一次；重复调用必须先 `close()`。
 - `infer()` 输出与输入视图一一对应且顺序一致。
 - 局部框必须已裁剪到视图有效区域。
-- 当前第三阶段的实现只消费 `LocalView.rgb`，并将 `depthScore` 固定为 `0.0`、`fusedScore` 固定为 `appearanceScore`、`depthSummary` 固定为 `None`。
-- 第四阶段若启用 RGB-D，后端内部可以读取深度并完成深度预处理、编码与融合，但不得生成 BFoV、改变状态机或执行全局搜索规划。
+- RGB-only 模式只消费 `LocalView.rgb`，并将 `depthScore` 固定为 `0.0`、`fusedScore` 固定为 `appearanceScore`、`depthSummary` 固定为 `None`。
+- RGB-D 模式在后端内部完成深度对齐检查、归一化、缺失掩码、伪彩色、深度分支推理和融合；深度分支结果必须参与 `fusedScore`。
+- 无论模式如何，后端不得生成 BFoV、改变状态机或执行全局搜索规划。
 - 同一后端实例只允许设备线程调用。
 - 不支持在线模板的后端必须只接受 `KEEP`，其能力在启动时声明。
 
@@ -383,6 +384,16 @@ class ProjectedObservation:
     depthSummary: DepthSummary | None
 
 
+术语固定如下：`LocalObservation.bbox` 为单图预测框，`ProjectedObservation` 为单帧候选；DTC
+将同一帧全部候选过滤、聚类并融合为单帧预测框，再结合历史窗口生成 `TrackResult`。当
+`TrackResult.valid == false` 时，`TrackResult.bbox` 表示多帧预测框，而不是已确认的真实观测。
+
+`SearchPlan.views` 必须保持唯一 `viewId`，每帧至少包含三张 guard 视图（预测中心 yaw 的
+`-120°/0°/+120°` 覆盖）；总数不得超过 `recovery.maxViewsPerFrame`，该配置必须大于等于 3。
+如果未来需要区分 guard、adaptive、recovery 视图，优先在 DTC 内维护 `viewId -> role` 映射；
+只有日志契约确实需要时，才为 `ViewSpec` 增加带默认值的可选角色字段。
+
+
 class TrackController(Protocol):
     def buildInitialization(
         self,
@@ -407,12 +418,14 @@ class TrackController(Protocol):
 
 `buildInitialization()` 生成首帧模板视图和该视图中的模板框；
 `commitInitialization()` 仅在后端初始化成功后提交第 0 帧。`plan()` 必须使用最近 `n` 帧的
-运动状态、深度摘要和置信度生成搜索视图。`update()` 必须校验帧号和 revision，并原子提交
-状态；失败时原状态保持不变。控制层在 `update()` 内只做候选选择、状态更新和轻量门控。
-当前第三阶段没有深度神经网络或 MLP 融合；第四阶段启用后也不得把这些后端计算上移到控制层。
+运动状态、深度摘要和置信度生成一个包含 guard triplet 的多视图搜索计划。`update()` 必须校验
+帧号和 revision，并原子提交状态；失败时原状态保持不变。控制层在 `update()` 内只做候选聚合、
+状态更新和轻量门控，不重做后端融合。
 
 `ProjectedObservation.depthScore` 和 `ProjectedObservation.fusedScore` 由 `TrackerBackend` 产生；
-`motionScore` 与 `scaleScore` 由控制层补充。
+`motionScore` 与 `scaleScore` 由控制层补充。DTC 可以按配置计算用于排序的 `decisionScore`，
+但不得把它写回 `fusedScore` 或重新实现 RGB/Depth 融合。低于 `tracking.candidateMinScore`
+的单图候选不参与单帧聚类，仍可保留在诊断日志中。
 
 ---
 
@@ -499,7 +512,8 @@ class FatalError:
     frameIndex: FrameIndex | None
 ```
 
-当前第三阶段的 `InferResponse.depthSummaries` 必须为空字典；深度摘要字典只给第四阶段预留。
+`InferResponse.depthSummaries` 对每个提供有效深度摘要的 `viewId` 返回条目；RGB-only 或深度无效
+的视图可以省略。`observations` 与请求视图一一对应且顺序一致，DTC 不得因摘要缺失而丢弃 RGB 观测。
 
 所有请求和响应必须携带帧号与 revision。`T0` 不接受旧响应；工作线程不捕获并吞掉
 异常，而是转换为一次 `FatalError`。
@@ -601,11 +615,23 @@ decisionGate:
 tracking:
   acceptThreshold: 0.70
   uncertainThreshold: 0.45
+  recoverAcceptThreshold: 0.80
+  candidateMinScore: 0.40
+  uncertainPatience: 2
+  maxRecoveryFrames: 30
   stableFramesBeforeUpdate: 8
   windowLength: 5
+  contextScale: 2.0
+  contextMarginRatio: 0.15
+  scaleClusterTolerance: 0.50
+  maxPredictionHorizon: 3
+  guardYawStepDeg: 120
+  minViewsForCommit: 2
 recovery:
   maxViewsPerFrame: 12
   globalSearchInterval: 5
+  ringRadii: [1.0, 1.75, 2.5]
+  viewsPerRing: [4, 8, 12]
 runtime:
   decodeQueueCapacity: 3
   inferRequestQueueCapacity: 1
@@ -614,8 +640,10 @@ runtime:
 ```
 
 未知字段默认报错；相对路径以配置文件目录为基准；角度配置可用 `Deg`，加载后立即转换为
-`Rad`。阈值必须满足 `0 <= uncertainThreshold < acceptThreshold <= 1`；`windowLength >= 2`；
-所有队列容量必须为正整数。
+`Rad`。阈值必须满足 `0 <= uncertainThreshold < acceptThreshold <= recoverAcceptThreshold <= 1`；
+`candidateMinScore` 在 `[0,1]`；`windowLength >= 2`；`contextScale >= 2`；
+`recovery.maxViewsPerFrame >= 3`；所有队列容量必须为正整数。新增字段必须同步更新
+`core/config.py`、两份运行 YAML 和配置单测。
 
 ---
 

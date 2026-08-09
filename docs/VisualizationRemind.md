@@ -5,7 +5,7 @@
 
 ---
 
-## 1. 深度转颜色模块落地
+## 1. 深度转颜色模块（已落地）
 
 如果深度模块输出以下格式，则 **不需要修改 visualization 代码**：
 
@@ -13,10 +13,11 @@
 Mapping[int, NDArray[np.uint8]]  # viewId -> RGB [H, W, 3]
 ```
 
-只需在深度转颜色完成后，由应用编排层增加调用：
+深度转颜色由 `TrackerBackend` 内部完成；应用编排层若要记录结果，只需把后端已经生成的
+`viewId -> RGB` 映射传给 visualization：
 
 ```python
-depthRgbByViewId = depthProcessor.colorize(views)
+depthRgbByViewId = diagnosticDepthRgbByViewId  # 由后端诊断钩子导出，具体接口另行定义
 recorder.recordDepthRgb(frame, depthRgbByViewId)
 ```
 
@@ -43,7 +44,7 @@ recorder.recordDepthRgb(frame, depthRgbByViewId)
 | 计算完成时机 | 调用 |
 |---|---|
 | geometry 生成 `LocalView` 后 | `recordLocalRgb(frame, views)` |
-| 主项目完成深度 RGB 转换后 | `recordDepthRgb(frame, depthRgbByViewId)` |
+| `TrackerBackend` 完成深度 RGB 转换后 | `recordDepthRgb(frame, depthRgbByViewId)` |
 | backend 生成 `LocalObservation` 后 | `recordBackendBoxes(frame, views, localObservations)` |
 | local box 完成 geometry 回投影后 | `recordGeometryBoxes(frame, projectedObservations)` |
 
@@ -52,9 +53,9 @@ recorder.recordDepthRgb(frame, depthRgbByViewId)
 
 ---
 
-## 3. 深度后端和融合头落地
+## 3. 深度后端和融合头（已落地）
 
-双流 HiT 或 MLP 融合实现后，如果 `LocalObservation.bbox` 仍代表后端最终局部框，则
+双流 HiT 或 MLP 融合已经由 `TrackerBackend` 承担。如果 `LocalObservation.bbox` 仍代表后端最终局部框，则
 `backend_box` 不需要修改，会自动显示融合后的最终候选。
 
 如果需要同时比较 RGB 分支框、深度分支框和融合框，则需要：
@@ -79,6 +80,7 @@ recorder.recordDepthRgb(frame, depthRgbByViewId)
 | `ProjectedObservation.bbox` 不再是 ERP XYWH 像素坐标 | `recordGeometryBoxes()` |
 | ERP 水平坐标不再允许跨经线 | `drawBoxRgb(..., wrapHorizontal=True)` |
 | 一个 view 产生多个候选框 | 文件命名需加入候选 ID，并定义是否合并到同一张图 |
+| DTC 每帧产生 guard/adaptive/recovery 多视图 | 应用层按 `viewId` 记录，不改变四个既有 stage 的语义 |
 | 最终框改由 `TrackResult` 独立产生 | 新增最终结果 stage，不要把它混同为 `geometry_box` |
 
 坐标契约变化时，必须先修改核心类型和 geometry 测试，再调整可视化；不能在绘图函数中静默猜测

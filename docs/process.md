@@ -21,7 +21,7 @@ AirSim360 / Raw panoramic video
             v
 +------------------+   SearchRequest   +------------------+
 | T0 ControlThread |------------------>| T2 InferWorker   |
-| DTC / gate       |<------------------| RGB-only HiT     |
+| DTC / gate       |<------------------| RGB/RGB-D HiT    |
 +--------+---------+   InferResponse   +------------------+
          |
          | ResultPacket
@@ -35,8 +35,9 @@ AirSim360 / Raw panoramic video
 ```
 
 默认使用四个长生命周期线程。恢复阶段的多个 BFoV 候选由 `T2` 批量推理，不为每个候选创建线程。  
-当前第三阶段只走 RGB-only 后端：`T2` 负责局部 RGB 匹配与模板执行，`T0` 负责窗口状态、模板命令和最终候选选择。
-深度预处理、伪彩色编码、双 HiT 和融合头属于第四阶段预留，不在当前线程图里生效。
+`T2` 负责局部 RGB 或 RGB-D 匹配、深度预处理、深度分支、融合头和模板执行；`T0` 负责窗口状态、
+多视图计划、单帧候选聚合、模板命令和最终门控。Depth-to-RGB 保持在 `T2` 的 TrackerBackend
+内部，geometry 只提供对齐的 RGB/Depth 局部视图。
 
 ---
 
@@ -46,7 +47,7 @@ AirSim360 / Raw panoramic video
 |------|--------|----------|----------|
 | `T0 ControlThread` | `TrackState`、状态机、球面运动状态 | 多帧预测、搜索规划、回投影、模板更新决策、最终门控 | 直接操作 CUDA/HiT 会话 |
 | `T1 DecodeWorker` | 解码器 | 顺序解码、颜色转换、生成 `FramePacket` | 丢帧、修改跟踪状态 |
-| `T2 InferWorker` | HiT 会话、设备流、模板特征 | 局部 RGB 推理、批处理模板命令、返回 RGB-only 观测 | 自行改变状态机或输出结果 |
+| `T2 InferWorker` | HiT 会话、设备流、模板特征 | 局部 RGB/RGB-D 推理、深度融合、批处理模板命令、返回 `LocalObservation` | 自行改变状态机、全局恢复或输出最终结果 |
 | `T3 SinkWorker` | 输出文件、指标累加器 | 顺序写结果、可选可视化、统计耗时 | 阻塞控制线程、改写预测 |
 
 设备后端只允许 `T2` 访问。PyTorch、ONNX Runtime 或 TensorRT 会话不得跨线程调用。
@@ -62,7 +63,7 @@ T1                  T0                         T2                  T3
  | Frame(0)          |                          |                   |
  |------------------>| validate init bbox       |                   |
  |                   | bbox -> BFoV             |                   |
- |                   | depth summary reserved   |                   |
+ |                   | aligned depth optional   |                   |
  |                   |---- InitRequest -------->| crop template     |
  |                   |<--- InitResponse --------| cache template    |
  |                   |---- Result(0) -------------------------------->|
@@ -78,10 +79,10 @@ T1                  T0                         T2                  T3
  | Frame(n)          |                          |                   |
  |------------------>| update window state      |                   |
  |                   | predict center/FOV       |                   |
- |                   | build one SearchView    |                   |
- |                   |---- SearchRequest ------>| crop + HiT        |
- |                   |<--- InferResponse -------|                   |
- |                   | current RGB-only score    |                  |
+ |                   | build guard + adaptive   |                   |
+ |                   |---- SearchRequest ------>| crop + batch HiT  |
+ |                   |<--- InferResponse -------| RGB/RGB-D scores  |
+ |                   | aggregate all views      |                   |
  |                   | update TrackState        |                   |
  |                   |---- Result(n) ------------------------------->|
 ```
@@ -91,12 +92,12 @@ T1                  T0                         T2                  T3
 
 ### 3.3 低置信与恢复
 
-1. 单视图结果未通过接收阈值，`T0` 转入 `UNCERTAIN`。
-2. 同一帧允许追加一次扩窗请求；禁止无限重试。
-3. 后续帧进入 `RECOVERING`，生成环形或全局候选列表。
-4. `T2` 将候选堆叠为一个 batch，一次返回全部观测。
-5. `T0` 完成 Top-K 筛选和连续帧确认；当前阶段不做深度门限检查。
-6. 确认前持续输出预测框，并令 `valid=false`；比赛适配器按官方规则序列化。
+1. `T0` 每帧至少生成三张 guard 视图，再追加主预测、尺度或恢复视图。
+2. `T2` 将所有视图堆叠为一个 batch；显存不足时可确定性分 batch，但不能改变结果顺序。
+3. `T0` 将单图结果回投影为 `ProjectedObservation`，过滤低于 `candidateMinScore` 的候选。
+4. `T0` 按球面角距离和尺度聚类，计算单帧预测框及 `decisionScore`。
+5. 通过阈值、运动连续性、尺度和可用深度摘要决定状态；深度无效时自动退化为 RGB-only。
+6. 确认前持续输出预测框并令 `valid=false`；未来帧高置信找回后从找回帧重建运动窗口。
 
 恢复搜索预算由 `maxViewsPerFrame` 和 `globalSearchInterval` 双重限制。
 
@@ -124,8 +125,8 @@ T1                  T0                         T2                  T3
 | `SphericalMotionModel` | `T0` | 有状态、线程独占 |
 | `DTC` | `T0` | 有状态、线程独占 |
 | `RecoveryPlanner` | `T0` | 纯计算 |
-| `DepthProcessor` | 预留 | 第四阶段才进入 `T2` |
-| `FusionHead` | 预留 | 第四阶段才进入 `T2` |
+| `DepthProcessor` | `T2` | 局部深度摘要和有效性 |
+| `FusionHead` | `T2` | RGB/Depth 后端融合和 `fusedScore` |
 | `BfovProjector` CPU 后端 | `T0` 或 `T2` | 无状态 |
 | `BfovProjector` GPU 后端 | `T2` | 设备独占 |
 | `HiTBackend` | `T2` | 有状态、设备独占 |
@@ -143,7 +144,7 @@ CPU/GPU 投影由配置选择，但同一次运行只能启用一个实现。
 
 1. 验证响应的 `sequenceId`、`frameIndex` 和 `stateRevision`。
 2. 回投影全部局部观测。
-3. 基于后端 `fusedScore`、运动连续性和尺度变化选择候选。
+3. 回投影全部局部观测，基于后端 `fusedScore`、运动连续性、尺度变化和可用深度一致性聚合候选。
 4. 执行状态转移。
 5. 更新球面运动、目标尺度和丢失计数。
 6. 生成模板命令；命令由下一次请求携带给 `T2`。
