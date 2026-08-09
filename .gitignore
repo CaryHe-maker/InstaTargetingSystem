@@ -64,6 +64,10 @@ logs/
 *.temp
 *.cache
 *.pid
+artifacts/
+*.db
+*.sqlite
+*.sqlite3
 
 # Python helper caches
 __pycache__/
@@ -78,6 +82,7 @@ venv/
 # Datasets, videos, and generated experiment outputs
 data/
 datasets/
+temppics/
 videos/
 results/
 outputs/

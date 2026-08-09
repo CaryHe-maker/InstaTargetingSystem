@@ -75,6 +75,7 @@ class TrackerDepthTest(unittest.TestCase):
         self.assertEqual(result.depthRgb.shape, (7, 7, 3))
         self.assertTrue((result.depthRgb[0, 0] == 0).all())
         self.assertGreater(int(result.depthRgb[3, 3, 0]), int(result.depthRgb[1, 1, 0]))
+        self.assertTrue(np.any(result.depthRgb[3, 3] != result.depthRgb[1, 1]))
         self.assertGreater(float(result.edge.max()), 0.0)
 
     def testSummariesEnforceMinimumValidRatio(self) -> None:

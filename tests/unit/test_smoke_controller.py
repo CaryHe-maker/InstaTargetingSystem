@@ -77,8 +77,8 @@ class SmokeControllerTest(unittest.TestCase):
             self.assertEqual(len(results), 2)
             self.assertGreater(results[1].confidence, 0.0)
             self.assertEqual(len(list(outputRoot.rglob("*.png"))), 6)
-            self.assertTrue((outputRoot / root.name / "frame_000000" / "local_rgb").exists())
-            self.assertTrue((outputRoot / root.name / "frame_000001" / "geometry_box").exists())
+            self.assertTrue((outputRoot / inputRoot.name / "frame_000000" / "local_rgb").exists())
+            self.assertTrue((outputRoot / inputRoot.name / "frame_000001" / "geometry_box").exists())
 
 
 if __name__ == "__main__":
