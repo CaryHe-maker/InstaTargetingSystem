@@ -30,14 +30,27 @@ fusionHead:
 decisionGate:
   motionScoreWeight: 0.25
   scaleScoreWeight: 0.15
+  depthConsistencyWeight: 0.10
 tracking:
   acceptThreshold: 0.70
   uncertainThreshold: 0.45
+  recoverAcceptThreshold: 0.80
+  candidateMinScore: 0.40
+  uncertainPatience: 2
+  maxRecoveryFrames: 30
   stableFramesBeforeUpdate: 8
   windowLength: 5
+  contextScale: 2.0
+  contextMarginRatio: 0.15
+  scaleClusterTolerance: 0.50
+  maxPredictionHorizon: 3
+  guardYawStepDeg: 120.0
+  minViewsForCommit: 2
 recovery:
   maxViewsPerFrame: 12
   globalSearchInterval: 5
+  ringRadii: [1.0, 1.75, 2.5]
+  viewsPerRing: [4, 8, 12]
 runtime:
   decodeQueueCapacity: 3
   inferRequestQueueCapacity: 1

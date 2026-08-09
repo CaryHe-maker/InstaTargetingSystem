@@ -382,6 +382,7 @@ class ProjectedObservation:
     depthScore: float
     fusedScore: float
     depthSummary: DepthSummary | None
+    localBox: BBoxXYWH | None = None
 
 
 术语固定如下：`LocalObservation.bbox` 为单图预测框，`ProjectedObservation` 为单帧候选；DTC

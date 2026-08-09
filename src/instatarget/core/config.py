@@ -110,12 +110,23 @@ class FusionHeadConfig:
 class DecisionGateConfig:
     motionScoreWeight: float
     scaleScoreWeight: float
+    depthConsistencyWeight: float = 0.10
 
     def __post_init__(self) -> None:
         _requireProbability("decisionGate.motionScoreWeight", self.motionScoreWeight)
         _requireProbability("decisionGate.scaleScoreWeight", self.scaleScoreWeight)
-        if self.motionScoreWeight + self.scaleScoreWeight > 1.0:
-            raise ConfigError("decision gate motion and scale weights must sum to at most 1")
+        _requireProbability(
+            "decisionGate.depthConsistencyWeight", self.depthConsistencyWeight
+        )
+        if (
+            self.motionScoreWeight
+            + self.scaleScoreWeight
+            + self.depthConsistencyWeight
+            > 1.0
+        ):
+            raise ConfigError(
+                "decision gate motion, scale and depth weights must sum to at most 1"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,26 +135,64 @@ class TrackingConfig:
     uncertainThreshold: float
     stableFramesBeforeUpdate: int
     windowLength: int
+    recoverAcceptThreshold: float = 0.80
+    candidateMinScore: float = 0.40
+    uncertainPatience: int = 2
+    maxRecoveryFrames: int = 30
+    contextScale: float = 2.0
+    contextMarginRatio: float = 0.15
+    scaleClusterTolerance: float = 0.50
+    maxPredictionHorizon: int = 3
+    guardYawStepRad: float = 2.0 * pi / 3.0
+    minViewsForCommit: int = 2
 
     def __post_init__(self) -> None:
         _requireProbability("tracking.acceptThreshold", self.acceptThreshold)
         _requireProbability("tracking.uncertainThreshold", self.uncertainThreshold)
         if self.uncertainThreshold >= self.acceptThreshold:
             raise ConfigError("tracking thresholds must satisfy uncertain < accept")
+        _requireProbability("tracking.recoverAcceptThreshold", self.recoverAcceptThreshold)
+        if self.recoverAcceptThreshold < self.acceptThreshold:
+            raise ConfigError(
+                "tracking.recoverAcceptThreshold must be at least acceptThreshold"
+            )
+        _requireProbability("tracking.candidateMinScore", self.candidateMinScore)
         if self.stableFramesBeforeUpdate <= 0:
             raise ConfigError("tracking.stableFramesBeforeUpdate must be positive")
         if self.windowLength < 2:
             raise ConfigError("tracking.windowLength must be at least 2")
+        if self.uncertainPatience <= 0 or self.maxRecoveryFrames <= 0:
+            raise ConfigError("tracking patience and recovery frame limits must be positive")
+        if not isfinite(self.contextScale) or self.contextScale < 2.0:
+            raise ConfigError("tracking.contextScale must be at least 2")
+        if not isfinite(self.contextMarginRatio) or self.contextMarginRatio < 0.0:
+            raise ConfigError("tracking.contextMarginRatio must be non-negative")
+        if not isfinite(self.scaleClusterTolerance) or self.scaleClusterTolerance <= 0.0:
+            raise ConfigError("tracking.scaleClusterTolerance must be positive")
+        if self.maxPredictionHorizon <= 0:
+            raise ConfigError("tracking.maxPredictionHorizon must be positive")
+        if not 0.0 < self.guardYawStepRad < pi:
+            raise ConfigError("tracking.guardYawStepRad must be in (0, pi)")
+        if self.minViewsForCommit <= 0:
+            raise ConfigError("tracking.minViewsForCommit must be positive")
 
 
 @dataclass(frozen=True, slots=True)
 class RecoveryConfig:
     maxViewsPerFrame: int
     globalSearchInterval: int
+    ringRadii: tuple[float, ...] = (1.0, 1.75, 2.5)
+    viewsPerRing: tuple[int, ...] = (4, 8, 12)
 
     def __post_init__(self) -> None:
-        if self.maxViewsPerFrame <= 0 or self.globalSearchInterval <= 0:
+        if self.maxViewsPerFrame < 3 or self.globalSearchInterval <= 0:
             raise ConfigError("recovery limits must be positive")
+        if not self.ringRadii or len(self.ringRadii) != len(self.viewsPerRing):
+            raise ConfigError("recovery rings and viewsPerRing must have equal non-zero length")
+        if any(not isfinite(radius) or radius <= 0.0 for radius in self.ringRadii):
+            raise ConfigError("recovery.ringRadii must contain positive finite values")
+        if any(viewCount <= 0 for viewCount in self.viewsPerRing):
+            raise ConfigError("recovery.viewsPerRing must contain positive integers")
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,13 +309,36 @@ def loadConfig(path: str | Path) -> AppConfig:
         "fusionHead",
         {"rgbInitWeight", "depthInitWeight", "contextInitWeight"},
     )
-    gateRaw = _section(root, "decisionGate", {"motionScoreWeight", "scaleScoreWeight"})
+    gateRaw = _section(
+        root,
+        "decisionGate",
+        {"motionScoreWeight", "scaleScoreWeight", "depthConsistencyWeight"},
+    )
     trackingRaw = _section(
         root,
         "tracking",
-        {"acceptThreshold", "uncertainThreshold", "stableFramesBeforeUpdate", "windowLength"},
+        {
+            "acceptThreshold",
+            "uncertainThreshold",
+            "recoverAcceptThreshold",
+            "candidateMinScore",
+            "uncertainPatience",
+            "maxRecoveryFrames",
+            "stableFramesBeforeUpdate",
+            "windowLength",
+            "contextScale",
+            "contextMarginRatio",
+            "scaleClusterTolerance",
+            "maxPredictionHorizon",
+            "guardYawStepDeg",
+            "minViewsForCommit",
+        },
     )
-    recoveryRaw = _section(root, "recovery", {"maxViewsPerFrame", "globalSearchInterval"})
+    recoveryRaw = _section(
+        root,
+        "recovery",
+        {"maxViewsPerFrame", "globalSearchInterval", "ringRadii", "viewsPerRing"},
+    )
     runtimeRaw = _section(
         root,
         "runtime",
@@ -356,6 +428,9 @@ def loadConfig(path: str | Path) -> AppConfig:
             scaleScoreWeight=_requireFloat(
                 "decisionGate.scaleScoreWeight", gateRaw["scaleScoreWeight"]
             ),
+            depthConsistencyWeight=_requireFloat(
+                "decisionGate.depthConsistencyWeight", gateRaw["depthConsistencyWeight"]
+            ),
         ),
         tracking=TrackingConfig(
             acceptThreshold=_requireFloat(
@@ -364,10 +439,39 @@ def loadConfig(path: str | Path) -> AppConfig:
             uncertainThreshold=_requireFloat(
                 "tracking.uncertainThreshold", trackingRaw["uncertainThreshold"]
             ),
+            recoverAcceptThreshold=_requireFloat(
+                "tracking.recoverAcceptThreshold", trackingRaw["recoverAcceptThreshold"]
+            ),
+            candidateMinScore=_requireFloat(
+                "tracking.candidateMinScore", trackingRaw["candidateMinScore"]
+            ),
+            uncertainPatience=_requireInt(
+                "tracking.uncertainPatience", trackingRaw["uncertainPatience"]
+            ),
+            maxRecoveryFrames=_requireInt(
+                "tracking.maxRecoveryFrames", trackingRaw["maxRecoveryFrames"]
+            ),
             stableFramesBeforeUpdate=_requireInt(
                 "tracking.stableFramesBeforeUpdate", trackingRaw["stableFramesBeforeUpdate"]
             ),
             windowLength=_requireInt("tracking.windowLength", trackingRaw["windowLength"]),
+            contextScale=_requireFloat("tracking.contextScale", trackingRaw["contextScale"]),
+            contextMarginRatio=_requireFloat(
+                "tracking.contextMarginRatio", trackingRaw["contextMarginRatio"]
+            ),
+            scaleClusterTolerance=_requireFloat(
+                "tracking.scaleClusterTolerance", trackingRaw["scaleClusterTolerance"]
+            ),
+            maxPredictionHorizon=_requireInt(
+                "tracking.maxPredictionHorizon", trackingRaw["maxPredictionHorizon"]
+            ),
+            guardYawStepRad=_degreesToRadians(
+                "tracking.guardYawStepDeg",
+                _requireFloat("tracking.guardYawStepDeg", trackingRaw["guardYawStepDeg"]),
+            ),
+            minViewsForCommit=_requireInt(
+                "tracking.minViewsForCommit", trackingRaw["minViewsForCommit"]
+            ),
         ),
         recovery=RecoveryConfig(
             maxViewsPerFrame=_requireInt(
@@ -376,6 +480,8 @@ def loadConfig(path: str | Path) -> AppConfig:
             globalSearchInterval=_requireInt(
                 "recovery.globalSearchInterval", recoveryRaw["globalSearchInterval"]
             ),
+            ringRadii=_requireFloatTuple("recovery.ringRadii", recoveryRaw["ringRadii"]),
+            viewsPerRing=_requireIntTuple("recovery.viewsPerRing", recoveryRaw["viewsPerRing"]),
         ),
         runtime=RuntimeConfig(
             decodeQueueCapacity=_requireInt(
@@ -464,6 +570,20 @@ def _requireStringSet(name: str, value: object) -> frozenset[str]:
     if len(value) != len(set(value)):
         raise ConfigError(f"{name} must not contain duplicates")
     return frozenset(value)
+
+
+def _requireFloatTuple(name: str, value: object) -> tuple[float, ...]:
+    if not isinstance(value, list) or not value:
+        raise ConfigError(f"{name} must be a non-empty list")
+    result = tuple(_requireFloat(f"{name}[{index}]", item) for index, item in enumerate(value))
+    return result
+
+
+def _requireIntTuple(name: str, value: object) -> tuple[int, ...]:
+    if not isinstance(value, list) or not value:
+        raise ConfigError(f"{name} must be a non-empty list")
+    result = tuple(_requireInt(f"{name}[{index}]", item) for index, item in enumerate(value))
+    return result
 
 
 def _degreesToRadians(name: str, valueDeg: float) -> float:

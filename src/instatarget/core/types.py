@@ -398,6 +398,7 @@ class ProjectedObservation:
     depthScore: float
     fusedScore: float
     depthSummary: DepthSummary | None
+    localBox: BBoxXYWH | None = None
 
     def __post_init__(self) -> None:
         if self.viewId < 0:
