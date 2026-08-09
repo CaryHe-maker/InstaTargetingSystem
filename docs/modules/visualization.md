@@ -7,7 +7,7 @@
 
 ## 1. 可视化内容
 
-| stage | 输入 | 输出图 |
+| 记录项 | 输入 | 输出图 |
 |---|---|---|
 | `local_rgb` | `LocalView.rgb` | 每一步 geometry 生成的局部 RGB 视图 |
 | `depth_rgb` | `TrackerBackend` 深度预处理生成的 RGB 数组 | 已转换深度 RGB 图的无损副本 |
@@ -20,8 +20,8 @@
 所有目标框固定使用荧光绿 `#39FF14`。`geometry_box` 支持跨 ERP 经线的框，框会同时出现在
 原图左右边界。原始数组不会被原地修改。
 
-`dtc_*` 是第五阶段的可选旁路，不参与候选排序、状态提交或结果输出；启用前必须同步扩展
-`VISUALIZATION_STAGES`、配置 schema、记录器方法和路径测试。当前实现默认只承诺前四个 stage。
+`dtc_*` 是 DTC 的可选旁路，不参与候选排序、状态提交或结果输出；启用前必须同步扩展
+`VISUALIZATION_STAGES`、配置 schema、记录器方法和路径测试。当前实现默认只承诺前四类诊断图。
 
 深度 RGB 的生成不属于本模块。它由 `TrackerBackend` 的深度链路完成；`recordDepthRgb()` 只接受并原样保存已有模块输出的
 `uint8 [H, W, 3]` RGB 数组，不执行归一化、伪彩色映射或其他深度处理。
@@ -105,7 +105,7 @@ recorder.recordGeometryBoxes(frame, projectedObservations)
         view_0003.png
 ```
 
-`sequenceId` 中不适合文件名的字符会替换为下划线。相同 sequence、frame、stage 和 view 再次
+`sequenceId` 中不适合文件名的字符会替换为下划线。相同 sequence、frame、记录项和 view 再次
 写入时会原子替换旧文件，因此一次运行中每个路径始终代表该步骤的最新完整结果。
 
 ---

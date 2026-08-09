@@ -1,6 +1,6 @@
 # InstaTargetingSystem 超参数索引
 
-> 本文档登记当前配置文件和第五阶段 DTC 设计中会改变模型选择、计算精度、几何视野、深度门控、决策、恢复或运行资源的全部配置项。
+> 本文档登记当前配置文件和 DTC 设计中会改变模型选择、计算精度、几何视野、深度门控、决策、恢复或运行资源的全部配置项。
 > 行号以当前仓库版本为准；配置结构调整后必须同步更新。实验记录中的指标建议至少填写 `AUC`、`Success Rate@0.5` 和 `FPS`。
 
 ---
@@ -241,9 +241,9 @@
 
 ---
 
-## 8. 第五阶段 DTC 参数约束
+## 8. DTC 参数约束
 
-第五阶段新增参数必须加入 `core/config.py` 的严格 schema 校验，并同步到 `configs/RGBD.yaml`、
+新增参数必须加入 `core/config.py` 的严格 schema 校验，并同步到 `configs/RGBD.yaml`、
 `configs/RGBonly.yaml` 和配置单测。`recovery.maxViewsPerFrame` 必须不小于 3，因为 guard triplet
 是每帧硬性要求；`uncertainThreshold < acceptThreshold <= recoverAcceptThreshold`；
 `contextScale >= 2.0`；所有权重和置信度仍在 `[0,1]`。

@@ -2,7 +2,7 @@
 
 > 当前基线以 **360VOT** 处理球面几何，以 **TrackerBackend** 完成 RGB-only/RGB-D HiT 观测、
 > 深度处理、融合和模板协议，以 **DepthAwareTrackController**（简称 **DTC**）统一多视图计划、
-> 多帧预测、候选聚合、结果选择和恢复。第五阶段只实现控制层，不把后端融合逻辑上移。
+> 多帧预测、候选聚合、结果选择和恢复。控制层只消费后端输出，不把融合逻辑上移。
 
 ---
 
@@ -89,7 +89,7 @@ core <- visualization <- app
 
 `geometry`、`tracker` 和 `controller` 不依赖 `visualization`。所有采集点由 `app` 调用，保证关闭
 可视化后现有模块框架和数据流不变。输出统一为无损 PNG，框颜色固定为荧光绿 `#39FF14`；目录、
-阶段选择和使用方法见 `docs/visualization.md`。
+记录项选择和使用方法见 `docs/visualization.md`。
 
 ---
 
@@ -121,7 +121,7 @@ core <- visualization <- app
 
 深度摘要由 TrackerBackend 生成后进入控制闭环；DTC 不再处理整张深度图。
 
-### 4.3 后端内部融合（第四阶段已完成）
+### 4.3 后端内部融合
 
 `TrackerBackend` 内部固定执行：
 
@@ -172,13 +172,13 @@ INIT -> TRACKING -> UNCERTAIN -> RECOVERING -> TRACKING
 
 ### 5.3 训练阶段
 
-| 阶段 | 内容 | 产物 |
+| 里程碑 | 内容 | 产物 |
 |------|------|------|
 | A | 跑通 HiT 基线 | 可复现普通视频结果 |
 | B | 接入 BFoV | 全景几何基线 |
 | C | RGB-only 后端与模板协议 | 已完成基线 |
 | D | 深度伪彩色 + 双 HiT + MLP | 已完成 RGB-D 后端 |
-| E | 多视图 DTC、候选聚合、恢复和模板门控 | 第五阶段控制层 |
+| E | 多视图 DTC、候选聚合、恢复和模板门控 | DTC 控制层 |
 | F | 导出 ONNX / TensorRT | 部署权重 |
 
 ---
@@ -239,5 +239,5 @@ InstaTargetingSystem/
 - `HiT` RGB 主干保留；深度分支通过后端可选接入。
 - 深度颜色化与融合头已实现，并可在独立训练链路中更新权重。
 - `rgb_only` 和 `rgb_depth` 均保持同一接口可运行。
-- 第五阶段完成定义还包括每帧 guard triplet、单帧聚合和有界恢复。
+- DTC 完成定义还包括每帧 guard triplet、单帧聚合和有界恢复。
 - 可按配置选择记录四类中间图，且关闭可视化时不改变原计算链路。

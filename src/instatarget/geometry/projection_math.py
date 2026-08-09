@@ -20,7 +20,10 @@ from instatarget.core.types import BFoV, SphericalPoint
 def wrapYaw(yawRad: float) -> float:
     """Normalize yaw to the half-open interval [-pi, pi)."""
     _requireFinite("yawRad", yawRad)
-    return (yawRad + pi) % (2.0 * pi) - pi
+    wrapped = (yawRad + pi) % (2.0 * pi) - pi
+    if wrapped >= pi:
+        wrapped -= 2.0 * pi
+    return wrapped
 
 
 #to solve the condition when the target crossing the bound in Pitch

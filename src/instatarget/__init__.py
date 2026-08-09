@@ -1,1 +1,3 @@
-# TODO: InstaTargetingSystem package root.
+"""InstaTargetingSystem package root."""
+
+__all__ = []

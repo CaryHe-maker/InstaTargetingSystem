@@ -1,6 +1,6 @@
 # InstaTargetingSystem 控制器规范
 
-> 本文定义第五阶段 `DepthAwareTrackController`（DTC）的实现契约。`geometry`、`tracker` 和
+> 本文定义 `DepthAwareTrackController`（DTC）的实现契约。`geometry`、`tracker` 和
 > `visualization` 已完成的功能不在 DTC 中重做：geometry 负责同步投影/裁剪，TrackerBackend
 > 负责 RGB-D 后端推理与融合，visualization 只做旁路记录。DTC 是 T0 线程中的唯一有状态模块，
 > 负责多视图计划、单帧候选聚合、多帧运动预测、状态机、恢复和模板命令。

@@ -65,7 +65,7 @@
 
    借鉴技术：深度 codec、`Linear` / `UniformHue` / `InverseHue` 编码、深度流伪彩色表达。
 
-   技术简要介绍：用于参考“把深度转成更容易被视觉主干消费的颜色图”的做法。它更接近当前阶段想要的浮雕式深度颜色化路线，而不是单纯给深度图染色。
+   技术简要介绍：用于参考“把深度转成更容易被视觉主干消费的颜色图”的做法。它更接近本项目采用的浮雕式深度颜色化路线，而不是单纯给深度图染色。
 
    GitHub 仓库地址：[https://github.com/cansik/space-stream](https://github.com/cansik/space-stream)
 
