@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
+from pathlib import Path
 
 from instatarget.app.driver import buildRuntime, finalizeSink, openSink, runTracking
-from instatarget.core.config import loadConfig
-from instatarget.core.errors import ConfigError, DecodeError, DepthError, GeometryError, InstaTargetError, ModelError, OutputError, ProtocolError
+from instatarget.core.config import VisualizationConfig, loadConfig
+from instatarget.core.errors import (
+    ConfigError,
+    DecodeError,
+    DepthError,
+    GeometryError,
+    InstaTargetError,
+    ModelError,
+    OutputError,
+    ProtocolError,
+)
 from instatarget.data.airsim360_source import AirSim360DataSource
 from instatarget.data.pseudo_track_builder import PseudoTrackBuilder
+from instatarget.visualization.result import ResultVisualizationRecorder
 
 EXIT_CONFIG = 2
 EXIT_DECODE = 3
@@ -21,8 +33,23 @@ EXIT_INVARIANT = 10
 def buildParser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m instatarget.track_airsim360")
     parser.add_argument("--dataset-root", required=True)
-    parser.add_argument("--sequence", required=True)
+    parser.add_argument("--sequence", default=None, help="Optional sequence subdirectory.")
     parser.add_argument("--target-instance", required=True, type=int)
+    parser.add_argument(
+        "--mid-visual-root",
+        "--visualization-root",
+        dest="mid_visual_root",
+        default=None,
+        help="Directory for intermediate visualizations.",
+    )
+    parser.add_argument(
+        "--result-visual-root",
+        default=None,
+        help="Directory for one final green-box image per frame.",
+    )
+    parser.add_argument(
+        "--max-frames", type=int, default=None, help="Limit frames for a smoke test."
+    )
     parser.add_argument("--output", required=True)
     parser.add_argument("--config", required=True)
     return parser
@@ -30,10 +57,19 @@ def buildParser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = buildParser().parse_args(argv)
-    source = AirSim360DataSource()
+    source = AirSim360DataSource(maxFrames=args.max_frames)
     runtime = None
     try:
         config = loadConfig(args.config)
+        if args.mid_visual_root:
+            config = replace(
+                config,
+                visualization=VisualizationConfig(
+                    enabled=True,
+                    outputRoot=Path(args.mid_visual_root),
+                    stages=frozenset(("local_rgb", "depth_rgb", "backend_box", "geometry_box")),
+                ),
+            )
         runtime = buildRuntime(config)
         source.open(args.dataset_root, args.sequence)
         initialFrame = source.read()
@@ -43,6 +79,11 @@ def main(argv: list[str] | None = None) -> int:
         source.close()
         source.open(args.dataset_root, args.sequence)
         openSink(runtime.sink, args.output)
+        resultRecorder = (
+            ResultVisualizationRecorder(Path(args.result_visual_root))
+            if args.result_visual_root
+            else None
+        )
         resultCount = runTracking(
             source=source,
             initialBox=initialBox,
@@ -52,8 +93,10 @@ def main(argv: list[str] | None = None) -> int:
             sink=runtime.sink,
             depthProcessor=runtime.depthProcessor,
             recorder=runtime.recorder,
+            resultRecorder=resultRecorder,
         )
-        finalizeSink(runtime.sink, resultCount if getattr(source, "frameCount", 0) <= 0 else source.frameCount)
+        expectedCount = resultCount if getattr(source, "frameCount", 0) <= 0 else source.frameCount
+        finalizeSink(runtime.sink, expectedCount)
         return 0
     except ConfigError as error:
         _report(error)
@@ -87,7 +130,6 @@ def main(argv: list[str] | None = None) -> int:
 
 def _report(error: Exception) -> None:
     print(f"{type(error).__name__}: {error}", file=sys.stderr)
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

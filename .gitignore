@@ -82,12 +82,15 @@ venv/
 # Datasets, videos, and generated experiment outputs
 data/
 datasets/
-temppics/
 videos/
 results/
 outputs/
 runs/
 experiments/*
+
+# Python source package named ``data`` is code, not a dataset artifact.
+!src/instatarget/data/
+!src/instatarget/data/*.py
 !experiments/.gitkeep
 !experiments/README.md
 

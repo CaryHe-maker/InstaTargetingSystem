@@ -123,6 +123,9 @@ def _unfilter(
 
 
 def _paeth(left: int, up: int, upLeft: int) -> int:
+    # PNG row buffers are uint8; widen before arithmetic to avoid wraparound
+    # in the Paeth predictor on real RGBA AirSim360 masks.
+    left, up, upLeft = int(left), int(up), int(upLeft)
     estimate = left + up - upLeft
     leftDistance = abs(estimate - left)
     upDistance = abs(estimate - up)

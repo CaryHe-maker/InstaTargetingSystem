@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from instatarget.core.types import BBoxXYWH
+from instatarget.geometry.seam import splitSeamBox, wrapPixelX
 from instatarget.io.result_writer import TextResultWriter
 
 
@@ -23,7 +24,44 @@ def bboxIoU(first: BBoxXYWH, second: BBoxXYWH) -> float:
     return float(np.clip(intersection / union, 0.0, 1.0))
 
 
-def successCurve(ious: list[float], thresholds: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+def circularBBoxIoU(first: BBoxXYWH, second: BBoxXYWH, frameWidthPx: int) -> float:
+    """IoU for ERP boxes whose horizontal interval wraps at the seam."""
+    firstParts = splitSeamBox(
+        BBoxXYWH(wrapPixelX(first.xPx, frameWidthPx), first.yPx, first.widthPx, first.heightPx),
+        frameWidthPx,
+    )
+    secondParts = splitSeamBox(
+        BBoxXYWH(
+            wrapPixelX(second.xPx, frameWidthPx),
+            second.yPx,
+            second.widthPx,
+            second.heightPx,
+        ),
+        frameWidthPx,
+    )
+    intersection = 0.0
+    for left in firstParts:
+        for right in secondParts:
+            xOverlap = max(
+                0.0,
+                min(left.xPx + left.widthPx, right.xPx + right.widthPx)
+                - max(left.xPx, right.xPx),
+            )
+            yOverlap = max(
+                0.0,
+                min(left.yPx + left.heightPx, right.yPx + right.heightPx)
+                - max(left.yPx, right.yPx),
+            )
+            intersection += xOverlap * yOverlap
+    firstArea = first.widthPx * first.heightPx
+    secondArea = second.widthPx * second.heightPx
+    union = firstArea + secondArea - intersection
+    return float(np.clip(intersection / union, 0.0, 1.0)) if union > 0.0 else 0.0
+
+
+def successCurve(
+    ious: list[float], thresholds: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray]:
     if thresholds is None:
         thresholds = np.linspace(0.0, 1.0, 21, dtype=np.float64)
     values = np.asarray(ious, dtype=np.float64)
@@ -67,4 +105,11 @@ def readResultFile(path: str | Path) -> list[BBoxXYWH]:
     return boxes
 
 
-__all__ = ["OtbMetrics", "auc", "bboxIoU", "readResultFile", "successCurve"]
+__all__ = [
+    "OtbMetrics",
+    "auc",
+    "bboxIoU",
+    "circularBBoxIoU",
+    "readResultFile",
+    "successCurve",
+]

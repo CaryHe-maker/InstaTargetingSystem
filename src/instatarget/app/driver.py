@@ -34,6 +34,7 @@ from instatarget.tracker.hit_backend import HiTPrediction, HiTSession
 if TYPE_CHECKING:
     from instatarget.core.protocols import DepthProcessor
     from instatarget.visualization.recorder import VisualizationRecorder
+    from instatarget.visualization.result import ResultVisualizationRecorder
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +101,12 @@ def buildRuntime(config: AppConfig) -> RuntimeBundle:
     )
     controller = DepthAwareTrackController(geometry, config)
     sink = FileResultSink()
-    return RuntimeBundle(geometry, controller, backend, sink, depthProcessor, None)
+    recorder = None
+    if config.visualization.enabled:
+        from instatarget.visualization.recorder import VisualizationRecorder
+
+        recorder = VisualizationRecorder(config.visualization)
+    return RuntimeBundle(geometry, controller, backend, sink, depthProcessor, recorder)
 
 
 def runTracking(
@@ -113,6 +119,7 @@ def runTracking(
     sink: ResultSinkProtocol,
     depthProcessor: DepthProcessor | None = None,
     recorder: "VisualizationRecorder | None" = None,
+    resultRecorder: "ResultVisualizationRecorder | None" = None,
 ) -> int:
     """Run the sequential tracking pipeline and publish one result per frame."""
     try:
@@ -123,10 +130,17 @@ def runTracking(
         initDepth = (
             depthProcessor.summarize(frame0, initialBox) if depthProcessor is not None else None
         )
-        sink.write(controller.commitInitialization(initPlan, initDepth))
+        initialResult = controller.commitInitialization(initPlan, initDepth)
+        sink.write(initialResult)
+        if resultRecorder is not None:
+            resultRecorder.record(frame0, initialResult)
         resultCount = 1
         if recorder is not None:
             recorder.recordLocalRgb(frame0, [templateView])
+            if depthProcessor is not None and frame0.depth is not None:
+                recorder.recordDepthRgb(
+                    frame0, {0: depthProcessor.preprocess(frame0.depth).depthRgb}
+                )
 
         while True:
             frame = source.read()
@@ -134,6 +148,9 @@ def runTracking(
                 break
             plan = controller.plan(frame)
             views = tuple(geometry.cropViews(frame, plan.views))
+            if recorder is not None and depthProcessor is not None and frame.depth is not None:
+                depthRgb = depthProcessor.preprocess(frame.depth).depthRgb
+                recorder.recordDepthRgb(frame, {0: depthRgb})
             observations = tuple(backend.infer(views, plan.templateCommand))
             projected = tuple(
                 _projectObservation(
@@ -149,7 +166,10 @@ def runTracking(
                 recorder.recordLocalRgb(frame, views)
                 recorder.recordBackendBoxes(frame, views, observations)
                 recorder.recordGeometryBoxes(frame, projected)
-            sink.write(controller.update(plan, projected))
+            result = controller.update(plan, projected)
+            sink.write(result)
+            if resultRecorder is not None:
+                resultRecorder.record(frame, result)
             resultCount += 1
         return resultCount
     except Exception:

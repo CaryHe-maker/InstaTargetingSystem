@@ -30,9 +30,15 @@ python -m instatarget.track_airsim360 \
   --config configs/RGBonly.yaml
 ```
 
+For the folder-based `raw/depth/semantic/instance` smoke test, use
+`tools/run_airsim360_dataset.py`; it
+writes tracking output plus modality and stage visualizations. See
+[`docs/Airsim360DataSolution.md`](docs/Airsim360DataSolution.md).
+
 ## 数据
 - AirSim360 序列默认包含 `rgb/`、`depth/`、`semantic/`、`instance/` 和 `meta.json`
-- `temppics/` 保留本地样本包，可用于检查读入、可视化和伪标注生成
+- `data/airsim360/nyc_sample/` 是规范化的本地样例，可用于检查读入、可视化和伪标注生成
+- 不指定 `--output-dir` 时，样例结果自动写入 `artifacts/airsim360/nyc_sample/output_N/`
 - 结果文件采用逐行 `xPx,yPx,widthPx,heightPx` 文本格式
 
 ## 输出
