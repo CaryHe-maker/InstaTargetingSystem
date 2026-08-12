@@ -16,11 +16,23 @@ class ResultVisualizationRecorder:
 
     outputRoot: Path
 
-    def record(self, frame: FramePacket, result: TrackResult) -> Path:
+    def record(
+        self,
+        frame: FramePacket,
+        result: TrackResult,
+        *,
+        stateScore: float | None = None,
+    ) -> Path:
         outputPath = self.outputRoot / f"frame_{int(frame.frameIndex):06d}.png"
+        scoreLabel = "stateScore=N/A" if stateScore is None else f"stateScore={stateScore:.4f}"
         return writeRgbPng(
             outputPath,
-            drawBoxRgb(frame.rgb, result.bbox, wrapHorizontal=True),
+            drawBoxRgb(
+                frame.rgb,
+                result.bbox,
+                wrapHorizontal=True,
+                label=scoreLabel,
+            ),
         )
 
 

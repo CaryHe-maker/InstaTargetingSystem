@@ -1,200 +1,201 @@
-# InstaTargetingSystem 控制器规范
+# InstaTargetingSystem Controller V2 规范
 
-> 本文定义 `DepthAwareTrackController`（DTC）的实现契约。`geometry`、`tracker` 和
-> `visualization` 已完成的功能不在 DTC 中重做：geometry 负责同步投影/裁剪，TrackerBackend
-> 负责 RGB-D 后端推理与融合，visualization 只做旁路记录。DTC 是 T0 线程中的唯一有状态模块，
-> 负责多视图计划、单帧候选聚合、多帧运动预测、状态机、恢复和模板命令。
+> 本文描述已经接入运行链路的 V2 控制层。详细设计依据见 `docs/StateMachineV2.md`。
+> Controller 只消费 TrackerBackend 的局部观测和 geometry 的回投影结果，不实现 RGB/Depth
+> 模型融合，不持有图像或模型特征。
 
-## 1. 职责边界
+---
 
-| 输入 | 输出 | 不负责 |
-|---|---|---|
-| `FramePacket`、最近窗口状态、`LocalObservation`/`ProjectedObservation`、可选 `DepthSummary` | `InitializationPlan`、`SearchPlan`、`TrackResult`、`TemplateCommand` | 图像裁剪、深度伪彩色、HiT 推理、RGB/Depth 融合、文件 I/O |
+## FusedScore 预处理
 
-固定边界：
-
-1. DTC 只消费后端输出的 `fusedScore`、`depthScore`、`DepthSummary` 和局部框，不读取整张深度图。
-2. `fusedScore` 是 TrackerBackend 的模型融合结果；DTC 可计算轻量的 `decisionScore` 做排序和
-   状态门控，但不能重做 MLP 或覆盖 `fusedScore`。
-3. DTC 生成一个包含多个 `ViewSpec` 的计划，geometry 按顺序裁剪 RGB/Depth，TrackerBackend
-   按相同顺序返回 `LocalObservation`。
-4. 所有请求/响应校验 `sequenceId`、`frameIndex`、`stateRevision`。旧 revision、重复 viewId、
-   乱序帧一律拒绝，原状态保持不变。
-
-## 2. 结果术语
-
-- **单图预测框**：一个局部视图对应的 `LocalObservation.bbox`。
-- **单帧预测框**：当前帧所有候选过滤、聚类和加权融合后的 `FrameAggregate.bbox`（可先为
-  controller 私有类型）。
-- **多帧预测框**：结合历史窗口和运动模型得到的 `TrackResult.bbox`。没有可靠观测时，
-  `TrackResult.valid=false`；有可靠候选确认时，`valid=true`。
-
-单图分数不能直接当作单帧最终置信度。DTC 必须保留每个候选的 `viewId`、来源角色和各分数，
-以便诊断和复现聚合过程。
-
-## 3. 状态机
+每次 backend 返回一组 `LocalObservation` 后，应用编排层在投影和调用
+`StateEvaluator` 前执行一次单调分段线性对比度拉伸。输入/输出关键点为：
 
 ```text
-INIT -> TRACKING -> UNCERTAIN -> RECOVERING -> TRACKING
-                       |             |
-                       +-----------> LOST
-                                      |
-                                      +-> RECOVERING
+0.00 -> 0.00
+0.60 -> 0.10
+0.80 -> 0.40
+0.90 -> 0.70
+0.95 -> 0.90
+1.00 -> 1.00
 ```
 
-| 状态 | 进入条件 | 当前帧动作 | 模板 |
-|---|---|---|---|
-| `INIT` | 第 0 帧模板视图和初始框校验成功 | 建立 anchor、运动状态和目标尺度 | 只初始化 |
-| `TRACKING` | `decisionScore >= acceptThreshold` 且候选通过运动/尺度门控 | guard triplet + 主预测视图 + 必要尺度视图 | 允许稳定更新 |
-| `UNCERTAIN` | 低于接收阈值但不低于不确定阈值，或多视图不一致 | 放大上下文并保留有限预测假设 | 禁止更新 |
-| `RECOVERING` | 连续 `uncertainPatience` 帧未确认 | 环搜/多假设搜索，按帧推进，不重复同一视图 | 禁止更新 |
-| `LOST` | 超过 `maxRecoveryFrames` 或恢复预算耗尽 | 按间隔做全景粗搜，其余帧输出预测 | 禁止更新 |
+关键点之间线性插值。因此原候选排序保持不变，`0.80-0.95` 被显著拉开，`0.60`
+及以下被压缩到 `0.00-0.10`。处理会创建新的不可变 `LocalObservation`，后续
+`ProjectedObservation`、`DecisionGate`、`StateEvaluator` 和 visualization 均使用新
+`fusedScore`，不会再次处理。
 
-状态转换使用滞回和连续帧计数，避免阈值附近抖动。找回时要求候选达到
-`recoverAcceptThreshold`、至少满足 `minViewsForCommit` 个相互支持视图（初始化帧例外），
-并通过运动/尺度门控。
-
-## 4. 初始化协议
-
-1. 读取第 0 帧和外部初始框，校验框尺寸及 ERP 边界。
-2. 通过 geometry 将初始框转换为 BFoV，生成模板 `ViewSpec`；模板上下文的宽高至少为初始框的
-   2 倍，受 geometry FOV 上下限约束。
-3. 调用 `TrackerBackend.initialize(templateView, templateBox)`。RGB-D 模式下，后端同时缓存
-   对齐的深度模板；无深度时保持 RGB-only。
-4. DTC 初始化 `MotionEstimator` 和 anchor 模板，提交第 0 帧 `TrackResult`，状态转为 `TRACKING`。
-5. 首帧结果必须是规范化后的初始框，不运行预测或候选竞争。
-
-## 5. 每帧搜索计划
-
-### 5.1 固定 guard triplet
-
-每帧都生成三张保护视图，中心基于上一帧已提交框或主预测中心，yaw 偏移为 `-120°、0°、+120°`，
-pitch 取预测 pitch。FOV 取不小于目标上下文所需值并限制在 geometry 的 `minFov/maxFov`。三图
-允许重叠，目的是覆盖左右相邻球面区域、防止局部过拟合和经线附近丢失。
-
-### 5.2 状态相关视图
-
-- `TRACKING`：预测中心主视图；目标尺度变化明显时增加放大/缩小视图。
-- `UNCERTAIN`：扩大上下文，并加入最多 `maxPredictionHorizon` 个角速度或深度变化假设。
-- `RECOVERING`：按未覆盖的环搜索半径和方位生成视图，视图不得重复。
-- `LOST`：每 `globalSearchInterval` 帧执行一次全景粗搜；非搜索帧只推进预测，不阻塞等待。
-
-总视图数不得超过 `recovery.maxViewsPerFrame`，且该值必须 `>=3`。预算不足时优先级固定为：
-`guard triplet > 主预测视图 > 预测假设 > 环搜/全景视图`。
-
-### 5.3 上下文 FOV
-
-对主预测框和每个恢复假设分别计算上下文：
+## 1. 组件
 
 ```text
-contextWidth  >= contextScale * max(initialWidth, predictedWidth)
-contextHeight >= contextScale * max(initialHeight, predictedHeight)
+DepthAwareTrackController (T0 single writer)
+  ├─ FrameTransaction        同帧尝试、视图总预算和唯一提交
+  ├─ SphericalMotionEstimator
+  ├─ RecoveryPlanner
+  ├─ StateEvaluator
+  ├─ TrackStateMachine       纯 transition reducer
+  ├─ TemplatePolicy
+  └─ RecoveryMemory
 ```
 
-`contextScale` 默认 `2.0`，再叠加 `contextMarginRatio`；这保证局部面积至少约为首框面积 4 倍。
-目标运动导致预测框变大时，下一帧上下文必须同步扩大；达到 `maxFov` 时记录裁剪状态，不静默
-缩小目标上下文。
-
-## 6. 单帧候选聚合
-
-### 6.1 回投影和过滤
-
-应用层将 `LocalObservation` 的局部框通过 `geometry.localBoxToBfov()` 和现有 seam 规则回投影，
-构造 `ProjectedObservation`，并补充：
-
-- `motionScore`：候选 BFoV 中心与预测中心的球面连续性；
-- `scaleScore`：候选尺寸与初始/历史尺寸的合理性；
-- `depthConsistencyScore`：由 `DepthSummary` 的有效率、深度跳变和历史范围计算。
-
-建议使用以下轻量选择分数，模态缺失时对有效权重重新归一化：
-
-```text
-decisionScore = normalize(
-    w_backend * fusedScore
-  + w_motion  * motionScore
-  + w_scale   * scaleScore
-  + w_depth   * depthConsistencyScore
-)
-```
-
-`candidateMinScore` 默认建议为 `0.40`。低于该值的单图候选不参与聚类和最终框计算，但保留在
-诊断日志中；DTC 不把低分硬改为零后继续平均。
-
-### 6.2 聚类和最终框
-
-1. 将候选中心转为单位向量，按球面角距离聚类；同时要求对数尺度差不超过
-   `scaleClusterTolerance`。
-2. 候选比较可以使用球面 IoU，或“中心角 + 尺度差”的确定性兼容实现；禁止直接用普通平面 IoU
-   处理跨经线框。
-3. 每簇以 `decisionScore` 为权重，采用加权中位数/截尾均值融合中心、宽高和深度，抑制离群框。
-4. 选簇时综合总权重、最高分、视图覆盖度和运动连续性；单张图的高分不能自动压过多视图一致
-   的中分簇。
-5. 输出单帧预测框和单帧置信度，再交给状态机决定是否提交为有效的多帧结果。
-
-首个可运行版本使用确定性聚合，不引入跨视图端到端网络。聚合权重在离线序列上校准，随后
-固定到配置或模型版本中。
-
-## 7. 多帧运动预测
-
-`motion_estimator.py` 首先实现常速度 Alpha-Beta 模型；Kalman 作为可替换实现，不应阻塞基础闭环。
-输入为最近 `tracking.windowLength` 个已提交观测：单位球面方向、框尺寸、置信度和可用深度范围。
-
-- 方向在单位向量空间平滑，不能直接对 yaw 做线性平均，以避免 `-π/π` 跳变。
-- 深度有效率低于 `depth.minValidRatio` 或摘要缺失时，只更新球面方向和尺度，不更新 range 速度。
-- 预测输出至少包含 `predictedMotion`、下一帧中心、下一帧 FOV 和恢复搜索半径。
-- 运动不确定度先保存在 estimator 私有状态；除非自适应 FOV 无法实现，否则不扩展已有
-  `MotionState3D` 公共字段。
-
-低置信时，DTC 保留最近可信状态并生成 `t+1 ... t+K` 的有限预测假设。未来帧出现高置信找回后，
-从找回帧重新初始化运动窗口，未提交的未来假设全部丢弃；已经写出的历史结果不得回写。
-
-## 8. 恢复规划
-
-恢复不是在同一帧重复调用 Tracker，而是“当前帧有限 batch + 后续帧预测”的有界流程：
-
-1. `UNCERTAIN`：当前帧扩大上下文并验证 guard/主视图，最多追加一次视图 batch。
-2. `RECOVERING`：后续帧按 `ringRadii` 和 `viewsPerRing` 扩大环搜；每轮只请求未覆盖方位。
-3. `LOST`：按 `globalSearchInterval` 降频做全景粗搜；其余帧提交预测框并设 `valid=false`。
-4. 达到 `maxRecoveryFrames` 仍未找回时，结束当前目标的恢复尝试，不静默重置首帧模板。
-
-同一帧的全部视图一次性送入后端；显存不足时允许确定性分 batch，但候选排序和聚合结果必须与
-单 batch 一致。恢复预算始终受 `maxViewsPerFrame` 限制。
-
-## 9. 模板策略
-
-- anchor 模板永久保留。
-- `UPDATE_RECENT`：连续稳定帧达到 `stableFramesBeforeUpdate`，候选簇通过运动和尺度一致性后更新。
-- `UPDATE_STABLE`：要求更高置信、足够视图支持和深度一致性（若深度有效）。
-- `UNCERTAIN`、`RECOVERING`、`LOST` 一律 `KEEP`；找回后至少稳定确认一帧再更新。
-- `RESET_TO_ANCHOR` 只在显式恢复失败策略或外部重初始化时使用。
-
-命令继续使用现有 `TemplateCommand` 的 `expectedRevision`，后端负责原子执行和 revision 校验，
-DTC 只决定命令，不接触模板特征。
-
-## 10. 与现有接口的对应
-
-| 对象 | DTC 角色 |
+| 组件 | 职责 |
 |---|---|
-| `TrackController.buildInitialization` | 生成首帧模板视图和上下文 |
-| `TrackController.commitInitialization` | 初始化后提交第 0 帧 |
-| `TrackController.plan` | 生成 guard triplet、主视图和恢复/预测视图 |
-| `TrackController.update` | 校验响应、回投影、聚合候选、更新状态并原子提交结果 |
-| `SearchPlan` | 携带一帧全部 `ViewSpec`、模板命令和主预测运动 |
-| `ProjectedObservation` | 携带单图回投影候选及控制层补充分数 |
-| `DepthProcessor` | 后端深度摘要协议；DTC 只消费摘要 |
+| `SphericalMotionEstimator` | 保存最近 `windowLength` 个可靠测量，在球面切平面拟合速度、尺度和可选 range |
+| `RecoveryPlanner` | 生成五视图局部覆盖、恢复环和包含南北极的六面 cube-map |
+| `StateEvaluator` | 过滤、球面聚类、稳健融合，产生 `StateObservation` |
+| `TrackStateMachine` | 根据证据、计数和预算给出下一状态，不拥有跨帧数据 |
+| `TemplatePolicy` | 稳定跟踪时发出模板命令，其他状态和找回冷却期保持 `KEEP` |
 
-若未来需要暴露多假设，可在 `SearchPlan` 末尾增加带默认值的只读 `predictionHypotheses`；首个
-版本优先由 DTC 私有结构维护，避免破坏已有调用方。
+所有可变状态只由 T0 修改。计划、观测、评估和结果均为不可变跨模块消息。
 
-## 11. 实现验收
+---
 
-- 每帧至少三张 guard 视图，且总数不超过 `maxViewsPerFrame`。
-- 单图低于 `candidateMinScore` 不污染单帧框；最终框来自候选簇而非简单最高分。
-- 目标变大时上下文随初始框和预测框共同扩大；跨经线和 yaw wrap 测试通过。
-- 遮挡/消失序列不会卡在同一帧；恢复成功后从找回帧重建运动窗口。
-- RGB-D 中深度证据确实影响后端 `fusedScore`；RGB-only 结果保持现有退化契约。
-- 模板在不确定、恢复、丢失阶段不更新；revision 错误和乱序响应被拒绝。
-- 单线程、四线程以及恢复 batch 分片的逐帧结果一致。
+## 2. 状态和证据
 
-与 DTC 相关的所有可变状态只存在于 T0；任何深度网络、融合头或图像裁剪代码进入 controller，
-均视为职责越界。
+内部状态为 `INIT/TRACKING/UNCERTAIN/RECOVERING/LOST/TERMINATED`。公共逐帧结果继续使用
+`TrackStatus.TRACKING/UNCERTAIN/RECOVERING/LOST`。
+
+`StateEvaluator` 输出四级证据：
+
+| 证据 | 条件 |
+|---|---|
+| `CONFIRMED` | 支持视图足够且 `stateScore >= acceptThreshold` |
+| `WEAK` | 分数达到 `uncertainThreshold`，但没有达到普通确认条件 |
+| `REJECTED` | 无合格候选、低于不确定阈值或硬门控失败 |
+| `REACQUIRED` | 恢复/丢失状态中达到更高的 `recoverAcceptThreshold` 和找回支持数 |
+
+主要转移为：
+
+```text
+INIT -> TRACKING
+TRACKING --weak--> UNCERTAIN
+TRACKING --miss--> RECOVERING
+UNCERTAIN --confirmed--> TRACKING
+UNCERTAIN --patience exhausted--> RECOVERING
+RECOVERING --reacquired--> TRACKING
+RECOVERING --budget exhausted--> LOST
+LOST --candidate--> RECOVERING
+LOST --reacquired--> TRACKING
+```
+
+同名状态的下一帧会创建新的 `StateInstance/stateId`。`LOST` 不表示同帧重试；同帧重试由
+`FrameTransaction.attemptIndex` 表示。
+
+---
+
+## 3. LocalObservation 处理
+
+一个 `LocalObservation` 只属于一个局部视图。应用层先把它回投影为 `ProjectedObservation`，
+随后 `StateEvaluator` 执行：
+
+1. 校验 viewId、顺序、分数和框。
+2. 使用后端 `fusedScore`、运动、尺度和可用深度证据计算 `decisionScore`。
+3. 低于 `candidateMinScore` 的候选只保留诊断意义。
+4. 以球面角距离、BFoV 重合和对数尺度差构造候选兼容图。
+5. 使用连通分量得到与输入顺序无关的候选簇。
+6. 选择一个最佳簇，只融合该簇。
+7. 中心使用单位球向量稳健均值，宽高使用加权中位数。
+
+不同区域的候选不会直接并集。互不支持的单图高分候选只能成为恢复搜索种子；支持不足时
+最终输出运动预测框且 `valid=false`。候选最大包络不参与 `TrackResult.bbox`，避免放大输出框并降低 IoU。
+
+---
+
+## 4. 多帧运动预测
+
+历史只保存可靠测量：
+
+- `INITIAL`
+- `OBSERVED_CONFIRMED`
+- `OBSERVED_REACQUIRED`
+
+纯预测输出、弱候选和第一次尝试中被否决的候选不会进入历史。
+
+方向预测在最后可靠中心的局部切平面进行加权常速度拟合，跨经线时不直接相减 yaw。尺度在对数
+空间拟合；range 只有在深度有效时才保存，首次有效深度只初始化而不估计速度。预测输出包含角度、
+尺度、range、置信度和不确定度。不确定度随时间和缺失增长，用于扩大搜索 FOV，而不是扩大最终目标框。
+
+找回后清除旧历史和未来假设，以找回测量重新初始化，并进入 `reacquireCooldownFrames` 冷却期。
+
+---
+
+## 5. 视图计划
+
+### 5.1 TRACKING/UNCERTAIN
+
+默认使用预测中心主视图和四个切平面角方向保护视图，共五图。`UNCERTAIN` 乘以
+`uncertainFovScale` 扩大 FOV。输出像素尺寸固定，FOV 仍受 geometry min/max 限制。
+
+### 5.2 RECOVERING
+
+先验证搜索种子，再按 `ringRadii/viewsPerRing` 生成球面环。`RecoveryMemory.attemptedPlanKeys` 和
+`coveredCells` 跨恢复帧保存，避免重复同一区域。
+
+### 5.3 LOST
+
+每 `globalSearchInterval` 帧执行六面 cube-map：四个赤道面和南北极面，面间使用
+`cubeMapOverlapRatio` 重叠。非扫描帧使用单个丢失验证视图。
+
+所有尝试合计不超过 `maxViewsPerFrameTotal`。
+
+---
+
+## 6. 帧事务
+
+运行入口使用：
+
+```python
+plan = controller.beginFrame(frame)
+while True:
+    observations = inferAndProject(plan)
+    step = controller.consume(plan, observations)
+    if isinstance(step, MoreViewsRequired):
+        plan = step.plan
+        continue
+    result = step.result
+    break
+```
+
+`maxAttemptsPerFrame` 只能为 1 或 2。第一次为 `WEAK/REJECTED` 且预算允许时返回
+`MoreViewsRequired`；第二次必须提交。每帧只发布一个 `TrackResult`，已经发布的结果不回写。
+
+旧 `plan/update` 接口仍作为单尝试兼容路径保留，不会返回第二个计划。
+
+Controller revision 每个提交帧增加一次；Backend 模板 revision 每次推理尝试增加一次。两者在同帧
+升级后允许不同，不能再要求数值始终相等。
+
+---
+
+## 7. 输出和模板
+
+`TrackResult.resultSource` 表示来源：
+
+- `INITIAL`
+- `OBSERVED_CONFIRMED`
+- `OBSERVED_REACQUIRED`
+- `OBSERVED_WEAK_BLEND`（协议保留，当前正式路径默认不用弱框扩大输出）
+- `MOTION_PREDICTED`
+
+只有前面三种可靠测量可以更新运动状态。动态模板还要求稳定 `TRACKING`、足够支持和找回冷却结束。
+
+---
+
+## 8. 失败和原子性
+
+- 旧 transaction/attempt、未知或重复 viewId、乱序响应立即报错。
+- 正常非空响应保持请求视图顺序；空序列表示本次模型没有候选。
+- 恢复规划使用事务内的 `RecoveryMemory` 副本，只有最终提交才替换跨帧内存。
+- 第二次尝试失败不会发布第一次的半成品；运行入口按现有 FatalError 语义终止。
+- 状态历史不保存 RGB、Depth、模板特征或无界候选列表。
+
+---
+
+## 9. 验收
+
+- 不相交候选不会生成大并集框。
+- 预测输出不回灌运动窗口。
+- 每帧最多两次尝试且只有一个结果。
+- 六面搜索覆盖赤道、经线和两极。
+- 找回后速度窗口重建、模板冷却。
+- RGB-only 与 RGB-D 使用同一状态和事务协议。
+- 单线程与线程化实现应保持逐帧确定性。

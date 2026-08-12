@@ -6,7 +6,7 @@
 - `src/instatarget/core`：数据类型、协议、配置和错误
 - `src/instatarget/geometry`：ERP 与 BFoV 的裁剪、回投影和跨经线处理
 - `src/instatarget/tracker`：HiT 主干、深度分支、融合头和局部观测
-- `src/instatarget/controller`：多视图规划、状态机、恢复和模板更新
+- `src/instatarget/controller`：V2 帧事务、状态评估、多帧运动预测、分级恢复和模板更新
 - `src/instatarget/io`：帧读取、结果写入和 AirSim360 数据接入
 - `src/instatarget/visualization`：中间结果 PNG 记录
 - `src/instatarget/eval`：OTB 风格指标和结果读取
@@ -55,10 +55,13 @@ writes tracking output plus modality and stage visualizations. See
 - [架构](docs/design.md)
 - [接口](docs/interface.md)
 - [实现说明](docs/implement.md)
+- [Controller / StateMachine V2 蓝图](docs/StateMachineV2.md)
 - [数据规范](docs/data.md)
 - [可视化](docs/modules/visualization.md)
 - [训练规约](docs/ModelTraning.md)
 
 ## 当前状态
 - 运行链路、评估链路和可视化链路已落地
+- Controller V2 已实现：每帧原子提交、最多一次同帧升级、球面候选聚类、可靠测量运动窗口、环搜与六面 cube-map
+- 不相交的 `LocalObservation` 不做大并集；只有最佳一致簇可形成观测框，支持不足时输出预测框且 `valid=false`
 - 训练链路尚未接入真实训练器，当前只保留规范和入口

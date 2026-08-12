@@ -84,6 +84,24 @@ def main(argv: list[str] | None = None) -> int:
         ]
     )
 
+    if code != 0 or not resultPath.is_file():
+        manifest.update(
+            {
+                "trackingExitCode": code,
+                "trackedFrameCount": 0,
+                "error": (
+                    "tracking failed before a complete tracking.txt was produced"
+                    if code != 0
+                    else "tracking returned success without producing tracking.txt"
+                ),
+            }
+        )
+        (resultRoot / "manifest.json").write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8"
+        )
+        print(json.dumps(manifest, indent=2))
+        return code if code != 0 else 1
+
     iou = _evaluate(args, resultPath)
     (resultRoot / "iou.json").write_text(json.dumps(iou, indent=2), encoding="utf-8")
     manifest.update(
@@ -125,7 +143,8 @@ def _evaluate(args: argparse.Namespace, resultPath: Path) -> dict[str, object]:
                 break
             groundTruth, visible = builder.buildPseudoGroundTruth(frame, args.target_instance)
             value = circularBBoxIoU(prediction, groundTruth, frame.rgb.shape[1]) if visible else 0.0
-            if visible:
+            # Frame 0 is the supplied initialization box, not a tracker prediction.
+            if visible and int(frame.frameIndex) != 0:
                 metrics.ious.append(value)
             frames.append(
                 {
@@ -134,6 +153,7 @@ def _evaluate(args: argparse.Namespace, resultPath: Path) -> dict[str, object]:
                     "prediction": _boxToDict(prediction),
                     "groundTruth": _boxToDict(groundTruth) if visible else None,
                     "iou": value,
+                    "includedInSummary": visible and int(frame.frameIndex) != 0,
                 }
             )
     finally:

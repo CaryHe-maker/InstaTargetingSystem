@@ -44,6 +44,8 @@ class FrameAggregate:
     localBox: BBoxXYWH | None
     depthSummary: DepthSummary | None
     supported: bool
+    clusterCount: int = 1
+    agreementScore: float = 1.0
 
 
 class DecisionGate:
@@ -94,31 +96,12 @@ class DecisionGate:
     ) -> FrameAggregate | None:
         scored = [self.score(observation) for observation in observations]
         eligible = [
-            item
-            for item in scored
-            if item.observation.fusedScore >= self._trackingConfig.candidateMinScore
+            item for item in scored if item.decisionScore >= self._trackingConfig.candidateMinScore
         ]
         if not eligible:
             return None
 
-        clusters: list[list[ScoredObservation]] = []
-        for candidate in eligible:
-            matching = next(
-                (
-                    cluster
-                    for cluster in clusters
-                    if _compatible(
-                        candidate,
-                        cluster[0],
-                        self._trackingConfig.scaleClusterTolerance,
-                    )
-                ),
-                None,
-            )
-            if matching is None:
-                clusters.append([candidate])
-            else:
-                matching.append(candidate)
+        clusters = _connectedClusters(eligible, self._trackingConfig.scaleClusterTolerance)
 
         best = max(clusters, key=lambda cluster: _clusterRank(cluster))
         return _aggregateCluster(
@@ -127,6 +110,7 @@ class DecisionGate:
             frameWidthPx,
             frameHeightPx,
             self._trackingConfig.minViewsForCommit,
+            len(clusters),
         )
 
 
@@ -159,12 +143,39 @@ def _clusterRank(cluster: list[ScoredObservation]) -> tuple[float, int, float]:
     return weight, len({item.observation.viewId for item in cluster}), peak
 
 
+def _connectedClusters(
+    candidates: list[ScoredObservation],
+    scaleTolerance: float,
+) -> list[list[ScoredObservation]]:
+    """Build order-independent connected components in candidate compatibility space."""
+    remaining = set(range(len(candidates)))
+    clusters: list[list[ScoredObservation]] = []
+    while remaining:
+        seed = min(remaining)
+        remaining.remove(seed)
+        component = {seed}
+        frontier = [seed]
+        while frontier:
+            current = frontier.pop()
+            linked = {
+                index
+                for index in remaining
+                if _compatible(candidates[current], candidates[index], scaleTolerance)
+            }
+            remaining.difference_update(linked)
+            component.update(linked)
+            frontier.extend(sorted(linked))
+        clusters.append([candidates[index] for index in sorted(component)])
+    return clusters
+
+
 def _aggregateCluster(
     cluster: list[ScoredObservation],
     geometry: SphericalGeometry,
     frameWidthPx: int,
     frameHeightPx: int,
     minViewsForCommit: int,
+    clusterCount: int,
 ) -> FrameAggregate:
     weights = np.asarray([max(item.decisionScore, 1e-6) for item in cluster], dtype=np.float64)
     weights /= float(np.sum(weights))
@@ -181,25 +192,23 @@ def _aggregateCluster(
     )
     centerVector = _normalize(np.sum(vectors * weights[:, np.newaxis], axis=0))
     yawRad, pitchRad = _vectorToYawPitch(centerVector)
-    horizontalFov = max(item.observation.bfov.horizontalFovRad for item in cluster)
-    verticalFov = max(item.observation.bfov.verticalFovRad for item in cluster)
-    spread = max(
-        (
-            _centerAngle(cluster[0].observation.bfov.center, item.observation.bfov.center)
-            for item in cluster
-        ),
-        default=0.0,
+    horizontalFov = _weightedMedian(
+        np.asarray([item.observation.bfov.horizontalFovRad for item in cluster]), weights
+    )
+    verticalFov = _weightedMedian(
+        np.asarray([item.observation.bfov.verticalFovRad for item in cluster]), weights
     )
     fusedBfov = BFoV(
         center=makeSphericalPoint(yawRad, pitchRad),
-        horizontalFovRad=min(pi - 1e-5, max(1e-4, horizontalFov + 2.0 * spread)),
-        verticalFovRad=min(pi - 1e-5, max(1e-4, verticalFov + 2.0 * spread)),
+        horizontalFovRad=min(pi - 1e-5, max(1e-4, horizontalFov)),
+        verticalFovRad=min(pi - 1e-5, max(1e-4, verticalFov)),
     )
     bbox = geometry.bfovToBbox(fusedBfov, frameWidthPx, frameHeightPx)
     confidence = float(np.clip(np.dot(weights, [item.decisionScore for item in cluster]), 0.0, 1.0))
     representative = max(cluster, key=lambda item: item.decisionScore).observation
     depthSummary = _aggregateDepth(cluster, weights)
     viewIds = tuple(sorted({item.observation.viewId for item in cluster}))
+    agreementScore = _clusterAgreement(cluster, weights, fusedBfov)
     return FrameAggregate(
         bfov=fusedBfov,
         bbox=bbox,
@@ -210,7 +219,36 @@ def _aggregateCluster(
         localBox=representative.localBox,
         depthSummary=depthSummary,
         supported=len(viewIds) >= minViewsForCommit,
+        clusterCount=clusterCount,
+        agreementScore=agreementScore,
     )
+
+
+def _clusterAgreement(
+    cluster: list[ScoredObservation],
+    weights: np.ndarray,
+    fusedBfov: BFoV,
+) -> float:
+    if len(cluster) <= 1:
+        return 1.0
+    angularResidual = sum(
+        float(weight) * _centerAngle(item.observation.bfov.center, fusedBfov.center)
+        for item, weight in zip(cluster, weights, strict=True)
+    )
+    angleScale = max(
+        0.05,
+        0.5 * max(fusedBfov.horizontalFovRad, fusedBfov.verticalFovRad),
+    )
+    scaleResidual = sum(
+        float(weight)
+        * 0.5
+        * (
+            abs(log(item.observation.bfov.horizontalFovRad / fusedBfov.horizontalFovRad))
+            + abs(log(item.observation.bfov.verticalFovRad / fusedBfov.verticalFovRad))
+        )
+        for item, weight in zip(cluster, weights, strict=True)
+    )
+    return float(np.clip(np.exp(-angularResidual / angleScale - scaleResidual), 0.0, 1.0))
 
 
 def _aggregateDepth(
@@ -234,6 +272,14 @@ def _aggregateDepth(
         sum(summary.confidence * weight for summary, weight in valid) / total,
     ]
     return DepthSummary(*values)
+
+
+def _weightedMedian(values: np.ndarray, weights: np.ndarray) -> float:
+    order = np.argsort(values)
+    sortedValues = values[order]
+    sortedWeights = weights[order]
+    index = int(np.searchsorted(np.cumsum(sortedWeights), 0.5, side="left"))
+    return float(sortedValues[min(index, len(sortedValues) - 1)])
 
 
 def _centerAngle(first: SphericalPoint, second: SphericalPoint) -> float:

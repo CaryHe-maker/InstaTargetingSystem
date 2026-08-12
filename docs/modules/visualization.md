@@ -20,6 +20,13 @@
 所有目标框固定使用荧光绿 `#39FF14`。`geometry_box` 支持跨 ERP 经线的框，框会同时出现在
 原图左右边界。原始数组不会被原地修改。
 
+`backend_box` 和 `geometry_box` 会在候选框下方用相同的荧光绿写出
+`fuseScore=<四位小数>`。该值直接取自对应的 `LocalObservation.fusedScore` 或
+`ProjectedObservation.fusedScore`；它是 controller 输入边界完成对比度拉伸后的分数，与
+`StateEvaluator` 实际消费的值一致，可用于校准后端融合阈值。最终逐帧 `visualResult` 会写出
+`stateScore=<四位小数>`，值直接取自该帧 `StateEvaluator` 生成的
+`StateObservation.stateScore`；初始化帧未经过 `StateEvaluator`，因此显示 `stateScore=N/A`。
+
 `dtc_*` 是 DTC 的可选旁路，不参与候选排序、状态提交或结果输出；启用前必须同步扩展
 `VISUALIZATION_STAGES`、配置 schema、记录器方法和路径测试。当前实现默认只承诺前四类诊断图。
 

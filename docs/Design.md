@@ -16,7 +16,7 @@
 | 深度 | geometry 同步裁剪；TrackerBackend 内完成深度伪彩色、深度分支和融合头 |
 | 退化 | `depth.enabled=false` 时严格退化为 `rgb_only`，输出契约不变 |
 | 训练 | HiT 主干可冻结；深度分支和融合头独立训练并回灌后端 |
-| 实时性 | 每帧固定 guard triplet，额外视图按状态和预算批量推理 |
+| 实时性 | 状态相关五视图/环搜/cube-map；低分时最多一次同帧有界升级 |
 
 系统不把整张 ERP 直接送入后端主干。后端只看低畸变局部视图；球面状态由 DTC 统一维护。
 
@@ -104,7 +104,7 @@ core <- visualization <- app
 
 ### 4.2 DTC 多帧预测
 
-`DTC` 不靠单帧决策，而是使用前 `n` 帧窗口，默认 `n=3~5`。
+`DTC` 不靠单帧决策，而是使用最近 `n` 个可靠测量窗口，默认 `n=5`。纯预测输出不进入窗口。
 
 输入窗口包含：
 
@@ -115,9 +115,10 @@ core <- visualization <- app
 处理顺序：
 
 1. 将方向转成单位向量序列。
-2. 用常速度 / Alpha-Beta / Kalman 预测下一帧中心。
-3. 结合连续性、尺度变化和历史置信度决定下一帧搜索中心和 FOV。
-4. 输出 `SearchPlan` 和 `TemplateCommand`。
+2. 在最后可靠中心的球面切平面做稳健常速度拟合，样本不足时退化为零速度/Alpha-Beta。
+3. 独立拟合对数尺度和可选 log-range，并估计随缺失增长的不确定度。
+4. 结合连续性、尺度变化、历史置信度和不确定度决定搜索中心和 FOV。
+5. 输出带 transaction/attempt 的 `SearchPlan` 和 `TemplateCommand`。
 
 深度摘要由 TrackerBackend 生成后进入控制闭环；DTC 不再处理整张深度图。
 
@@ -142,13 +143,13 @@ INIT -> TRACKING -> UNCERTAIN -> RECOVERING -> TRACKING
 
 | 状态 | 行为 | 模板更新 |
 |------|------|----------|
-| `TRACKING` | guard triplet + 主预测/尺度视图，多视图候选聚合 | 允许稳定更新 |
-| `UNCERTAIN` | 扩窗验证 | 禁止 |
-| `RECOVERING` | 环搜 / 全景粗搜 | 禁止 |
-| `LOST` | 降频搜索并输出预测 | 禁止 |
+| `TRACKING` | 主视图 + 四个角保护视图，稳健候选聚合 | 允许稳定更新 |
+| `UNCERTAIN` | 五视图扩窗，可同帧升级一次 | 禁止 |
+| `RECOVERING` | 搜索种子 + 跨帧去重环搜 | 禁止 |
+| `LOST` | 降频六面 cube-map 并输出预测 | 禁止 |
 
-恢复阶段只改变搜索范围和预测假设，不改变 geometry、TrackerBackend 和 DTC 的职责边界；
-同一帧不允许无限重试。
+`StateEvaluator` 只融合一个球面一致候选簇，不把不相交候选做并集。恢复阶段只改变搜索范围和
+预测假设，不改变职责边界；`maxAttemptsPerFrame` 从结构上保证同一帧不会无限重试。
 
 ---
 
@@ -227,7 +228,7 @@ InstaTargetingSystem/
 1. 先跑通 `TrackerBackend + 360VOT` 基线。
 2. 再接入 `geometry` 的同步裁剪。
 3. 已完成 RGB-D 后端、深度摘要和融合头，并验证 RGB-only 退化。
-4. 当前接入 DTC 的多视图计划、候选聚合、多帧预测和恢复。
+4. 已接入 V2 DTC 的帧事务、状态评估器、窗口预测、状态相关视图和恢复记忆。
 5. 最后做 app/io、评测、训练回灌、部署和性能优化。
 
 ---
@@ -239,5 +240,5 @@ InstaTargetingSystem/
 - `HiT` RGB 主干保留；深度分支通过后端可选接入。
 - 深度颜色化与融合头已实现，并可在独立训练链路中更新权重。
 - `rgb_only` 和 `rgb_depth` 均保持同一接口可运行。
-- DTC 完成定义还包括每帧 guard triplet、单帧聚合和有界恢复。
+- DTC 完成定义还包括每帧唯一提交、稳健单簇聚合、最多一次同帧升级和有界恢复。
 - 可按配置选择记录四类中间图，且关闭可视化时不改变原计算链路。

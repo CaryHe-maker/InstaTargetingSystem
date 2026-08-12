@@ -15,6 +15,14 @@ class CoreConfigTest(unittest.TestCase):
         self.assertAlmostEqual(config.geometry.minFovRad, 0.3490658503988659)
         self.assertEqual(config.geometry.boundarySamplesPerEdge, 65)
         self.assertEqual(config.tracking.windowLength, 5)
+        self.assertTrue(config.tracking.sameFrameEscalationEnabled)
+        self.assertEqual(config.tracking.maxAttemptsPerFrame, 2)
+        self.assertEqual(config.tracking.maxViewsPerFrameTotal, 12)
+        self.assertEqual(config.tracking.reacquireCooldownFrames, 2)
+        self.assertAlmostEqual(config.evaluator.supportWeight, 0.25)
+        self.assertEqual(config.evaluator.minReacquireViews, 2)
+        self.assertEqual(config.motion.minSamplesForVelocity, 2)
+        self.assertAlmostEqual(config.motion.processNoiseRadPerSec, 0.04)
         self.assertTrue(config.depth.enabled)
         self.assertEqual(config.model.weights, REPOSITORY_ROOT / "models" / "hit_small.pth")
         self.assertFalse(config.visualization.enabled)
@@ -40,6 +48,16 @@ class CoreConfigTest(unittest.TestCase):
     def testLoadConfigRejectsInvertedThresholds(self) -> None:
         source = (REPOSITORY_ROOT / "configs" / "RGBonly.yaml").read_text(encoding="utf-8")
         source = source.replace("uncertainThreshold: 0.45", "uncertainThreshold: 0.80")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "invalid.yaml"
+            path.write_text(source, encoding="utf-8")
+            with self.assertRaises(ConfigError):
+                loadConfig(path)
+
+    def testLoadConfigRejectsBudgetThatCannotFitCubeMap(self) -> None:
+        source = (REPOSITORY_ROOT / "configs" / "RGBonly.yaml").read_text(encoding="utf-8")
+        source = source.replace("maxViewsPerFrameTotal: 12", "maxViewsPerFrameTotal: 5")
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "invalid.yaml"

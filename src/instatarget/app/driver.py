@@ -3,33 +3,36 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from instatarget.controller import DepthAwareTrackController
+from instatarget.controller import DepthAwareTrackController, remapLocalObservationFusedScores
 from instatarget.core.config import AppConfig
-from instatarget.core.errors import DecodeError, OutputError, ProtocolError
+from instatarget.core.errors import DecodeError, ProtocolError
 from instatarget.core.protocols import FrameSource as FrameSourceProtocol
+from instatarget.core.protocols import MoreViewsRequired, SphericalGeometry, TrackerBackend
 from instatarget.core.protocols import ResultSink as ResultSinkProtocol
-from instatarget.core.protocols import SphericalGeometry, TrackerBackend
 from instatarget.core.types import (
     BBoxXYWH,
-    BFoV,
-    DepthSummary,
     FramePacket,
     LocalObservation,
     LocalView,
     MotionState3D,
     ProjectedObservation,
-    TrackResult,
 )
 from instatarget.geometry import SphericalGeometryImpl, makeSphericalPoint
 from instatarget.io.result_sink import FileResultSink
-from instatarget.tracker import DepthEncoder, DepthPreprocessor, FusionHead, HiTBackend, TrackerBackendImpl
-from instatarget.tracker.hit_backend import HiTPrediction, HiTSession
+from instatarget.tracker import (
+    DepthEncoder,
+    DepthPreprocessor,
+    FusionHead,
+    HiTBackend,
+    TrackerBackendImpl,
+)
+from instatarget.tracker.hit_backend import HiTPrediction
 
 if TYPE_CHECKING:
     from instatarget.core.protocols import DepthProcessor
@@ -44,7 +47,7 @@ class RuntimeBundle:
     backend: TrackerBackend
     sink: ResultSinkProtocol
     depthProcessor: DepthProcessor | None = None
-    recorder: "VisualizationRecorder | None" = None
+    recorder: VisualizationRecorder | None = None
 
 
 class FallbackHiTSession:
@@ -68,8 +71,12 @@ class FallbackHiTSession:
         currentMean = rgb.mean(axis=(0, 1)).astype(np.float32)
         colorDelta = (currentMean - templateMean) / 255.0
         widthPx, heightPx = rgb.shape[1], rgb.shape[0]
-        centerX = templateBox.xPx + templateBox.widthPx / 2.0 + float(colorDelta[0]) * 0.35 * widthPx
-        centerY = templateBox.yPx + templateBox.heightPx / 2.0 - float(colorDelta[1]) * 0.35 * heightPx
+        centerX = (
+            templateBox.xPx + templateBox.widthPx / 2.0 + float(colorDelta[0]) * 0.35 * widthPx
+        )
+        centerY = (
+            templateBox.yPx + templateBox.heightPx / 2.0 - float(colorDelta[1]) * 0.35 * heightPx
+        )
         width = max(2.0, min(float(widthPx), templateBox.widthPx))
         height = max(2.0, min(float(heightPx), templateBox.heightPx))
         bbox = BBoxXYWH(
@@ -96,7 +103,9 @@ def buildRuntime(config: AppConfig) -> RuntimeBundle:
         HiTBackend(FallbackHiTSession()),
         depthProcessor=depthProcessor,
         depthEncoder=DepthEncoder(),
-        fusionHead=FusionHead(config.fusionHead, depthScoreWeight=config.backendFusion.depthScoreWeight),
+        fusionHead=FusionHead(
+            config.fusionHead, depthScoreWeight=config.backendFusion.depthScoreWeight
+        ),
         depthEnabled=config.depth.enabled,
     )
     controller = DepthAwareTrackController(geometry, config)
@@ -118,8 +127,8 @@ def runTracking(
     backend: TrackerBackend,
     sink: ResultSinkProtocol,
     depthProcessor: DepthProcessor | None = None,
-    recorder: "VisualizationRecorder | None" = None,
-    resultRecorder: "ResultVisualizationRecorder | None" = None,
+    recorder: VisualizationRecorder | None = None,
+    resultRecorder: ResultVisualizationRecorder | None = None,
 ) -> int:
     """Run the sequential tracking pipeline and publish one result per frame."""
     try:
@@ -133,7 +142,7 @@ def runTracking(
         initialResult = controller.commitInitialization(initPlan, initDepth)
         sink.write(initialResult)
         if resultRecorder is not None:
-            resultRecorder.record(frame0, initialResult)
+            resultRecorder.record(frame0, initialResult, stateScore=None)
         resultCount = 1
         if recorder is not None:
             recorder.recordLocalRgb(frame0, [templateView])
@@ -146,30 +155,51 @@ def runTracking(
             frame = source.read()
             if frame is None:
                 break
-            plan = controller.plan(frame)
-            views = tuple(geometry.cropViews(frame, plan.views))
-            if recorder is not None and depthProcessor is not None and frame.depth is not None:
-                depthRgb = depthProcessor.preprocess(frame.depth).depthRgb
-                recorder.recordDepthRgb(frame, {0: depthRgb})
-            observations = tuple(backend.infer(views, plan.templateCommand))
-            projected = tuple(
-                _projectObservation(
-                    frame=frame,
-                    view=view,
-                    observation=observation,
-                    predictedMotion=plan.predictedMotion,
-                    geometry=geometry,
+            plan = controller.beginFrame(frame)
+            depthRecorded = False
+            while True:
+                views = tuple(geometry.cropViews(frame, plan.views))
+                if (
+                    not depthRecorded
+                    and recorder is not None
+                    and depthProcessor is not None
+                    and frame.depth is not None
+                ):
+                    depthRgb = depthProcessor.preprocess(frame.depth).depthRgb
+                    recorder.recordDepthRgb(frame, {0: depthRgb})
+                    depthRecorded = True
+                rawObservations = tuple(backend.infer(views, plan.templateCommand))
+                observations = remapLocalObservationFusedScores(rawObservations)
+                projected = tuple(
+                    _projectObservation(
+                        frame=frame,
+                        view=view,
+                        observation=observation,
+                        predictedMotion=plan.predictedMotion,
+                        geometry=geometry,
+                    )
+                    for view, observation in zip(views, observations, strict=True)
                 )
-                for view, observation in zip(views, observations, strict=True)
-            )
-            if recorder is not None:
-                recorder.recordLocalRgb(frame, views)
-                recorder.recordBackendBoxes(frame, views, observations)
-                recorder.recordGeometryBoxes(frame, projected)
-            result = controller.update(plan, projected)
+                if recorder is not None:
+                    recorder.recordLocalRgb(frame, views)
+                    recorder.recordBackendBoxes(frame, views, observations)
+                    recorder.recordGeometryBoxes(frame, projected)
+                step = controller.consume(plan, projected)
+                if isinstance(step, MoreViewsRequired):
+                    plan = step.plan
+                    continue
+                result = step.result
+                break
             sink.write(result)
             if resultRecorder is not None:
-                resultRecorder.record(frame, result)
+                stateObservation = controller.lastStateObservation
+                stateScore = (
+                    stateObservation.stateScore
+                    if stateObservation is not None
+                    and stateObservation.frameIndex == frame.frameIndex
+                    else None
+                )
+                resultRecorder.record(frame, result, stateScore=stateScore)
             resultCount += 1
         return resultCount
     except Exception:
@@ -223,8 +253,14 @@ def _projectObservation(
 def _motionScore(center, motion: MotionState3D | None) -> float:
     if motion is None:
         return 1.0
-    motionPoint = makeSphericalPoint(math.atan2(motion.position[0], motion.position[2]), math.asin(max(-1.0, min(1.0, motion.position[1]))))
-    dot = max(-1.0, min(1.0, center.x * motionPoint.x + center.y * motionPoint.y + center.z * motionPoint.z))
+    motionPoint = makeSphericalPoint(
+        math.atan2(motion.position[0], motion.position[2]),
+        math.asin(max(-1.0, min(1.0, motion.position[1]))),
+    )
+    dot = max(
+        -1.0,
+        min(1.0, center.x * motionPoint.x + center.y * motionPoint.y + center.z * motionPoint.z),
+    )
     return float(np.clip((dot + 1.0) / 2.0 * motion.confidence, 0.0, 1.0))
 
 

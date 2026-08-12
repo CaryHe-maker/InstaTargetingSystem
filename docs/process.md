@@ -34,7 +34,7 @@ AirSim360 / Raw panoramic video
    +-----------------+
 ```
 
-默认使用四个长生命周期线程。恢复阶段的多个 BFoV 候选由 `T2` 批量推理，不为每个候选创建线程。  
+默认使用四个长生命周期线程。一个帧事务最多向 `T2` 发送两次有界 batch，不为候选创建线程。
 `T2` 负责局部 RGB 或 RGB-D 匹配、深度预处理、深度分支、融合头和模板执行；`T0` 负责窗口状态、
 多视图计划、单帧候选聚合、模板命令和最终门控。Depth-to-RGB 保持在 `T2` 的 TrackerBackend
 内部，geometry 只提供对齐的 RGB/Depth 局部视图。
@@ -79,10 +79,11 @@ T1                  T0                         T2                  T3
  | Frame(n)          |                          |                   |
  |------------------>| update window state      |                   |
  |                   | predict center/FOV       |                   |
- |                   | build guard + adaptive   |                   |
+ |                   | build state-aware views  |                   |
  |                   |---- SearchRequest ------>| crop + batch HiT  |
  |                   |<--- InferResponse -------| RGB/RGB-D scores  |
- |                   | aggregate all views      |                   |
+ |                   | StateEvaluator           |                   |
+ |                   | optional one escalation  |                   |
  |                   | update TrackState        |                   |
  |                   |---- Result(n) ------------------------------->|
 ```
@@ -92,14 +93,15 @@ T1                  T0                         T2                  T3
 
 ### 3.3 低置信与恢复
 
-1. `T0` 每帧至少生成三张 guard 视图，再追加主预测、尺度或恢复视图。
-2. `T2` 将所有视图堆叠为一个 batch；显存不足时可确定性分 batch，但不能改变结果顺序。
-3. `T0` 将单图结果回投影为 `ProjectedObservation`，过滤低于 `candidateMinScore` 的候选。
-4. `T0` 按球面角距离和尺度聚类，计算单帧预测框及 `decisionScore`。
-5. 通过阈值、运动连续性、尺度和可用深度摘要决定状态；深度无效时自动退化为 RGB-only。
-6. 确认前持续输出预测框并令 `valid=false`；未来帧高置信找回后从找回帧重建运动窗口。
+1. `TRACKING/UNCERTAIN` 使用主视图与四个角保护视图；恢复使用环搜，丢失扫描使用六面 cube-map。
+2. `T2` 将一次尝试的视图堆叠为 batch；显存不足时可确定性分批，但不能改变结果顺序。
+3. `T0` 回投影后由 `StateEvaluator` 计算完整候选证据、球面连通簇和稳健融合框。
+4. 不相交候选不会做 ERP 并集；支持不足的候选只作为下一次搜索种子。
+5. 第一次为弱证据/拒绝且预算允许时，T0 可针对同一帧再请求一次；第二次必须提交。
+6. `maxViewsPerFrameTotal` 约束两次尝试的视图总数，每个输入帧仍只发布一个结果。
+7. 找回帧清空旧未来假设并重建运动窗口；深度无效时自动退化为 RGB-only。
 
-恢复搜索预算由 `maxViewsPerFrame` 和 `globalSearchInterval` 双重限制。
+恢复搜索预算由 `maxViewsPerFrameTotal`、`maxAttemptsPerFrame` 和 `globalSearchInterval` 共同限制。
 
 ---
 
@@ -142,15 +144,15 @@ CPU/GPU 投影由配置选择，但同一次运行只能启用一个实现。
 
 `TrackState` 使用单写者模型，仅 `T0` 可修改。每帧按以下顺序提交：
 
-1. 验证响应的 `sequenceId`、`frameIndex` 和 `stateRevision`。
+1. 验证响应的 `sequenceId`、`frameIndex`、`stateRevision`、`transactionId` 和 `attemptIndex`。
 2. 回投影全部局部观测。
 3. 回投影全部局部观测，基于后端 `fusedScore`、运动连续性、尺度变化和可用深度一致性聚合候选。
-4. 执行状态转移。
+4. 生成 `StateObservation` 并执行纯状态转移；必要时只推进帧内尝试，不提交跨帧状态。
 5. 更新球面运动、目标尺度和丢失计数。
 6. 生成模板命令；命令由下一次请求携带给 `T2`。
-7. `revision += 1`，发布只读 `ResultPacket`。
+7. 最终尝试以 copy-on-write 替换控制内存，`stateRevision += 1`，发布只读 `ResultPacket`。
 
-旧 revision、重复帧或乱序响应一律作为内部错误，禁止静默采用。
+旧 revision/transaction/attempt、重复帧或乱序响应一律作为内部错误，禁止静默采用。
 
 ---
 
@@ -162,7 +164,7 @@ CPU/GPU 投影由配置选择，但同一次运行只能启用一个实现。
 T0: TemplateCommand(kind, frameIndex, localBox, expectedRevision)
                              |
                              v
-T2: verify revision -> crop feature -> atomic slot replace -> acknowledge
+T2: verify backend revision -> crop feature -> atomic slot replace -> acknowledge
 ```
 
 - `KEEP`：不更新。
@@ -171,6 +173,8 @@ T2: verify revision -> crop feature -> atomic slot replace -> acknowledge
 - `RESET_TO_ANCHOR`：清除动态模板，保留首帧模板。
 
 模板替换在一次推理请求的边界执行，推理中途不得修改模板槽。
+Controller state revision 每个提交帧增加一次；Backend template revision 每次推理尝试增加一次，
+同帧升级后两者不要求数值相等。
 
 ---
 

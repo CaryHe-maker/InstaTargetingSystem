@@ -10,6 +10,8 @@
 - `geometry`：ERP 与 BFoV 之间的裁剪、回投影和跨经线处理。
 - `tracker`：HiT 主干、深度预处理、双分支融合和模板命令执行。
 - `controller`：DTC 负责多视图计划、候选聚合、运动预测、状态机和恢复策略。
+- `controller V2`：已接入不可变状态实例、`StateEvaluator/StateObservation`、可靠测量滑动窗口、
+  球面切平面预测、恢复去重记忆、真实六面 cube-map 和最多一次同帧有界升级。
 - `app / io`：命令行入口、视频/序列读取、结果写出和 AirSim360 数据接入。
 - `adapters / eval`：官方结果格式转换、球面指标、OTB 指标和性能统计。
 - `visualization`：局部 RGB、深度诊断图、后端框和回投影框的无损记录。
@@ -43,6 +45,8 @@ python -m instatarget.track_airsim360 \
 
 - RGB-only 与 RGB-D 共用同一套控制层和结果协议
 - 深度缺失时自动退化为 RGB-only
+- 不相交候选不会做输出框并集；支持不足时输出运动预测框并令 `valid=false`
+- 每帧最终只提交一个结果；Backend template revision 与 Controller state revision 分开推进
 - 训练链路尚未落地，当前仓库不包含端到端再训练实现
 
 ## 最终边界

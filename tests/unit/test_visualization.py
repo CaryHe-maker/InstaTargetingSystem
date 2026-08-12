@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -15,11 +16,20 @@ from instatarget.core.types import (
     LocalObservation,
     LocalView,
     ProjectedObservation,
+    SegmentationPlane,
     SequenceId,
     SphericalPoint,
     ViewSpec,
 )
-from instatarget.visualization import FLUORESCENT_GREEN_RGB, VisualizationRecorder
+from instatarget.visualization import (
+    FLUORESCENT_GREEN_RGB,
+    ResultVisualizationRecorder,
+    VisualizationRecorder,
+    collectInstanceIdGroups,
+    drawBoxRgb,
+    formatInstanceIdDocument,
+    writeInstanceIdDocument,
+)
 
 
 class VisualizationRecorderTest(unittest.TestCase):
@@ -56,12 +66,20 @@ class VisualizationRecorderTest(unittest.TestCase):
             originalRgb = view.rgb.copy()
             observation = _localObservation(BBoxXYWH(1.0, 1.0, 4.0, 3.0))
 
-            paths = recorder.recordBackendBoxes(frame, [view], [observation])
+            with patch(
+                "instatarget.visualization.recorder.drawBoxRgb", wraps=drawBoxRgb
+            ) as draw:
+                paths = recorder.recordBackendBoxes(frame, [view], [observation])
 
             annotated = _readRgbPng(paths[0])
             np.testing.assert_array_equal(annotated[1, 1], FLUORESCENT_GREEN_RGB)
             np.testing.assert_array_equal(annotated[3, 4], FLUORESCENT_GREEN_RGB)
             np.testing.assert_array_equal(view.rgb, originalRgb)
+            draw.assert_called_once_with(
+                view.rgb,
+                observation.bbox,
+                label="fuseScore=0.8500",
+            )
 
     def testWritesWrappedGeometryBoxOverOriginalErpRgb(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -69,13 +87,74 @@ class VisualizationRecorderTest(unittest.TestCase):
             frame = _frame()
             observation = _projectedObservation(BBoxXYWH(10.0, 2.0, 4.0, 3.0))
 
-            paths = recorder.recordGeometryBoxes(frame, [observation])
+            with patch(
+                "instatarget.visualization.recorder.drawBoxRgb", wraps=drawBoxRgb
+            ) as draw:
+                paths = recorder.recordGeometryBoxes(frame, [observation])
 
             annotated = _readRgbPng(paths[0])
             np.testing.assert_array_equal(annotated[2, 10], FLUORESCENT_GREEN_RGB)
             np.testing.assert_array_equal(annotated[2, 0], FLUORESCENT_GREEN_RGB)
             np.testing.assert_array_equal(annotated[4, 1], FLUORESCENT_GREEN_RGB)
             np.testing.assert_array_equal(frame.rgb, np.zeros_like(frame.rgb))
+            draw.assert_called_once_with(
+                frame.rgb,
+                observation.bbox,
+                wrapHorizontal=True,
+                label="fuseScore=0.8500",
+            )
+
+    def testWritesStateEvaluatorScoreBelowFinalResultBox(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            frame = FramePacket(
+                sequenceId=SequenceId("sequence/a"),
+                frameIndex=FrameIndex(7),
+                timestampNs=1,
+                rgb=np.zeros((64, 160, 3), dtype=np.uint8),
+            )
+            result = _trackResult(BBoxXYWH(10.0, 10.0, 30.0, 20.0))
+            recorder = ResultVisualizationRecorder(Path(directory))
+
+            with patch(
+                "instatarget.visualization.result.drawBoxRgb", wraps=drawBoxRgb
+            ) as draw:
+                path = recorder.record(frame, result, stateScore=0.625)
+
+            annotated = _readRgbPng(path)
+            self.assertTrue(np.any(np.all(annotated[32:, :] == FLUORESCENT_GREEN_RGB, axis=2)))
+            draw.assert_called_once_with(
+                frame.rgb,
+                result.bbox,
+                wrapHorizontal=True,
+                label="stateScore=0.6250",
+            )
+
+    def testInstanceIdDocumentOnlyUsesFrameZero(self) -> None:
+        frame0 = _segmentationFrame(
+            0,
+            instance=np.array([[10, 10, 20, 0], [10, 20, 20, 0]], dtype=np.int32),
+            semantic=np.array([[5, 5, 6, 3], [5, 6, 6, 3]], dtype=np.int32),
+        )
+        groups = collectInstanceIdGroups(frame0)
+
+        self.assertEqual([group.semanticName for group in groups], ["concreteblock", "streetprops"])
+        self.assertEqual(groups[0].instanceIds, (10,))
+        self.assertEqual(groups[1].instanceIds, (20,))
+        expected = "concreteblock 1 10\n\nstreetprops 1 20\n"
+        self.assertEqual(formatInstanceIdDocument(groups), expected)
+        with tempfile.TemporaryDirectory() as directory:
+            path = writeInstanceIdDocument(Path(directory) / "InstanceID.txt", groups)
+            self.assertEqual(path.read_text(encoding="utf-8"), expected)
+
+    def testInstanceIdDocumentRejectsNonInitialFrame(self) -> None:
+        frame1 = _segmentationFrame(
+            1,
+            instance=np.array([[30]], dtype=np.int32),
+            semantic=np.array([[6]], dtype=np.int32),
+        )
+
+        with self.assertRaisesRegex(Exception, "requires frameIndex 0"):
+            collectInstanceIdGroups(frame1)
 
 
 def _recorder(
@@ -100,6 +179,25 @@ def _frame() -> FramePacket:
         frameIndex=FrameIndex(7),
         timestampNs=1,
         rgb=np.zeros((6, 12, 3), dtype=np.uint8),
+    )
+
+
+def _segmentationFrame(
+    frameIndex: int,
+    *,
+    instance: np.ndarray,
+    semantic: np.ndarray,
+) -> FramePacket:
+    return FramePacket(
+        sequenceId=SequenceId("catalog"),
+        frameIndex=FrameIndex(frameIndex),
+        timestampNs=frameIndex,
+        rgb=np.zeros((*instance.shape, 3), dtype=np.uint8),
+        segmentation=SegmentationPlane(
+            semantic=semantic,
+            instance=instance,
+            classNames={5: "concreteblock", 6: "streetprops"},
+        ),
     )
 
 
@@ -139,6 +237,21 @@ def _projectedObservation(bbox: BBoxXYWH) -> ProjectedObservation:
         depthScore=0.5,
         fusedScore=0.85,
         depthSummary=None,
+    )
+
+
+def _trackResult(bbox: BBoxXYWH):
+    from instatarget.core.types import ResultSource, TrackResult, TrackStatus
+
+    return TrackResult(
+        sequenceId=SequenceId("sequence/a"),
+        frameIndex=FrameIndex(7),
+        bbox=bbox,
+        bfov=_bfov(),
+        confidence=0.625,
+        status=TrackStatus.TRACKING,
+        valid=True,
+        resultSource=ResultSource.OBSERVED_CONFIRMED,
     )
 
 

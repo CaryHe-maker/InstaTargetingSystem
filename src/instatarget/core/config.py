@@ -10,9 +10,7 @@ from typing import cast
 from instatarget.core.errors import ConfigError
 
 SUPPORTED_SCHEMA_VERSION = 1
-VISUALIZATION_STAGES = frozenset(
-    {"local_rgb", "depth_rgb", "backend_box", "geometry_box"}
-)
+VISUALIZATION_STAGES = frozenset({"local_rgb", "depth_rgb", "backend_box", "geometry_box"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,18 +113,47 @@ class DecisionGateConfig:
     def __post_init__(self) -> None:
         _requireProbability("decisionGate.motionScoreWeight", self.motionScoreWeight)
         _requireProbability("decisionGate.scaleScoreWeight", self.scaleScoreWeight)
-        _requireProbability(
-            "decisionGate.depthConsistencyWeight", self.depthConsistencyWeight
-        )
-        if (
-            self.motionScoreWeight
-            + self.scaleScoreWeight
-            + self.depthConsistencyWeight
-            > 1.0
+        _requireProbability("decisionGate.depthConsistencyWeight", self.depthConsistencyWeight)
+        if self.motionScoreWeight + self.scaleScoreWeight + self.depthConsistencyWeight > 1.0:
+            raise ConfigError("decision gate motion, scale and depth weights must sum to at most 1")
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluatorConfig:
+    supportWeight: float = 0.25
+    agreementWeight: float = 0.25
+    minReacquireViews: int = 2
+
+    def __post_init__(self) -> None:
+        _requireProbability("evaluator.supportWeight", self.supportWeight)
+        _requireProbability("evaluator.agreementWeight", self.agreementWeight)
+        if self.supportWeight + self.agreementWeight > 1.0:
+            raise ConfigError("evaluator support and agreement weights must sum to at most 1")
+        if self.minReacquireViews <= 0:
+            raise ConfigError("evaluator.minReacquireViews must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class MotionConfig:
+    minSamplesForVelocity: int = 2
+    maxTangentSpanRad: float = 1.20
+    huberDeltaRad: float = 0.15
+    processNoiseRadPerSec: float = 0.04
+    maxAngularSpeedRadPerSec: float = 2.0
+    maxLogScaleRatePerSec: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.minSamplesForVelocity < 2:
+            raise ConfigError("motion.minSamplesForVelocity must be at least 2")
+        for name, value in (
+            ("maxTangentSpanRad", self.maxTangentSpanRad),
+            ("huberDeltaRad", self.huberDeltaRad),
+            ("processNoiseRadPerSec", self.processNoiseRadPerSec),
+            ("maxAngularSpeedRadPerSec", self.maxAngularSpeedRadPerSec),
+            ("maxLogScaleRatePerSec", self.maxLogScaleRatePerSec),
         ):
-            raise ConfigError(
-                "decision gate motion, scale and depth weights must sum to at most 1"
-            )
+            if not isfinite(value) or value <= 0.0:
+                raise ConfigError(f"motion.{name} must be positive and finite")
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +172,11 @@ class TrackingConfig:
     maxPredictionHorizon: int = 3
     guardYawStepRad: float = 2.0 * pi / 3.0
     minViewsForCommit: int = 2
+    sameFrameEscalationEnabled: bool = True
+    maxAttemptsPerFrame: int = 2
+    maxViewsPerFrameTotal: int = 12
+    uncertainFovScale: float = 1.25
+    reacquireCooldownFrames: int = 2
 
     def __post_init__(self) -> None:
         _requireProbability("tracking.acceptThreshold", self.acceptThreshold)
@@ -153,9 +185,7 @@ class TrackingConfig:
             raise ConfigError("tracking thresholds must satisfy uncertain < accept")
         _requireProbability("tracking.recoverAcceptThreshold", self.recoverAcceptThreshold)
         if self.recoverAcceptThreshold < self.acceptThreshold:
-            raise ConfigError(
-                "tracking.recoverAcceptThreshold must be at least acceptThreshold"
-            )
+            raise ConfigError("tracking.recoverAcceptThreshold must be at least acceptThreshold")
         _requireProbability("tracking.candidateMinScore", self.candidateMinScore)
         if self.stableFramesBeforeUpdate <= 0:
             raise ConfigError("tracking.stableFramesBeforeUpdate must be positive")
@@ -175,6 +205,17 @@ class TrackingConfig:
             raise ConfigError("tracking.guardYawStepRad must be in (0, pi)")
         if self.minViewsForCommit <= 0:
             raise ConfigError("tracking.minViewsForCommit must be positive")
+        if self.maxAttemptsPerFrame not in {1, 2}:
+            raise ConfigError("tracking.maxAttemptsPerFrame must be 1 or 2")
+        if self.maxViewsPerFrameTotal < max(6, self.minViewsForCommit):
+            raise ConfigError(
+                "tracking.maxViewsPerFrameTotal must cover minViewsForCommit "
+                "and all six cube-map faces"
+            )
+        if not isfinite(self.uncertainFovScale) or self.uncertainFovScale < 1.0:
+            raise ConfigError("tracking.uncertainFovScale must be at least 1")
+        if self.reacquireCooldownFrames < 0:
+            raise ConfigError("tracking.reacquireCooldownFrames must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,16 +224,24 @@ class RecoveryConfig:
     globalSearchInterval: int
     ringRadii: tuple[float, ...] = (1.0, 1.75, 2.5)
     viewsPerRing: tuple[int, ...] = (4, 8, 12)
+    cubeMapOverlapRatio: float = 0.10
+    maxCoveredCells: int = 256
 
     def __post_init__(self) -> None:
-        if self.maxViewsPerFrame < 3 or self.globalSearchInterval <= 0:
-            raise ConfigError("recovery limits must be positive")
+        if self.maxViewsPerFrame < 6 or self.globalSearchInterval <= 0:
+            raise ConfigError(
+                "recovery.maxViewsPerFrame must allow six cube-map faces "
+                "and interval must be positive"
+            )
         if not self.ringRadii or len(self.ringRadii) != len(self.viewsPerRing):
             raise ConfigError("recovery rings and viewsPerRing must have equal non-zero length")
         if any(not isfinite(radius) or radius <= 0.0 for radius in self.ringRadii):
             raise ConfigError("recovery.ringRadii must contain positive finite values")
         if any(viewCount <= 0 for viewCount in self.viewsPerRing):
             raise ConfigError("recovery.viewsPerRing must contain positive integers")
+        _requireProbability("recovery.cubeMapOverlapRatio", self.cubeMapOverlapRatio)
+        if self.maxCoveredCells <= 0:
+            raise ConfigError("recovery.maxCoveredCells must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +285,8 @@ class AppConfig:
     backendFusion: BackendFusionConfig
     fusionHead: FusionHeadConfig
     decisionGate: DecisionGateConfig
+    evaluator: EvaluatorConfig
+    motion: MotionConfig
     tracking: TrackingConfig
     recovery: RecoveryConfig
     runtime: RuntimeConfig
@@ -271,6 +322,8 @@ def loadConfig(path: str | Path) -> AppConfig:
             "backendFusion",
             "fusionHead",
             "decisionGate",
+            "evaluator",
+            "motion",
             "tracking",
             "recovery",
             "runtime",
@@ -314,6 +367,23 @@ def loadConfig(path: str | Path) -> AppConfig:
         "decisionGate",
         {"motionScoreWeight", "scaleScoreWeight", "depthConsistencyWeight"},
     )
+    evaluatorRaw = _section(
+        root,
+        "evaluator",
+        {"supportWeight", "agreementWeight", "minReacquireViews"},
+    )
+    motionRaw = _section(
+        root,
+        "motion",
+        {
+            "minSamplesForVelocity",
+            "maxTangentSpanRad",
+            "huberDeltaRad",
+            "processNoiseRadPerSec",
+            "maxAngularSpeedRadPerSec",
+            "maxLogScaleRatePerSec",
+        },
+    )
     trackingRaw = _section(
         root,
         "tracking",
@@ -332,12 +402,24 @@ def loadConfig(path: str | Path) -> AppConfig:
             "maxPredictionHorizon",
             "guardYawStepDeg",
             "minViewsForCommit",
+            "sameFrameEscalationEnabled",
+            "maxAttemptsPerFrame",
+            "maxViewsPerFrameTotal",
+            "uncertainFovScale",
+            "reacquireCooldownFrames",
         },
     )
     recoveryRaw = _section(
         root,
         "recovery",
-        {"maxViewsPerFrame", "globalSearchInterval", "ringRadii", "viewsPerRing"},
+        {
+            "maxViewsPerFrame",
+            "globalSearchInterval",
+            "ringRadii",
+            "viewsPerRing",
+            "cubeMapOverlapRatio",
+            "maxCoveredCells",
+        },
     )
     runtimeRaw = _section(
         root,
@@ -411,9 +493,7 @@ def loadConfig(path: str | Path) -> AppConfig:
             )
         ),
         fusionHead=FusionHeadConfig(
-            rgbInitWeight=_requireFloat(
-                "fusionHead.rgbInitWeight", fusionHeadRaw["rgbInitWeight"]
-            ),
+            rgbInitWeight=_requireFloat("fusionHead.rgbInitWeight", fusionHeadRaw["rgbInitWeight"]),
             depthInitWeight=_requireFloat(
                 "fusionHead.depthInitWeight", fusionHeadRaw["depthInitWeight"]
             ),
@@ -430,6 +510,33 @@ def loadConfig(path: str | Path) -> AppConfig:
             ),
             depthConsistencyWeight=_requireFloat(
                 "decisionGate.depthConsistencyWeight", gateRaw["depthConsistencyWeight"]
+            ),
+        ),
+        evaluator=EvaluatorConfig(
+            supportWeight=_requireFloat("evaluator.supportWeight", evaluatorRaw["supportWeight"]),
+            agreementWeight=_requireFloat(
+                "evaluator.agreementWeight", evaluatorRaw["agreementWeight"]
+            ),
+            minReacquireViews=_requireInt(
+                "evaluator.minReacquireViews", evaluatorRaw["minReacquireViews"]
+            ),
+        ),
+        motion=MotionConfig(
+            minSamplesForVelocity=_requireInt(
+                "motion.minSamplesForVelocity", motionRaw["minSamplesForVelocity"]
+            ),
+            maxTangentSpanRad=_requireFloat(
+                "motion.maxTangentSpanRad", motionRaw["maxTangentSpanRad"]
+            ),
+            huberDeltaRad=_requireFloat("motion.huberDeltaRad", motionRaw["huberDeltaRad"]),
+            processNoiseRadPerSec=_requireFloat(
+                "motion.processNoiseRadPerSec", motionRaw["processNoiseRadPerSec"]
+            ),
+            maxAngularSpeedRadPerSec=_requireFloat(
+                "motion.maxAngularSpeedRadPerSec", motionRaw["maxAngularSpeedRadPerSec"]
+            ),
+            maxLogScaleRatePerSec=_requireFloat(
+                "motion.maxLogScaleRatePerSec", motionRaw["maxLogScaleRatePerSec"]
             ),
         ),
         tracking=TrackingConfig(
@@ -472,6 +579,22 @@ def loadConfig(path: str | Path) -> AppConfig:
             minViewsForCommit=_requireInt(
                 "tracking.minViewsForCommit", trackingRaw["minViewsForCommit"]
             ),
+            sameFrameEscalationEnabled=_requireBool(
+                "tracking.sameFrameEscalationEnabled",
+                trackingRaw["sameFrameEscalationEnabled"],
+            ),
+            maxAttemptsPerFrame=_requireInt(
+                "tracking.maxAttemptsPerFrame", trackingRaw["maxAttemptsPerFrame"]
+            ),
+            maxViewsPerFrameTotal=_requireInt(
+                "tracking.maxViewsPerFrameTotal", trackingRaw["maxViewsPerFrameTotal"]
+            ),
+            uncertainFovScale=_requireFloat(
+                "tracking.uncertainFovScale", trackingRaw["uncertainFovScale"]
+            ),
+            reacquireCooldownFrames=_requireInt(
+                "tracking.reacquireCooldownFrames", trackingRaw["reacquireCooldownFrames"]
+            ),
         ),
         recovery=RecoveryConfig(
             maxViewsPerFrame=_requireInt(
@@ -482,6 +605,10 @@ def loadConfig(path: str | Path) -> AppConfig:
             ),
             ringRadii=_requireFloatTuple("recovery.ringRadii", recoveryRaw["ringRadii"]),
             viewsPerRing=_requireIntTuple("recovery.viewsPerRing", recoveryRaw["viewsPerRing"]),
+            cubeMapOverlapRatio=_requireFloat(
+                "recovery.cubeMapOverlapRatio", recoveryRaw["cubeMapOverlapRatio"]
+            ),
+            maxCoveredCells=_requireInt("recovery.maxCoveredCells", recoveryRaw["maxCoveredCells"]),
         ),
         runtime=RuntimeConfig(
             decodeQueueCapacity=_requireInt(

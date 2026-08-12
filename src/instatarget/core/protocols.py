@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from instatarget.core.types import (
@@ -22,6 +23,20 @@ from instatarget.core.types import (
     TrackResult,
     ViewSpec,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class MoreViewsRequired:
+    """A bounded same-frame escalation request from the controller."""
+
+    plan: SearchPlan
+
+
+@dataclass(frozen=True, slots=True)
+class FrameCommitted:
+    """The single final result committed for a frame transaction."""
+
+    result: TrackResult
 
 
 @runtime_checkable
@@ -137,6 +152,12 @@ class TrackController(Protocol):
         observations: Sequence[ProjectedObservation],
     ) -> TrackResult: ...
 
+    def consume(
+        self,
+        plan: SearchPlan,
+        observations: Sequence[ProjectedObservation],
+    ) -> MoreViewsRequired | FrameCommitted: ...
+
 
 @runtime_checkable
 class FrameSource(Protocol):
@@ -194,6 +215,8 @@ __all__ = [
     "DepthProcessor",
     "FrameSource",
     "MotionEstimator",
+    "FrameCommitted",
+    "MoreViewsRequired",
     "PseudoTrackBuilder",
     "ResultSink",
     "SphericalGeometry",

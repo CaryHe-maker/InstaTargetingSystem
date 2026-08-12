@@ -144,6 +144,14 @@ class TrackStatus(Enum):
     LOST = auto()
 
 
+class ResultSource(Enum):
+    INITIAL = auto()
+    OBSERVED_CONFIRMED = auto()
+    OBSERVED_REACQUIRED = auto()
+    OBSERVED_WEAK_BLEND = auto()
+    MOTION_PREDICTED = auto()
+
+
 @dataclass(frozen=True, slots=True)
 class TrackResult:
     sequenceId: SequenceId
@@ -154,6 +162,7 @@ class TrackResult:
     status: TrackStatus
     valid: bool
     depthSummary: DepthSummary | None = None
+    resultSource: ResultSource = ResultSource.OBSERVED_CONFIRMED
 ```
 
 数据对象创建后不可变。大图像和深度图允许只读引用传递，其底层缓冲区生命周期必须覆盖消费者。
@@ -359,6 +368,10 @@ class SearchPlan:
     views: tuple[ViewSpec, ...]
     templateCommand: TemplateCommand
     predictedMotion: MotionState3D | None
+    transactionId: int = 0
+    attemptIndex: int = 0
+    recoveryEpochId: int = 0
+    viewRoles: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,10 +402,12 @@ class ProjectedObservation:
 将同一帧全部候选过滤、聚类并融合为单帧预测框，再结合历史窗口生成 `TrackResult`。当
 `TrackResult.valid == false` 时，`TrackResult.bbox` 表示多帧预测框，而不是已确认的真实观测。
 
-`SearchPlan.views` 必须保持唯一 `viewId`，每帧至少包含三张 guard 视图（预测中心 yaw 的
-`-120°/0°/+120°` 覆盖）；总数不得超过 `recovery.maxViewsPerFrame`，该配置必须大于等于 3。
-如果未来需要区分 guard、adaptive、recovery 视图，优先在 DTC 内维护 `viewId -> role` 映射；
-只有日志契约确实需要时，才为 `ViewSpec` 增加带默认值的可选角色字段。
+`SearchPlan.views` 必须保持唯一 `viewId`，`viewRoles` 非空时与 views 一一对应。稳定/不确定状态
+默认使用“主视图 + 四个切平面角保护视图”；恢复状态使用环搜；丢失扫描帧使用四赤道面和南北极面
+组成的六面 cube-map。同帧所有尝试的视图总数不得超过 `tracking.maxViewsPerFrameTotal`。
+
+Controller state revision 每个提交帧增加一次；TemplateCommand revision 每次后端推理尝试增加一次。
+同帧升级后两者允许不同。
 
 
 class TrackController(Protocol):
@@ -415,13 +430,19 @@ class TrackController(Protocol):
         plan: SearchPlan,
         observations: Sequence[ProjectedObservation],
     ) -> TrackResult: ...
+
+    def consume(
+        self,
+        plan: SearchPlan,
+        observations: Sequence[ProjectedObservation],
+    ) -> MoreViewsRequired | FrameCommitted: ...
 ```
 
 `buildInitialization()` 生成首帧模板视图和该视图中的模板框；
-`commitInitialization()` 仅在后端初始化成功后提交第 0 帧。`plan()` 必须使用最近 `n` 帧的
-运动状态、深度摘要和置信度生成一个包含 guard triplet 的多视图搜索计划。`update()` 必须校验
-帧号和 revision，并原子提交状态；失败时原状态保持不变。控制层在 `update()` 内只做候选聚合、
-状态更新和轻量门控，不重做后端融合。
+`commitInitialization()` 仅在后端初始化成功后提交第 0 帧。`beginFrame()/plan()` 使用最近 `n` 个
+可靠测量生成状态相关多视图计划。`consume()` 可以返回同帧第二个 `SearchPlan`，也可以返回唯一
+`FrameCommitted`；最多尝试两次。兼容接口 `update()` 固定为单尝试提交。所有路径校验帧号、
+transaction、attempt 和 revision，并以 copy-on-write 方式原子提交。
 
 `ProjectedObservation.depthScore` 和 `ProjectedObservation.fusedScore` 由 `TrackerBackend` 产生；
 `motionScore` 与 `scaleScore` 由控制层补充。DTC 可以按配置计算用于排序的 `decisionScore`，
@@ -498,6 +519,9 @@ class InferResponse:
     stateRevision: int
     observations: tuple[LocalObservation, ...]
     depthSummaries: dict[int, DepthSummary]
+    transactionId: int = 0
+    attemptIndex: int = 0
+    recoveryEpochId: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -516,7 +540,7 @@ class FatalError:
 `InferResponse.depthSummaries` 对每个提供有效深度摘要的 `viewId` 返回条目；RGB-only 或深度无效
 的视图可以省略。`observations` 与请求视图一一对应且顺序一致，DTC 不得因摘要缺失而丢弃 RGB 观测。
 
-所有请求和响应必须携带帧号与 revision。`T0` 不接受旧响应；工作线程不捕获并吞掉
+所有请求和响应必须携带帧号、revision、transaction 和 attempt。`T0` 不接受旧响应；工作线程不捕获并吞掉
 异常，而是转换为一次 `FatalError`。
 
 ---
@@ -613,6 +637,18 @@ backendFusion:
 decisionGate:
   motionScoreWeight: 0.25
   scaleScoreWeight: 0.15
+  depthConsistencyWeight: 0.10
+evaluator:
+  supportWeight: 0.25
+  agreementWeight: 0.25
+  minReacquireViews: 2
+motion:
+  minSamplesForVelocity: 2
+  maxTangentSpanRad: 1.20
+  huberDeltaRad: 0.15
+  processNoiseRadPerSec: 0.04
+  maxAngularSpeedRadPerSec: 2.0
+  maxLogScaleRatePerSec: 1.0
 tracking:
   acceptThreshold: 0.70
   uncertainThreshold: 0.45
@@ -626,13 +662,20 @@ tracking:
   contextMarginRatio: 0.15
   scaleClusterTolerance: 0.50
   maxPredictionHorizon: 3
-  guardYawStepDeg: 120
+  guardYawStepDeg: 120  # V1 schema compatibility; ignored by the V2 planner
   minViewsForCommit: 2
+  sameFrameEscalationEnabled: true
+  maxAttemptsPerFrame: 2
+  maxViewsPerFrameTotal: 12
+  uncertainFovScale: 1.25
+  reacquireCooldownFrames: 2
 recovery:
   maxViewsPerFrame: 12
   globalSearchInterval: 5
   ringRadii: [1.0, 1.75, 2.5]
   viewsPerRing: [4, 8, 12]
+  cubeMapOverlapRatio: 0.10
+  maxCoveredCells: 256
 runtime:
   decodeQueueCapacity: 3
   inferRequestQueueCapacity: 1
@@ -643,6 +686,7 @@ runtime:
 未知字段默认报错；相对路径以配置文件目录为基准；角度配置可用 `Deg`，加载后立即转换为
 `Rad`。阈值必须满足 `0 <= uncertainThreshold < acceptThreshold <= recoverAcceptThreshold <= 1`；
 `candidateMinScore` 在 `[0,1]`；`windowLength >= 2`；`contextScale >= 2`；
+`maxAttemptsPerFrame` 为 1 或 2；`maxViewsPerFrameTotal >= minViewsForCommit`；
 `recovery.maxViewsPerFrame >= 3`；所有队列容量必须为正整数。新增字段必须同步更新
 `core/config.py`、两份运行 YAML 和配置单测。
 

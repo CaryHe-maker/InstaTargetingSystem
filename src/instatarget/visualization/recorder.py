@@ -70,7 +70,11 @@ class VisualizationRecorder:
         artifacts: list[Path] = []
         for observation in observations:
             view = _requireView(viewById, observation.viewId)
-            annotatedRgb = drawBoxRgb(view.rgb, observation.bbox)
+            annotatedRgb = drawBoxRgb(
+                view.rgb,
+                observation.bbox,
+                label=f"fuseScore={observation.fusedScore:.4f}",
+            )
             artifacts.append(
                 writeRgbPng(
                     self._artifactPath(frame, BACKEND_BOX_STAGE, observation.viewId),
@@ -91,7 +95,12 @@ class VisualizationRecorder:
         return tuple(
             writeRgbPng(
                 self._artifactPath(frame, GEOMETRY_BOX_STAGE, observation.viewId),
-                drawBoxRgb(frame.rgb, observation.bbox, wrapHorizontal=True),
+                drawBoxRgb(
+                    frame.rgb,
+                    observation.bbox,
+                    wrapHorizontal=True,
+                    label=f"fuseScore={observation.fusedScore:.4f}",
+                ),
             )
             for observation in observations
         )

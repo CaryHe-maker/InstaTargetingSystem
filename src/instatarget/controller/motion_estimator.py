@@ -1,35 +1,66 @@
-"""Lightweight spherical motion estimation for the DTC control thread."""
+"""Windowed spherical motion prediction for the DTC control thread."""
 
 from __future__ import annotations
 
-from math import isfinite
+from collections import deque
+from math import asin, atan2
 
 import numpy as np
 
+from instatarget.controller.state_model import MotionPrediction, MotionSample
 from instatarget.core.errors import ProtocolError
 from instatarget.core.protocols import MotionEstimator as MotionEstimatorProtocol
 from instatarget.core.types import DepthSummary, MotionState3D, SphericalPoint
+from instatarget.geometry.projection_math import makeSphericalPoint
 
 
 class SphericalMotionEstimator(MotionEstimatorProtocol):
-    """Alpha-Beta estimator over unit-vector direction and optional range."""
+    """Robust constant-velocity estimator with a bounded reliable-measurement window.
 
-    def __init__(self, alpha: float = 0.70, beta: float = 0.20) -> None:
+    The legacy ``initialize/predict/update`` protocol remains available.  The controller uses
+    ``predictDetailed`` and ``resetFromMeasurement`` so invalid output predictions never enter
+    the measurement history.
+    """
+
+    def __init__(
+        self,
+        alpha: float = 0.70,
+        beta: float = 0.20,
+        windowLength: int = 5,
+        maxPredictionHorizon: int = 3,
+        minSamplesForVelocity: int = 2,
+        maxTangentSpanRad: float = 1.20,
+        huberDeltaRad: float = 0.15,
+        processNoiseRadPerSec: float = 0.04,
+        maxAngularSpeedRadPerSec: float = 2.0,
+        maxLogScaleRatePerSec: float = 1.0,
+    ) -> None:
         if not 0.0 < alpha <= 1.0 or not 0.0 < beta <= 1.0:
             raise ValueError("alpha and beta must be in (0, 1]")
+        if windowLength < 2 or maxPredictionHorizon < 1:
+            raise ValueError("windowLength and maxPredictionHorizon must be positive")
         self._alpha = float(alpha)
         self._beta = float(beta)
+        self._windowLength = int(windowLength)
+        self._maxPredictionHorizon = int(maxPredictionHorizon)
+        self._minSamplesForVelocity = int(minSamplesForVelocity)
+        self._maxTangentSpanRad = float(maxTangentSpanRad)
+        self._huberDeltaRad = float(huberDeltaRad)
+        self._processNoiseRadPerSec = float(processNoiseRadPerSec)
+        self._maxAngularSpeedRadPerSec = float(maxAngularSpeedRadPerSec)
+        self._maxLogScaleRatePerSec = float(maxLogScaleRatePerSec)
+        self._samples: deque[MotionSample] = deque(maxlen=self._windowLength)
         self._initialized = False
-        self._position = np.zeros(3, dtype=np.float64)
-        self._velocity = np.zeros(3, dtype=np.float64)
-        self._rangeDepth = 0.0
-        self._rangeVelocity = 0.0
-        self._confidence = 0.0
+        self._lastPrediction: MotionPrediction | None = None
         self._timestampNs = 0
 
     @property
     def initialized(self) -> bool:
         return self._initialized
+
+    @property
+    def samples(self) -> tuple[MotionSample, ...]:
+        return tuple(self._samples)
 
     def initialize(
         self,
@@ -38,23 +69,102 @@ class SphericalMotionEstimator(MotionEstimatorProtocol):
         timestampNs: int,
     ) -> MotionState3D:
         _requireTimestamp(timestampNs)
-        self._position = _unitVector(point)
-        self._velocity = np.zeros(3, dtype=np.float64)
-        self._rangeDepth = _depthMeasurement(depth) or 0.0
-        self._rangeVelocity = 0.0
-        self._confidence = _clamp01(depth.confidence if depth is not None else 1.0)
-        self._timestampNs = int(timestampNs)
+        self._samples.clear()
+        self._appendSample(
+            MotionSample(
+                frameIndex=0,
+                timestampNs=timestampNs,
+                center=point,
+                horizontalSizeRad=0.0,
+                verticalSizeRad=0.0,
+                confidence=1.0,
+                rangeDepth=_validDepth(depth),
+                rangeConfidence=depth.confidence if depth is not None else 0.0,
+            )
+        )
         self._initialized = True
-        return self._state()
+        self._timestampNs = int(timestampNs)
+        return self._legacyState(self.predictDetailed(timestampNs, 0))
+
+    def resetFromMeasurement(
+        self,
+        point: SphericalPoint,
+        depth: DepthSummary | None,
+        timestampNs: int,
+        frameIndex: int,
+        confidence: float,
+        horizontalSizeRad: float = 0.0,
+        verticalSizeRad: float = 0.0,
+    ) -> MotionPrediction:
+        """Rebase after reacquisition and discard stale velocity hypotheses."""
+        _requireTimestamp(timestampNs)
+        if not 0.0 <= confidence <= 1.0:
+            raise ProtocolError("motion confidence must be in [0, 1]")
+        self._samples.clear()
+        self._appendSample(
+            MotionSample(
+                frameIndex=frameIndex,
+                timestampNs=timestampNs,
+                center=point,
+                horizontalSizeRad=max(0.0, horizontalSizeRad),
+                verticalSizeRad=max(0.0, verticalSizeRad),
+                confidence=confidence,
+                rangeDepth=_validDepth(depth),
+                rangeConfidence=depth.confidence if depth is not None else 0.0,
+            )
+        )
+        self._initialized = True
+        self._timestampNs = int(timestampNs)
+        return self.predictDetailed(timestampNs, 0)
 
     def predict(self, timestampNs: int) -> MotionState3D:
+        prediction = self.predictDetailed(timestampNs, 0)
+        return self._legacyState(prediction)
+
+    def predictDetailed(self, timestampNs: int, horizonFrames: int = 1) -> MotionPrediction:
         _requireTimestamp(timestampNs)
         self._requireInitialized()
         if timestampNs < self._timestampNs:
-            raise ProtocolError(
-                f"motion timestamp must be monotonic: {timestampNs} < {self._timestampNs}"
-            )
-        return self._predictedState(int(timestampNs))
+            raise ProtocolError("motion timestamp must be monotonic")
+        horizon = max(0, min(self._maxPredictionHorizon, int(horizonFrames)))
+        latest = self._samples[-1]
+        dt = max((timestampNs - latest.timestampNs) / 1e9, 0.0)
+        velocity, residual = self._fitVelocity()
+        center = _advanceOnSphere(latest.center, velocity, dt)
+        width, height, scaleVelocity = self._fitScale()
+        width = max(0.0, width + scaleVelocity[0] * dt)
+        height = max(0.0, height + scaleVelocity[1] * dt)
+        rangeDepth, rangeVelocity = self._fitRange()
+        if rangeDepth is not None:
+            rangeDepth = max(0.0, rangeDepth + rangeVelocity * dt)
+        uncertainty = max(
+            0.01,
+            residual + self._processNoiseRadPerSec * dt + 0.02 * len(self._samples) ** -0.5,
+        )
+        confidence = float(np.clip(latest.confidence * np.exp(-0.25 * dt), 0.0, 1.0))
+        degraded: list[str] = []
+        if len(self._samples) < self._minSamplesForVelocity:
+            degraded.append("insufficient_motion_samples")
+        if rangeDepth is None:
+            degraded.append("missing_depth")
+        result = MotionPrediction(
+            sourceRevision=0,
+            targetFrameIndex=0,
+            horizonFrames=horizon,
+            center=center,
+            horizontalSizeRad=width,
+            verticalSizeRad=height,
+            tangentVelocityRadPerSec=(float(velocity[0]), float(velocity[1])),
+            rangeDepth=rangeDepth,
+            rangeVelocityPerSec=rangeVelocity if rangeDepth is not None else None,
+            angularUncertaintyRad=float(uncertainty),
+            scaleUncertainty=0.25 if len(self._samples) < 2 else 0.10,
+            rangeUncertainty=0.5 * rangeDepth if rangeDepth is not None else None,
+            confidence=confidence,
+            degradedReasons=tuple(degraded),
+        )
+        self._lastPrediction = result
+        return result
 
     def update(
         self,
@@ -66,84 +176,201 @@ class SphericalMotionEstimator(MotionEstimatorProtocol):
         _requireTimestamp(timestampNs)
         self._requireInitialized()
         if timestampNs < self._timestampNs:
-            raise ProtocolError(
-                f"motion timestamp must be monotonic: {timestampNs} < {self._timestampNs}"
-            )
-        if not 0.0 <= observationConfidence <= 1.0 or not isfinite(observationConfidence):
+            raise ProtocolError("motion timestamp must be monotonic")
+        if not 0.0 <= observationConfidence <= 1.0:
             raise ProtocolError("observationConfidence must be in [0, 1]")
-
-        predicted = self._predictedState(int(timestampNs))
-        dt = max((int(timestampNs) - self._timestampNs) / 1e9, 1e-3)
-        measuredPosition = _unitVector(point)
-        residual = measuredPosition - np.asarray(predicted.position, dtype=np.float64)
-        correctedPosition = _normalize(
-            np.asarray(predicted.position, dtype=np.float64) + self._alpha * residual
+        self._appendSample(
+            MotionSample(
+                frameIndex=self._samples[-1].frameIndex + 1,
+                timestampNs=timestampNs,
+                center=point,
+                horizontalSizeRad=self._samples[-1].horizontalSizeRad,
+                verticalSizeRad=self._samples[-1].verticalSizeRad,
+                confidence=observationConfidence,
+                rangeDepth=_validDepth(depth),
+                rangeConfidence=depth.confidence if depth is not None else 0.0,
+            )
         )
-        correctedVelocity = (
-            np.asarray(predicted.velocity, dtype=np.float64) + self._beta * residual / dt
-        )
-
-        measuredRange = _depthMeasurement(depth)
-        if measuredRange is None:
-            correctedRange = predicted.rangeDepth
-            correctedRangeVelocity = predicted.rangeVelocity
-        else:
-            rangeResidual = measuredRange - predicted.rangeDepth
-            correctedRange = max(0.0, predicted.rangeDepth + self._alpha * rangeResidual)
-            correctedRangeVelocity = predicted.rangeVelocity + self._beta * rangeResidual / dt
-
-        self._position = correctedPosition
-        self._velocity = correctedVelocity
-        self._rangeDepth = correctedRange
-        self._rangeVelocity = correctedRangeVelocity
-        self._confidence = _clamp01(0.5 * predicted.confidence + 0.5 * observationConfidence)
         self._timestampNs = int(timestampNs)
-        return self._state()
+        return self._legacyState(self.predictDetailed(timestampNs, 0))
 
-    def _predictedState(self, timestampNs: int) -> MotionState3D:
-        dt = max((timestampNs - self._timestampNs) / 1e9, 0.0)
-        position = _normalize(self._position + self._velocity * dt)
-        return MotionState3D(
-            position=tuple(float(value) for value in position),
-            velocity=tuple(float(value) for value in self._velocity),
-            rangeDepth=max(0.0, self._rangeDepth + self._rangeVelocity * dt),
-            rangeVelocity=float(self._rangeVelocity),
-            confidence=_clamp01(self._confidence),
+    def recordMeasurement(
+        self,
+        *,
+        frameIndex: int,
+        timestampNs: int,
+        point: SphericalPoint,
+        depth: DepthSummary | None,
+        confidence: float,
+        horizontalSizeRad: float,
+        verticalSizeRad: float,
+    ) -> MotionPrediction:
+        """Append one confirmed measurement; prediction-only frames never call this."""
+        _requireTimestamp(timestampNs)
+        self._requireInitialized()
+        if timestampNs < self._timestampNs:
+            raise ProtocolError("motion timestamp must be monotonic")
+        self._appendSample(
+            MotionSample(
+                frameIndex=frameIndex,
+                timestampNs=timestampNs,
+                center=point,
+                horizontalSizeRad=max(0.0, horizontalSizeRad),
+                verticalSizeRad=max(0.0, verticalSizeRad),
+                confidence=confidence,
+                rangeDepth=_validDepth(depth),
+                rangeConfidence=depth.confidence if depth is not None else 0.0,
+            )
         )
+        self._timestampNs = int(timestampNs)
+        return self.predictDetailed(timestampNs, 0)
 
-    def _state(self) -> MotionState3D:
-        return MotionState3D(
-            position=tuple(float(value) for value in self._position),
-            velocity=tuple(float(value) for value in self._velocity),
-            rangeDepth=max(0.0, float(self._rangeDepth)),
-            rangeVelocity=float(self._rangeVelocity),
-            confidence=_clamp01(self._confidence),
+    def _appendSample(self, sample: MotionSample) -> None:
+        self._samples.append(sample)
+
+    def _fitVelocity(self) -> tuple[np.ndarray, float]:
+        if len(self._samples) < self._minSamplesForVelocity:
+            return np.zeros(2, dtype=np.float64), 0.0
+        latest = self._samples[-1]
+        times = np.asarray(
+            [(s.timestampNs - latest.timestampNs) / 1e9 for s in self._samples], dtype=np.float64
         )
+        origin = np.asarray((latest.center.x, latest.center.y, latest.center.z), dtype=np.float64)
+        points = np.asarray(
+            [(s.center.x, s.center.y, s.center.z) for s in self._samples], dtype=np.float64
+        )
+        # Use a local tangent basis at the latest point.  This keeps yaw wrap and polar motion
+        # continuous, including at the poles where the usual yaw-derived east vector vanishes.
+        east, north = _tangentBasis(origin)
+        coords = np.column_stack(((points - origin) @ east, (points - origin) @ north))
+        weights = np.asarray([max(0.05, s.confidence) for s in self._samples], dtype=np.float64)
+        design = np.column_stack((np.ones(len(times)), times))
+        velocity = np.zeros(2, dtype=np.float64)
+        residual = 0.0
+        for axis in range(2):
+            solution, axisWeights = _robustLineFit(
+                design,
+                coords[:, axis],
+                weights,
+                self._huberDeltaRad,
+            )
+            velocity[axis] = float(solution[1])
+            residual += float(
+                np.average(
+                    np.abs(coords[:, axis] - design @ solution),
+                    weights=axisWeights,
+                )
+            )
+        speed = float(np.linalg.norm(velocity))
+        if speed > self._maxAngularSpeedRadPerSec:
+            velocity *= self._maxAngularSpeedRadPerSec / speed
+        if residual > self._maxTangentSpanRad:
+            return np.zeros(2, dtype=np.float64), residual
+        return velocity, min(residual, self._huberDeltaRad)
+
+    def _fitScale(self) -> tuple[float, float, tuple[float, float]]:
+        samples = [
+            s for s in self._samples if s.horizontalSizeRad > 0.0 and s.verticalSizeRad > 0.0
+        ]
+        if not samples:
+            return 0.0, 0.0, (0.0, 0.0)
+        if len(samples) < 2:
+            return samples[-1].horizontalSizeRad, samples[-1].verticalSizeRad, (0.0, 0.0)
+        times = np.asarray(
+            [(s.timestampNs - samples[-1].timestampNs) / 1e9 for s in samples], dtype=np.float64
+        )
+        design = np.column_stack((np.ones(len(times)), times))
+        values = []
+        for field in ("horizontalSizeRad", "verticalSizeRad"):
+            y = np.log(np.asarray([getattr(s, field) for s in samples], dtype=np.float64))
+            solution = np.linalg.lstsq(design, y, rcond=None)[0]
+            rate = float(
+                np.clip(
+                    solution[1],
+                    -self._maxLogScaleRatePerSec,
+                    self._maxLogScaleRatePerSec,
+                )
+            )
+            values.append((float(np.exp(solution[0])), float(np.exp(solution[0]) * rate)))
+        return values[0][0], values[1][0], (values[0][1], values[1][1])
+
+    def _fitRange(self) -> tuple[float | None, float]:
+        samples = [s for s in self._samples if s.rangeDepth is not None and s.rangeConfidence > 0.0]
+        if not samples:
+            return None, 0.0
+        if len(samples) < 2:
+            return samples[-1].rangeDepth, 0.0
+        times = np.asarray(
+            [(s.timestampNs - samples[-1].timestampNs) / 1e9 for s in samples], dtype=np.float64
+        )
+        design = np.column_stack((np.ones(len(times)), times))
+        y = np.log(np.asarray([s.rangeDepth for s in samples], dtype=np.float64))
+        solution = np.linalg.lstsq(design, y, rcond=None)[0]
+        depth = float(np.exp(solution[0]))
+        return depth, float(depth * solution[1])
+
+    def _legacyState(self, prediction: MotionPrediction) -> MotionState3D:
+        return prediction.motionState
 
     def _requireInitialized(self) -> None:
-        if not self._initialized:
+        if not self._initialized or not self._samples:
             raise ProtocolError("motion estimator has not been initialized")
 
 
-def _unitVector(point: SphericalPoint) -> np.ndarray:
-    return _normalize(np.asarray((point.x, point.y, point.z), dtype=np.float64))
-
-
-def _normalize(vector: np.ndarray) -> np.ndarray:
-    norm = float(np.linalg.norm(vector))
-    if norm <= 1e-12 or not np.isfinite(norm):
-        raise ProtocolError("motion vector must be finite and non-zero")
-    return vector / norm
-
-
-def _depthMeasurement(depth: DepthSummary | None) -> float | None:
+def _validDepth(depth: DepthSummary | None) -> float | None:
     if depth is None or depth.validRatio <= 0.0 or depth.confidence <= 0.0:
         return None
     return float(depth.medianDepth)
 
 
-def _clamp01(value: float) -> float:
-    return float(np.clip(value, 0.0, 1.0))
+def _advanceOnSphere(point: SphericalPoint, velocity: np.ndarray, dt: float) -> SphericalPoint:
+    vector = np.asarray((point.x, point.y, point.z), dtype=np.float64)
+    east, north = _tangentBasis(vector)
+    moved = vector + (velocity[0] * east + velocity[1] * north) * dt
+    norm = float(np.linalg.norm(moved))
+    if norm <= 1e-12 or not np.isfinite(norm):
+        return point
+    moved /= norm
+    return makeSphericalPoint(atan2(moved[0], moved[2]), asin(float(np.clip(moved[1], -1.0, 1.0))))
+
+
+def _tangentBasis(vector: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return a stable orthonormal tangent basis for any unit sphere position."""
+    east = np.asarray((-vector[2], 0.0, vector[0]), dtype=np.float64)
+    eastNorm = float(np.linalg.norm(east))
+    if eastNorm <= 1e-8:
+        east = np.asarray((1.0, 0.0, 0.0), dtype=np.float64)
+    else:
+        east /= eastNorm
+    north = np.cross(vector, east)
+    northNorm = float(np.linalg.norm(north))
+    if northNorm <= 1e-12 or not np.isfinite(northNorm):
+        raise ProtocolError("motion tangent basis requires a finite unit sphere position")
+    return east, north / northNorm
+
+
+def _robustLineFit(
+    design: np.ndarray,
+    values: np.ndarray,
+    baseWeights: np.ndarray,
+    huberDelta: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fit an intercept and slope with deterministic Huber reweighting."""
+    weights = baseWeights.copy()
+    solution = np.zeros(design.shape[1], dtype=np.float64)
+    for _ in range(3):
+        root = np.sqrt(weights)
+        solution = np.linalg.lstsq(
+            design * root[:, None],
+            values * root,
+            rcond=None,
+        )[0]
+        residuals = np.abs(values - design @ solution)
+        huberWeights = np.ones_like(residuals)
+        outliers = residuals > huberDelta
+        huberWeights[outliers] = huberDelta / residuals[outliers]
+        weights = np.maximum(1e-6, baseWeights * huberWeights)
+    return solution, weights
 
 
 def _requireTimestamp(timestampNs: int) -> None:

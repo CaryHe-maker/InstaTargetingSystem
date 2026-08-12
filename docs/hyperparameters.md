@@ -57,9 +57,9 @@
 | `tracking.contextMarginRatio` | - | `0.15` | 上下文额外边界比例 | 调大减少截断，增加背景干扰和计算量 |
 | `tracking.scaleClusterTolerance` | - | `0.50` | 候选尺度聚类容差 | 调大更容易合并不同尺度候选 |
 | `tracking.maxPredictionHorizon` | - | `3` | 未来预测假设的最大帧数 | 调大可覆盖更长遮挡，但预测误差累积 |
-| `tracking.guardYawStepDeg` | - | `120` | 三张 guard 视图的水平偏移 | 需保持三视图覆盖约束 |
+| `tracking.guardYawStepDeg` | - | `120` | V1 配置兼容保留，V2 不再读取 | 后续 schema 大版本可删除；当前不得据此生成固定三视图 |
 | `tracking.minViewsForCommit` | - | `2` | 单帧有效提交的最少支持视图数 | 调大降低单图误接受，但弱目标可能无法提交 |
-| `recovery.maxViewsPerFrame` | 28 | `12` | 每帧所有视图的硬预算 | 必须 `>=3`；调大提高覆盖率并增加延迟/显存 |
+| `recovery.maxViewsPerFrame` | 28 | `12` | 单次尝试的视图硬预算 | 必须 `>=6` 以容纳完整 cube-map；调大提高环搜覆盖率并增加延迟/显存 |
 | `recovery.globalSearchInterval` | 29 | `5` | 控制全景粗搜的帧间隔 | 调大降低恢复成本，但目标找回可能更慢 |
 | `recovery.ringRadii` | - | `[1.0, 1.75, 2.5]` | 恢复环相对上下文半径 | 调大扩大搜索范围，增加重复/误匹配风险 |
 | `recovery.viewsPerRing` | - | `[4, 8, 12]` | 各恢复环的候选视图数 | 最终受 `maxViewsPerFrame` 限制 |
@@ -135,7 +135,7 @@
 | `tracking.contextMarginRatio` | - | `0.15` | 上下文额外边界 | 相同 |
 | `tracking.scaleClusterTolerance` | - | `0.50` | 候选尺度聚类容差 | 相同 |
 | `tracking.maxPredictionHorizon` | - | `3` | 未来预测假设帧数 | 相同 |
-| `tracking.guardYawStepDeg` | - | `120` | guard 视图角步长 | 相同 |
+| `tracking.guardYawStepDeg` | - | `120` | V1 兼容占位，V2 不读取 | 相同 |
 | `tracking.minViewsForCommit` | - | `2` | 单帧最少支持视图数 | 相同 |
 | `recovery.maxViewsPerFrame` | 28 | `12` | 限制每帧恢复候选视图数 | 相同 |
 | `recovery.globalSearchInterval` | 29 | `5` | 控制全景粗搜的帧间隔 | 相同 |
@@ -244,6 +244,35 @@
 ## 8. DTC 参数约束
 
 新增参数必须加入 `core/config.py` 的严格 schema 校验，并同步到 `configs/RGBD.yaml`、
-`configs/RGBonly.yaml` 和配置单测。`recovery.maxViewsPerFrame` 必须不小于 3，因为 guard triplet
-是每帧硬性要求；`uncertainThreshold < acceptThreshold <= recoverAcceptThreshold`；
-`contextScale >= 2.0`；所有权重和置信度仍在 `[0,1]`。
+`configs/RGBonly.yaml` 和配置单测。`recovery.maxViewsPerFrame` 与
+`tracking.maxViewsPerFrameTotal` 必须不小于 6，以便一次全局尝试容纳四个赤道面和南北极面；
+`uncertainThreshold < acceptThreshold <= recoverAcceptThreshold`；`contextScale >= 2.0`；所有权重和置信度仍在 `[0,1]`。`tracking.guardYawStepDeg` 仅为兼容旧配置保留，V2 planner 不读取。
+
+---
+
+## 9. Controller V2 已实现参数
+
+以下字段同时存在于 `RGBonly.yaml` 和 `RGBD.yaml`，两种模式使用完全相同的状态和事务行为。
+
+| 参数 | 当前值 | 职责 |
+|---|---:|---|
+| `evaluator.supportWeight` | `0.25` | 多视图支持对 `stateScore` 的权重 |
+| `evaluator.agreementWeight` | `0.25` | 簇一致性对 `stateScore` 的权重 |
+| `evaluator.minReacquireViews` | `2` | 严格找回所需的独立支持视图数 |
+| `motion.minSamplesForVelocity` | `2` | 开始估计球面速度的最少可靠测量数 |
+| `motion.maxTangentSpanRad` | `1.20` | 单个切平面窗口允许的最大残差跨度 |
+| `motion.huberDeltaRad` | `0.15` | 稳健残差上限 |
+| `motion.processNoiseRadPerSec` | `0.04` | 角不确定度随时间增长率 |
+| `motion.maxAngularSpeedRadPerSec` | `2.0` | 防异常球面速度上限 |
+| `motion.maxLogScaleRatePerSec` | `1.0` | 对数尺度变化率上限 |
+| `tracking.sameFrameEscalationEnabled` | `true` | 弱/拒绝证据时允许同帧补充一次搜索 |
+| `tracking.maxAttemptsPerFrame` | `2` | 一帧最多推理尝试数，只允许 1 或 2 |
+| `tracking.maxViewsPerFrameTotal` | `12` | 同帧全部尝试合计视图硬上限 |
+| `tracking.uncertainFovScale` | `1.25` | 不确定五视图相对正常 FOV 放大倍率 |
+| `tracking.reacquireCooldownFrames` | `2` | 找回后模板和运动保护帧数 |
+| `recovery.cubeMapOverlapRatio` | `0.10` | 六面 cube-map 边缘重叠比例 |
+| `recovery.maxCoveredCells` | `256` | 单个恢复 epoch 保存的搜索去重上限 |
+
+约束：`supportWeight + agreementWeight <= 1`；`minReacquireViews > 0`；
+`maxViewsPerFrameTotal >= minViewsForCommit`；`uncertainFovScale >= 1`；
+`cubeMapOverlapRatio ∈ [0,1]`。这些参数不得在算法中以另一套隐藏常量重复定义。

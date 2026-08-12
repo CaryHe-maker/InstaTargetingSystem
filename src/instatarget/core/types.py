@@ -242,6 +242,16 @@ class TrackStatus(Enum):
     LOST = auto()
 
 
+class ResultSource(Enum):
+    """How the controller produced the committed frame result."""
+
+    INITIAL = auto()
+    OBSERVED_CONFIRMED = auto()
+    OBSERVED_REACQUIRED = auto()
+    OBSERVED_WEAK_BLEND = auto()
+    MOTION_PREDICTED = auto()
+
+
 @dataclass(frozen=True, slots=True)
 class TrackResult:
     """The single committed output for one input frame."""
@@ -254,6 +264,7 @@ class TrackResult:
     status: TrackStatus
     valid: bool
     depthSummary: DepthSummary | None = None
+    resultSource: ResultSource = ResultSource.OBSERVED_CONFIRMED
 
     def __post_init__(self) -> None:
         if not str(self.sequenceId):
@@ -358,6 +369,10 @@ class SearchPlan:
     views: tuple[ViewSpec, ...]
     templateCommand: TemplateCommand
     predictedMotion: MotionState3D | None
+    transactionId: int = 0
+    attemptIndex: int = 0
+    recoveryEpochId: int = 0
+    viewRoles: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not str(self.sequenceId) or int(self.frameIndex) < 0 or self.stateRevision < 0:
@@ -367,8 +382,13 @@ class SearchPlan:
             raise ProtocolError("search plan viewIds must be unique")
         if self.templateCommand.frameIndex != self.frameIndex:
             raise ProtocolError("template command and search plan frameIndex must match")
-        if self.templateCommand.expectedRevision != self.stateRevision:
-            raise ProtocolError("template command and search plan revision must match")
+        # Backend template commands advance once per inference attempt, while controller state
+        # revisions advance once per committed frame.  They are equal on the first attempt of a
+        # simple frame but intentionally diverge after same-frame escalation.
+        if self.transactionId < 0 or self.attemptIndex < 0 or self.recoveryEpochId < 0:
+            raise ProtocolError("search plan transaction identity must be non-negative")
+        if self.viewRoles and len(self.viewRoles) != len(self.views):
+            raise ProtocolError("search plan viewRoles must align with views")
 
 
 @dataclass(frozen=True, slots=True)
@@ -475,6 +495,9 @@ class InferResponse:
     stateRevision: int
     observations: tuple[LocalObservation, ...]
     depthSummaries: dict[int, DepthSummary]
+    transactionId: int = 0
+    attemptIndex: int = 0
+    recoveryEpochId: int = 0
 
     def __post_init__(self) -> None:
         if not str(self.sequenceId) or int(self.frameIndex) < 0 or self.stateRevision < 0:
@@ -484,6 +507,8 @@ class InferResponse:
             raise ProtocolError("inference response observation viewIds must be unique")
         if any(viewId < 0 for viewId in self.depthSummaries):
             raise ProtocolError("inference response depth summary viewIds must be non-negative")
+        if self.transactionId < 0 or self.attemptIndex < 0 or self.recoveryEpochId < 0:
+            raise ProtocolError("inference response transaction identity must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)

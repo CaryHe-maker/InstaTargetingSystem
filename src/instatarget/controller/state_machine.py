@@ -1,9 +1,16 @@
-"""DTC state transitions with hysteresis and bounded recovery counters."""
+"""Pure V2 state reduction with a backwards-compatible scalar adapter."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from instatarget.controller.state_model import (
+    EvidenceLevel,
+    StateObservation,
+    TrackMode,
+    TransitionDecision,
+    TransitionReason,
+)
 from instatarget.core.config import TrackingConfig
 from instatarget.core.errors import ProtocolError
 from instatarget.core.types import TrackStatus
@@ -16,10 +23,11 @@ class StateUpdate:
     recoveryFrames: int
     accepted: bool
     recovered: bool
+    reason: TransitionReason = TransitionReason.RELIABLE_MEASUREMENT
 
 
 class TrackStateMachine:
-    """Own only state labels and counters; candidate scoring stays in DecisionGate."""
+    """State reducer; durable state is owned by the controller, not this object."""
 
     def __init__(self, trackingConfig: TrackingConfig) -> None:
         self._config = trackingConfig
@@ -45,33 +53,126 @@ class TrackStateMachine:
         self._status = TrackStatus.TRACKING
         self._uncertainFrames = 0
         self._recoveryFrames = 0
-        return StateUpdate(TrackStatus.TRACKING, 0, 0, True, False)
+        return StateUpdate(TrackStatus.TRACKING, 0, 0, True, False, TransitionReason.INITIALIZED)
+
+    def transition(
+        self,
+        mode: TrackMode,
+        observation: StateObservation,
+        uncertainFrames: int,
+        recoveryFrames: int,
+    ) -> TransitionDecision:
+        """Reduce one evaluated attempt without mutating controller memory."""
+        if mode is TrackMode.INIT:
+            return TransitionDecision(
+                "COMMIT", TrackMode.TRACKING, TransitionReason.INITIALIZED, True
+            )
+        evidence = observation.evidence
+        if mode is TrackMode.TRACKING:
+            if evidence is EvidenceLevel.CONFIRMED:
+                return TransitionDecision(
+                    "COMMIT", TrackMode.TRACKING, TransitionReason.RELIABLE_MEASUREMENT, True
+                )
+            if evidence is EvidenceLevel.WEAK and observation.escalationRecommended:
+                return TransitionDecision(
+                    "ESCALATE", TrackMode.UNCERTAIN, TransitionReason.WEAK_MEASUREMENT, False
+                )
+            if evidence is EvidenceLevel.REJECTED and observation.escalationRecommended:
+                return TransitionDecision(
+                    "ESCALATE", TrackMode.RECOVERING, TransitionReason.HARD_MISS, False
+                )
+            return TransitionDecision(
+                "COMMIT", TrackMode.RECOVERING, TransitionReason.HARD_MISS, False
+            )
+        if mode is TrackMode.UNCERTAIN:
+            if evidence in {EvidenceLevel.CONFIRMED, EvidenceLevel.REACQUIRED}:
+                return TransitionDecision(
+                    "COMMIT", TrackMode.TRACKING, TransitionReason.RELIABLE_MEASUREMENT, True
+                )
+            if (
+                evidence is EvidenceLevel.WEAK
+                and uncertainFrames + 1 < self._config.uncertainPatience
+            ):
+                return TransitionDecision(
+                    "ESCALATE" if observation.escalationRecommended else "COMMIT",
+                    TrackMode.UNCERTAIN,
+                    TransitionReason.WEAK_MEASUREMENT,
+                    False,
+                )
+            return TransitionDecision(
+                "COMMIT", TrackMode.RECOVERING, TransitionReason.PATIENCE_EXHAUSTED, False
+            )
+        if mode is TrackMode.RECOVERING:
+            if evidence is EvidenceLevel.REACQUIRED:
+                return TransitionDecision(
+                    "COMMIT",
+                    TrackMode.TRACKING,
+                    TransitionReason.REACQUIRED,
+                    True,
+                    resetMotionHistory=True,
+                    resetRecoveryEpoch=True,
+                )
+            if evidence is EvidenceLevel.CONFIRMED:
+                return TransitionDecision(
+                    "COMMIT", TrackMode.UNCERTAIN, TransitionReason.WEAK_MEASUREMENT, False
+                )
+            if recoveryFrames + 1 >= self._config.maxRecoveryFrames:
+                return TransitionDecision(
+                    "COMMIT", TrackMode.LOST, TransitionReason.RECOVERY_EXHAUSTED, False
+                )
+            return TransitionDecision(
+                "ESCALATE" if observation.escalationRecommended else "COMMIT",
+                TrackMode.RECOVERING,
+                TransitionReason.RECOVERY_PROGRESS,
+                False,
+            )
+        if mode is TrackMode.LOST:
+            if evidence is EvidenceLevel.REACQUIRED:
+                return TransitionDecision(
+                    "COMMIT",
+                    TrackMode.TRACKING,
+                    TransitionReason.REACQUIRED,
+                    True,
+                    resetMotionHistory=True,
+                    resetRecoveryEpoch=True,
+                )
+            if evidence in {EvidenceLevel.CONFIRMED, EvidenceLevel.WEAK}:
+                return TransitionDecision(
+                    "COMMIT", TrackMode.RECOVERING, TransitionReason.RECOVERY_PROGRESS, False
+                )
+            return TransitionDecision("COMMIT", TrackMode.LOST, TransitionReason.HARD_MISS, False)
+        return TransitionDecision(
+            "COMMIT", TrackMode.TERMINATED, TransitionReason.END_OF_STREAM, False
+        )
 
     def update(self, score: float | None, supported: bool, hasCandidate: bool) -> StateUpdate:
+        """Compatibility adapter used by legacy unit callers.
+
+        New controller code calls ``transition`` with a full ``StateObservation``.  This method
+        intentionally preserves the old scalar API while applying the V2 evidence bands.
+        """
         if self._status is None:
             raise ProtocolError("track state machine has not been initialized")
-        candidateScore = 0.0 if score is None else float(score)
-        normalAccepted = (
-            hasCandidate
-            and supported
-            and candidateScore >= self._config.acceptThreshold
-        )
-        recovered = (
-            hasCandidate
-            and supported
-            and candidateScore >= self._config.recoverAcceptThreshold
-            and self._status in {TrackStatus.UNCERTAIN, TrackStatus.RECOVERING, TrackStatus.LOST}
-        )
-
+        value = 0.0 if score is None else float(score)
+        if not hasCandidate:
+            evidence = EvidenceLevel.REJECTED
+        elif value >= self._config.recoverAcceptThreshold and supported:
+            evidence = EvidenceLevel.REACQUIRED
+        elif value >= self._config.acceptThreshold and supported:
+            evidence = EvidenceLevel.CONFIRMED
+        elif value >= self._config.uncertainThreshold:
+            evidence = EvidenceLevel.WEAK
+        else:
+            evidence = EvidenceLevel.REJECTED
         if self._status is TrackStatus.TRACKING:
-            if normalAccepted:
+            if evidence is EvidenceLevel.CONFIRMED:
                 self._resetStable()
             else:
-                self._uncertainFrames += 1
+                self._uncertainFrames = 1
                 self._recoveryFrames = 0
                 self._status = TrackStatus.UNCERTAIN
         elif self._status is TrackStatus.UNCERTAIN:
-            if normalAccepted:
+            if evidence is EvidenceLevel.CONFIRMED:
                 self._resetStable()
             else:
                 self._uncertainFrames += 1
@@ -79,24 +180,25 @@ class TrackStateMachine:
                     self._status = TrackStatus.RECOVERING
                     self._recoveryFrames = 0
         elif self._status is TrackStatus.RECOVERING:
-            if recovered:
+            if evidence is EvidenceLevel.REACQUIRED:
                 self._resetStable()
-            else:
-                self._recoveryFrames += 1
-                if self._recoveryFrames >= self._config.maxRecoveryFrames:
-                    self._status = TrackStatus.LOST
-        else:
-            if recovered:
+                return StateUpdate(self._status, 0, 0, True, True, TransitionReason.REACQUIRED)
+            self._recoveryFrames += 1
+            if self._recoveryFrames >= self._config.maxRecoveryFrames:
+                self._status = TrackStatus.LOST
+        elif self._status is TrackStatus.LOST:
+            if evidence is EvidenceLevel.REACQUIRED:
                 self._resetStable()
-            else:
-                self._recoveryFrames += 1
-
+                return StateUpdate(self._status, 0, 0, True, True, TransitionReason.REACQUIRED)
+        accepted = evidence in {EvidenceLevel.CONFIRMED, EvidenceLevel.REACQUIRED}
+        recovered = evidence is EvidenceLevel.REACQUIRED
         return StateUpdate(
-            status=self._status,
-            uncertainFrames=self._uncertainFrames,
-            recoveryFrames=self._recoveryFrames,
-            accepted=normalAccepted or recovered,
-            recovered=recovered,
+            self._status,
+            self._uncertainFrames,
+            self._recoveryFrames,
+            accepted,
+            recovered,
+            TransitionReason.RELIABLE_MEASUREMENT if accepted else TransitionReason.HARD_MISS,
         )
 
     def _resetStable(self) -> None:

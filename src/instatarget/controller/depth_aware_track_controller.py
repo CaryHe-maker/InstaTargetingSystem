@@ -1,25 +1,46 @@
-"""Stateful DTC facade that closes the geometry -> tracker -> control loop."""
+"""V2 transactional DTC facade for multi-view spherical tracking."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
+from math import asin, atan2
 from typing import TYPE_CHECKING
 
-from instatarget.controller.decision_gate import DecisionGate
 from instatarget.controller.motion_estimator import SphericalMotionEstimator
 from instatarget.controller.recovery_planner import PlannedView, RecoveryPlanner
+from instatarget.controller.state_evaluator import StateEvaluator
 from instatarget.controller.state_machine import TrackStateMachine
+from instatarget.controller.state_model import (
+    AttemptKind,
+    AttemptRecord,
+    FrameTransaction,
+    MotionPrediction,
+    RecoveryMemory,
+    StateInstance,
+    StateObservation,
+    TrackMode,
+    TransitionDecision,
+    TransitionReason,
+)
 from instatarget.controller.template_policy import TemplateDecision, TemplatePolicy
 from instatarget.core.config import (
     AppConfig,
     DecisionGateConfig,
+    EvaluatorConfig,
     GeometryConfig,
+    MotionConfig,
     RecoveryConfig,
     TrackingConfig,
 )
 from instatarget.core.errors import ProtocolError
-from instatarget.core.protocols import SphericalGeometry, TrackController
+from instatarget.core.protocols import (
+    FrameCommitted,
+    MoreViewsRequired,
+    SphericalGeometry,
+    TrackController,
+)
 from instatarget.core.types import (
     BBoxXYWH,
     BFoV,
@@ -29,11 +50,13 @@ from instatarget.core.types import (
     InitializationPlan,
     MotionState3D,
     ProjectedObservation,
+    ResultSource,
     SearchPlan,
     TemplateCommand,
     TemplateCommandKind,
     TrackResult,
     TrackStatus,
+    ViewSpec,
 )
 from instatarget.geometry.projection_math import makeSphericalPoint
 
@@ -42,16 +65,17 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
-class _PlannedFrame:
+class _PlannedAttempt:
     frame: FramePacket
     plan: SearchPlan
-    predictedMotion: MotionState3D
+    prediction: MotionPrediction
     predictedBfov: BFoV
+    state: StateInstance
     viewsById: dict[int, PlannedView]
 
 
 class DepthAwareTrackController(TrackController):
-    """Single-writer controller for multi-view spherical tracking."""
+    """Single-writer controller with bounded same-frame escalation and atomic commit."""
 
     def __init__(
         self,
@@ -62,6 +86,8 @@ class DepthAwareTrackController(TrackController):
         trackingConfig: TrackingConfig | None = None,
         recoveryConfig: RecoveryConfig | None = None,
         decisionGateConfig: DecisionGateConfig | None = None,
+        evaluatorConfig: EvaluatorConfig | None = None,
+        motionConfig: MotionConfig | None = None,
         motionEstimator: MotionEstimator | None = None,
     ) -> None:
         if config is not None:
@@ -69,48 +95,78 @@ class DepthAwareTrackController(TrackController):
             trackingConfig = config.tracking
             recoveryConfig = config.recovery
             decisionGateConfig = config.decisionGate
+            evaluatorConfig = config.evaluator
+            motionConfig = config.motion
         if geometryConfig is None or trackingConfig is None or recoveryConfig is None:
             raise ValueError("geometryConfig, trackingConfig and recoveryConfig are required")
-        if decisionGateConfig is None:
-            decisionGateConfig = DecisionGateConfig(0.25, 0.15)
-
+        decisionGateConfig = decisionGateConfig or DecisionGateConfig(0.25, 0.15)
+        evaluatorConfig = evaluatorConfig or EvaluatorConfig()
+        motionConfig = motionConfig or MotionConfig()
         self._geometry = geometry
         self._geometryConfig = geometryConfig
         self._trackingConfig = trackingConfig
         self._recoveryConfig = recoveryConfig
-        self._motion: MotionEstimator = motionEstimator or SphericalMotionEstimator()
-        self._gate = DecisionGate(decisionGateConfig, trackingConfig)
+        self._motion: MotionEstimator = motionEstimator or SphericalMotionEstimator(
+            windowLength=trackingConfig.windowLength,
+            maxPredictionHorizon=trackingConfig.maxPredictionHorizon,
+            minSamplesForVelocity=motionConfig.minSamplesForVelocity,
+            maxTangentSpanRad=motionConfig.maxTangentSpanRad,
+            huberDeltaRad=motionConfig.huberDeltaRad,
+            processNoiseRadPerSec=motionConfig.processNoiseRadPerSec,
+            maxAngularSpeedRadPerSec=motionConfig.maxAngularSpeedRadPerSec,
+            maxLogScaleRatePerSec=motionConfig.maxLogScaleRatePerSec,
+        )
+        self._evaluator = StateEvaluator(decisionGateConfig, trackingConfig, evaluatorConfig)
         self._planner = RecoveryPlanner(geometryConfig, trackingConfig, recoveryConfig)
         self._stateMachine = TrackStateMachine(trackingConfig)
         self._templatePolicy = TemplatePolicy(trackingConfig)
+        self._recovery = RecoveryMemory()
 
         self._initialized = False
         self._sequenceId: str | None = None
         self._lastFrameIndex = -1
         self._stateRevision = -1
+        self._backendRevision = 0
+        self._stateId = 0
+        self._transactionId = 0
+        self._mode = TrackMode.INIT
+        self._entryReason = TransitionReason.INITIALIZED
+        self._modeAgeFrames = 0
+        self._weakFrames = 0
+        self._recoveryFrames = 0
+        self._stableFrames = 0
+        self._reacquireCooldown = 0
         self._lastFrame: FramePacket | None = None
         self._initialBox: BBoxXYWH | None = None
         self._currentBox: BBoxXYWH | None = None
         self._currentBfov: BFoV | None = None
         self._currentDepth: DepthSummary | None = None
-        self._stableFrames = 0
         self._pendingTemplate = TemplateDecision(TemplateCommandKind.KEEP)
-        self._planned: _PlannedFrame | None = None
+        self._planned: _PlannedAttempt | None = None
+        self._transaction: FrameTransaction | None = None
         self._initialPlan: InitializationPlan | None = None
+        self._lastStateObservation: StateObservation | None = None
+        self._lastTransition: TransitionDecision | None = None
 
     @property
     def status(self) -> TrackStatus | None:
-        return self._stateMachine.status
+        if not self._initialized:
+            return None
+        return _publicStatus(self._mode)
 
     @property
     def stateRevision(self) -> int:
         return max(0, self._stateRevision)
 
-    def buildInitialization(
-        self,
-        frame: FramePacket,
-        initialBox: BBoxXYWH,
-    ) -> InitializationPlan:
+    @property
+    def lastStateObservation(self) -> StateObservation | None:
+        return self._lastStateObservation
+
+    @property
+    def lastTransition(self) -> TransitionDecision | None:
+        return self._lastTransition
+
+    def buildInitialization(self, frame: FramePacket, initialBox: BBoxXYWH) -> InitializationPlan:
         if self._initialized or self._initialPlan is not None:
             raise ProtocolError("controller is already initialized or has a pending initialization")
         if int(frame.frameIndex) != 0:
@@ -129,7 +185,6 @@ class DepthAwareTrackController(TrackController):
             stateRevision=0,
             templateView=self._makeViewSpec(0, templateBfov),
             templateBox=_centerBoxInView(
-                initialBox,
                 self._geometryConfig.viewWidthPx,
                 self._geometryConfig.viewHeightPx,
                 self._trackingConfig.contextScale,
@@ -153,16 +208,28 @@ class DepthAwareTrackController(TrackController):
             raise ProtocolError("initialization response does not match the pending plan")
         if self._lastFrame is None or self._initialBox is None or self._currentBfov is None:
             raise ProtocolError("initialization frame state is incomplete")
-        self._motion.initialize(
-            self._currentBfov.center,
-            depthSummary,
-            self._lastFrame.timestampNs,
-        )
+        if hasattr(self._motion, "resetFromMeasurement"):
+            self._motion.resetFromMeasurement(  # type: ignore[attr-defined]
+                self._currentBfov.center,
+                depthSummary,
+                self._lastFrame.timestampNs,
+                0,
+                1.0,
+                self._currentBfov.horizontalFovRad,
+                self._currentBfov.verticalFovRad,
+            )
+        else:
+            self._motion.initialize(
+                self._currentBfov.center,
+                depthSummary,
+                self._lastFrame.timestampNs,
+            )
         self._stateMachine.initialize()
         self._initialized = True
         self._initialPlan = None
         self._stateRevision = 0
         self._lastFrameIndex = 0
+        self._mode = TrackMode.TRACKING
         self._currentDepth = depthSummary
         return TrackResult(
             sequenceId=self._lastFrame.sequenceId,
@@ -173,155 +240,387 @@ class DepthAwareTrackController(TrackController):
             status=TrackStatus.TRACKING,
             valid=True,
             depthSummary=depthSummary,
+            resultSource=ResultSource.INITIAL,
         )
+
+    def beginFrame(self, frame: FramePacket) -> SearchPlan:
+        return self.plan(frame)
 
     def plan(self, frame: FramePacket) -> SearchPlan:
         self._requireInitialized()
-        if self._planned is not None:
-            raise ProtocolError("a search plan is already awaiting update")
+        if self._planned is not None or self._transaction is not None:
+            raise ProtocolError("a frame transaction is already awaiting update")
         self._requireFrameOrder(frame)
         if self._currentBox is None or self._currentBfov is None:
             raise ProtocolError("controller target state is incomplete")
-        predictedMotion = self._motion.predict(frame.timestampNs)
+        prediction = self._predictDetailed(frame)
         predictedBfov = self._planner.contextBfov(
-            _motionCenter(predictedMotion),
+            prediction.center,
             frame.rgb.shape[1],
             frame.rgb.shape[0],
             self._initialBox or self._currentBox,
             self._currentBox,
+            prediction.angularUncertaintyRad,
         )
-        status = self._stateMachine.status or TrackStatus.TRACKING
-        plannedViews = self._planner.buildViews(
-            int(frame.frameIndex),
-            frame.rgb.shape[1],
-            frame.rgb.shape[0],
-            self._initialBox or self._currentBox,
-            self._currentBox,
-            self._currentBfov,
-            predictedMotion,
-            status,
-        )
-        nextRevision = self._stateRevision + 1
-        command = TemplateCommand(
-            kind=self._pendingTemplate.kind,
-            frameIndex=frame.frameIndex,
-            viewId=self._pendingTemplate.viewId,
-            localBox=self._pendingTemplate.localBox,
-            expectedRevision=nextRevision,
-        )
-        searchPlan = SearchPlan(
+        self._stateId += 1
+        state = StateInstance(
+            stateId=self._stateId,
             sequenceId=frame.sequenceId,
             frameIndex=frame.frameIndex,
-            stateRevision=nextRevision,
-            views=tuple(item.spec for item in plannedViews),
-            templateCommand=command,
-            predictedMotion=predictedMotion,
+            stateRevision=self._stateRevision + 1,
+            mode=self._mode,
+            enteredFrom=self._mode,
+            entryReason=self._entryReason,
+            prediction=prediction,
+            searchSeedCenter=prediction.center,
+            recoveryEpochId=self._recovery.epochId,
+            modeAgeFrames=self._modeAgeFrames,
+            stableStreak=self._stableFrames,
+            weakStreak=self._weakFrames,
+            missStreak=self._recoveryFrames,
         )
-        self._planned = _PlannedFrame(
+        self._transactionId += 1
+        self._transaction = FrameTransaction(
+            transactionId=self._transactionId,
             frame=frame,
-            plan=searchPlan,
-            predictedMotion=predictedMotion,
-            predictedBfov=predictedBfov,
-            viewsById={item.spec.viewId: item for item in plannedViews},
+            state=state,
+            remainingViews=self._trackingConfig.maxViewsPerFrameTotal,
+            recoveryMemory=deepcopy(self._recovery),
         )
-        self._pendingTemplate = TemplateDecision(TemplateCommandKind.KEEP)
-        return searchPlan
+        return self._buildAttempt(
+            frame=frame,
+            state=state,
+            prediction=prediction,
+            predictedBfov=predictedBfov,
+            attemptIndex=0,
+            searchSeed=prediction.center,
+            viewIdStart=0,
+        )
+
+    def consume(
+        self,
+        plan: SearchPlan,
+        observations: Sequence[ProjectedObservation],
+    ) -> MoreViewsRequired | FrameCommitted:
+        return self._consume(plan, observations, allowEscalation=True)
 
     def update(
         self,
         plan: SearchPlan,
         observations: Sequence[ProjectedObservation],
     ) -> TrackResult:
+        """Compatibility path: commit one attempt and never request more backend work."""
+        step = self._consume(
+            plan,
+            observations,
+            allowEscalation=False,
+            legacyCompatibility=True,
+        )
+        if isinstance(step, MoreViewsRequired):
+            raise ProtocolError("legacy update path cannot return a second search plan")
+        return step.result
+
+    def _consume(
+        self,
+        plan: SearchPlan,
+        observations: Sequence[ProjectedObservation],
+        *,
+        allowEscalation: bool,
+        legacyCompatibility: bool = False,
+    ) -> MoreViewsRequired | FrameCommitted:
         self._requireInitialized()
         planned = self._planned
-        if planned is None or planned.plan != plan:
-            raise ProtocolError("search response does not match the pending plan")
-        self._validateObservations(plan, observations)
-        aggregate = self._gate.aggregate(
-            observations,
-            self._geometry,
-            planned.frame.rgb.shape[1],
-            planned.frame.rgb.shape[0],
-        )
-        stateUpdate = self._stateMachine.update(
-            aggregate.confidence if aggregate is not None else None,
-            aggregate.supported if aggregate is not None else False,
-            aggregate is not None,
-        )
-        accepted = stateUpdate.accepted and aggregate is not None
-        if accepted and aggregate is not None:
-            motionState = self._motion.update(
-                aggregate.bfov.center,
-                aggregate.depthSummary,
-                planned.frame.timestampNs,
-                aggregate.confidence,
+        transaction = self._transaction
+        if planned is None or transaction is None or planned.plan != plan:
+            raise ProtocolError("search response does not match the pending attempt")
+        if (
+            plan.transactionId != transaction.transactionId
+            or plan.attemptIndex != transaction.attemptIndex
+        ):
+            raise ProtocolError("search response transaction identity mismatch")
+        expectedBackendRevision = self._backendRevision + 1
+        if plan.templateCommand.expectedRevision != expectedBackendRevision:
+            raise ProtocolError(
+                "backend template revision mismatch: "
+                f"expected={expectedBackendRevision}, "
+                f"actual={plan.templateCommand.expectedRevision}"
             )
-            outputBfov = aggregate.bfov
-            outputBox = aggregate.bbox
-            outputDepth = aggregate.depthSummary
-            outputConfidence = aggregate.confidence
-        else:
-            motionState = planned.predictedMotion
-            # An uncommitted candidate must not overwrite the last accepted
-            # state.  Report only the bounded motion prediction when the gate
-            # rejects or lacks multi-view support.
-            outputBfov = planned.predictedBfov
-            outputBox = self._geometry.bfovToBbox(
-                outputBfov,
-                planned.frame.rgb.shape[1],
-                planned.frame.rgb.shape[0],
+        self._backendRevision = plan.templateCommand.expectedRevision
+        evaluation = self._evaluator.evaluate(
+            state=planned.state,
+            plan=plan,
+            observations=observations,
+            prediction=planned.prediction,
+            predictedBfov=planned.predictedBfov,
+            geometry=self._geometry,
+            frameWidthPx=planned.frame.rgb.shape[1],
+            frameHeightPx=planned.frame.rgb.shape[0],
+        )
+        decision = self._stateMachine.transition(
+            planned.state.mode,
+            evaluation,
+            self._weakFrames,
+            self._recoveryFrames,
+        )
+        if (
+            legacyCompatibility
+            and planned.state.mode is TrackMode.TRACKING
+            and decision.nextMode is TrackMode.RECOVERING
+        ):
+            decision = replace(
+                decision,
+                nextMode=TrackMode.UNCERTAIN,
+                reason=TransitionReason.HARD_MISS,
             )
-            outputDepth = self._currentDepth
-            outputConfidence = max(0.0, motionState.confidence * 0.5)
+        transaction.attempts.append(
+            AttemptRecord(
+                kind=AttemptKind.PRIMARY if plan.attemptIndex == 0 else AttemptKind.ESCALATION,
+                attemptIndex=plan.attemptIndex,
+                plan=plan,
+                observations=tuple(observations),
+                evaluation=evaluation,
+            )
+        )
+        if self._shouldEscalate(decision.action, transaction, allowEscalation):
+            transaction.attemptIndex += 1
+            transaction.escalationUsed = True
+            self._planned = None
+            nextPlan = self._buildAttempt(
+                frame=planned.frame,
+                state=planned.state,
+                prediction=planned.prediction,
+                predictedBfov=planned.predictedBfov,
+                attemptIndex=transaction.attemptIndex,
+                searchSeed=evaluation.searchSeedCenter,
+                viewIdStart=max((view.viewId for view in plan.views), default=-1) + 1,
+            )
+            return MoreViewsRequired(nextPlan)
+        result = self._commit(planned, evaluation, decision)
+        self._lastStateObservation = evaluation
+        self._lastTransition = decision
+        return FrameCommitted(result)
 
-        if accepted and stateUpdate.status is TrackStatus.TRACKING:
-            self._stableFrames += 1
+    def _buildAttempt(
+        self,
+        *,
+        frame: FramePacket,
+        state: StateInstance,
+        prediction: MotionPrediction,
+        predictedBfov: BFoV,
+        attemptIndex: int,
+        searchSeed,
+        viewIdStart: int,
+    ) -> SearchPlan:
+        transaction = self._transaction
+        if transaction is None:
+            raise ProtocolError("attempt requires an active frame transaction")
+        status = _publicStatus(state.mode)
+        views = self._planner.buildViews(
+            int(frame.frameIndex),
+            frame.rgb.shape[1],
+            frame.rgb.shape[0],
+            self._initialBox or self._currentBox,
+            self._currentBox,
+            self._currentBfov,
+            prediction.motionState,
+            status if attemptIndex == 0 else TrackStatus.RECOVERING,
+            searchSeedCenter=searchSeed,
+            attemptIndex=attemptIndex,
+            viewIdStart=viewIdStart,
+            viewBudget=transaction.remainingViews,
+            recoveryMemory=transaction.recoveryMemory,
+        )
+        if not views:
+            raise ProtocolError("view planner returned an empty attempt")
+        transaction.remainingViews -= len(views)
+        nextRevision = self._stateRevision + 1
+        command = TemplateCommand(
+            kind=self._pendingTemplate.kind if attemptIndex == 0 else TemplateCommandKind.KEEP,
+            frameIndex=frame.frameIndex,
+            viewId=self._pendingTemplate.viewId if attemptIndex == 0 else None,
+            localBox=self._pendingTemplate.localBox if attemptIndex == 0 else None,
+            expectedRevision=self._backendRevision + 1,
+        )
+        searchPlan = SearchPlan(
+            sequenceId=frame.sequenceId,
+            frameIndex=frame.frameIndex,
+            stateRevision=nextRevision,
+            views=tuple(item.spec for item in views),
+            templateCommand=command,
+            predictedMotion=prediction.motionState,
+            transactionId=transaction.transactionId,
+            attemptIndex=attemptIndex,
+            recoveryEpochId=(
+                transaction.recoveryMemory.epochId
+                if transaction.recoveryMemory is not None
+                else self._recovery.epochId
+            ),
+            viewRoles=tuple(item.role for item in views),
+        )
+        self._planned = _PlannedAttempt(
+            frame=frame,
+            plan=searchPlan,
+            prediction=prediction,
+            predictedBfov=predictedBfov,
+            state=state,
+            viewsById={item.spec.viewId: item for item in views},
+        )
+        self._pendingTemplate = TemplateDecision(TemplateCommandKind.KEEP)
+        return searchPlan
+
+    def _shouldEscalate(
+        self,
+        action: str,
+        transaction: FrameTransaction,
+        allowEscalation: bool,
+    ) -> bool:
+        return (
+            action == "ESCALATE"
+            and allowEscalation
+            and self._trackingConfig.sameFrameEscalationEnabled
+            and not transaction.escalationUsed
+            and transaction.attemptIndex + 1 < self._trackingConfig.maxAttemptsPerFrame
+            and transaction.remainingViews > 0
+        )
+
+    def _commit(self, planned, evaluation, decision) -> TrackResult:
+        if self._transaction is not None and self._transaction.recoveryMemory is not None:
+            self._recovery = self._transaction.recoveryMemory
+        accepted = decision.acceptMeasurement and evaluation.measuredBfov is not None
+        if accepted:
+            outputBfov = evaluation.measuredBfov
+            outputBox = evaluation.measuredBbox
+            assert outputBox is not None
+            outputDepth = evaluation.depthSummary
+            outputConfidence = evaluation.stateScore
+            if decision.resetMotionHistory and hasattr(self._motion, "resetFromMeasurement"):
+                self._motion.resetFromMeasurement(  # type: ignore[attr-defined]
+                    outputBfov.center,
+                    outputDepth,
+                    planned.frame.timestampNs,
+                    int(planned.frame.frameIndex),
+                    outputConfidence,
+                    outputBfov.horizontalFovRad,
+                    outputBfov.verticalFovRad,
+                )
+                self._reacquireCooldown = self._trackingConfig.reacquireCooldownFrames
+                source = ResultSource.OBSERVED_REACQUIRED
+            else:
+                self._recordMeasurement(planned, outputBfov, outputDepth, outputConfidence)
+                source = ResultSource.OBSERVED_CONFIRMED
             self._currentBox = outputBox
             self._currentBfov = outputBfov
             self._currentDepth = outputDepth
         else:
+            outputBfov = evaluation.proposedOutputBfov
+            outputBox = evaluation.proposedOutputBbox
+            outputDepth = self._currentDepth
+            outputConfidence = max(0.0, planned.prediction.confidence * 0.5)
+            source = ResultSource.MOTION_PREDICTED
+        oldMode = self._mode
+        self._mode = decision.nextMode
+        self._entryReason = decision.reason
+        self._modeAgeFrames = self._modeAgeFrames + 1 if self._mode is oldMode else 0
+        if accepted and self._mode is TrackMode.TRACKING:
+            self._stableFrames += 1
+            self._weakFrames = 0
+            self._recoveryFrames = 0
+        else:
             self._stableFrames = 0
+            if self._mode is TrackMode.UNCERTAIN:
+                self._weakFrames += 1
+            elif self._mode in {TrackMode.RECOVERING, TrackMode.LOST}:
+                self._recoveryFrames += 1
+                self._recovery.framesSpent += 1
+        if (
+            oldMode not in {TrackMode.RECOVERING, TrackMode.LOST}
+            and self._mode is TrackMode.RECOVERING
+        ):
+            self._recovery.reset(planned.frame.frameIndex)
+        if decision.resetRecoveryEpoch:
+            self._recovery = RecoveryMemory(epochId=self._recovery.epochId + 1)
+        if (
+            evaluation.measuredCenter is not None
+            and evaluation.stateScore > self._recovery.bestSeedScore
+        ):
+            self._recovery.bestSeedCenter = evaluation.measuredCenter
+            self._recovery.bestSeedScore = evaluation.stateScore
+            self._recovery.bestSeedFrameIndex = planned.frame.frameIndex
+        aggregate = _aggregateAdapter(evaluation)
         self._pendingTemplate = self._templatePolicy.decide(
-            stateUpdate.status,
-            self._stableFrames,
-            aggregate if accepted else None,
+            _publicStatus(self._mode),
+            self._stableFrames if self._reacquireCooldown == 0 else 0,
+            aggregate,
         )
-        self._stateRevision = plan.stateRevision
+        if self._reacquireCooldown > 0:
+            self._reacquireCooldown -= 1
+        self._stateRevision = planned.plan.stateRevision
         self._lastFrameIndex = int(planned.frame.frameIndex)
         self._lastFrame = planned.frame
         self._planned = None
+        self._transaction = None
         return TrackResult(
             sequenceId=planned.frame.sequenceId,
             frameIndex=planned.frame.frameIndex,
             bbox=outputBox,
             bfov=outputBfov,
             confidence=outputConfidence,
-            status=stateUpdate.status,
+            status=_publicStatus(self._mode),
             valid=accepted,
             depthSummary=outputDepth,
+            resultSource=source,
         )
 
-    def _makeViewSpec(self, viewId: int, bfov: BFoV):
-        from instatarget.core.types import ViewSpec
+    def _recordMeasurement(self, planned, bfov, depth, confidence) -> None:
+        if hasattr(self._motion, "recordMeasurement"):
+            self._motion.recordMeasurement(  # type: ignore[attr-defined]
+                frameIndex=int(planned.frame.frameIndex),
+                timestampNs=planned.frame.timestampNs,
+                point=bfov.center,
+                depth=depth,
+                confidence=confidence,
+                horizontalSizeRad=bfov.horizontalFovRad,
+                verticalSizeRad=bfov.verticalFovRad,
+            )
+        else:
+            self._motion.update(bfov.center, depth, planned.frame.timestampNs, confidence)
 
+    def _predictDetailed(self, frame: FramePacket) -> MotionPrediction:
+        if hasattr(self._motion, "predictDetailed"):
+            prediction = self._motion.predictDetailed(  # type: ignore[attr-defined]
+                frame.timestampNs,
+                min(self._trackingConfig.maxPredictionHorizon, max(1, self._recoveryFrames + 1)),
+            )
+            return replace(
+                prediction,
+                sourceRevision=max(0, self._stateRevision),
+                targetFrameIndex=frame.frameIndex,
+            )
+        motion = self._motion.predict(frame.timestampNs)
+        center = _motionCenter(motion)
+        return MotionPrediction(
+            sourceRevision=max(0, self._stateRevision),
+            targetFrameIndex=frame.frameIndex,
+            horizonFrames=1,
+            center=center,
+            horizontalSizeRad=self._currentBfov.horizontalFovRad,
+            verticalSizeRad=self._currentBfov.verticalFovRad,
+            tangentVelocityRadPerSec=(0.0, 0.0),
+            rangeDepth=motion.rangeDepth or None,
+            rangeVelocityPerSec=motion.rangeVelocity,
+            angularUncertaintyRad=0.05,
+            scaleUncertainty=0.10,
+            rangeUncertainty=None,
+            confidence=motion.confidence,
+        )
+
+    def _makeViewSpec(self, viewId: int, bfov: BFoV) -> ViewSpec:
         return ViewSpec(
             viewId=viewId,
             bfov=bfov,
             outputWidthPx=self._geometryConfig.viewWidthPx,
             outputHeightPx=self._geometryConfig.viewHeightPx,
         )
-
-    def _validateObservations(
-        self,
-        plan: SearchPlan,
-        observations: Sequence[ProjectedObservation],
-    ) -> None:
-        expected = {view.viewId for view in plan.views}
-        actual = [observation.viewId for observation in observations]
-        if len(actual) != len(set(actual)):
-            raise ProtocolError("projected observations must have unique viewIds")
-        if not set(actual).issubset(expected):
-            raise ProtocolError("projected observation contains an unknown viewId")
 
     def _requireInitialized(self) -> None:
         if not self._initialized:
@@ -337,26 +636,26 @@ class DepthAwareTrackController(TrackController):
 
 
 def _motionCenter(motion: MotionState3D):
-    from math import asin, atan2
-
     x, y, z = motion.position
     return makeSphericalPoint(atan2(x, z), asin(max(-1.0, min(1.0, y))))
 
 
+def _publicStatus(mode: TrackMode) -> TrackStatus:
+    if mode is TrackMode.UNCERTAIN:
+        return TrackStatus.UNCERTAIN
+    if mode is TrackMode.RECOVERING:
+        return TrackStatus.RECOVERING
+    if mode is TrackMode.LOST:
+        return TrackStatus.LOST
+    return TrackStatus.TRACKING
+
+
 def _centerBoxInView(
-    box: BBoxXYWH,
     viewWidthPx: int,
     viewHeightPx: int,
     contextScale: float,
     contextMarginRatio: float,
 ) -> BBoxXYWH:
-    if viewWidthPx <= 0 or viewHeightPx <= 0:
-        raise ProtocolError("template view dimensions must be positive")
-    if contextScale < 1.0 or contextMarginRatio < 0.0:
-        raise ProtocolError("template context parameters are invalid")
-    # The template view is a context crop.  Preserve the target's normalized
-    # fraction within that crop instead of copying ERP pixel dimensions into
-    # local coordinates.
     width = float(viewWidthPx) / (contextScale * (1.0 + contextMarginRatio))
     height = float(viewHeightPx) / (contextScale * (1.0 + contextMarginRatio))
     width = max(2.0, min(float(viewWidthPx), width))
@@ -366,6 +665,27 @@ def _centerBoxInView(
         yPx=(float(viewHeightPx) - height) / 2.0,
         widthPx=width,
         heightPx=height,
+    )
+
+
+def _aggregateAdapter(observation):
+    """Provide the existing TemplatePolicy with only the selected-cluster fields it consumes."""
+    if observation.representativeViewId is None or observation.measuredBfov is None:
+        return None
+    from instatarget.controller.decision_gate import FrameAggregate
+
+    return FrameAggregate(
+        bfov=observation.measuredBfov,
+        bbox=observation.measuredBbox,
+        confidence=observation.stateScore,
+        decisionScore=observation.stateScore,
+        sourceViewIds=observation.sourceViewIds,
+        representativeViewId=observation.representativeViewId,
+        localBox=observation.representativeLocalBox,
+        depthSummary=observation.depthSummary,
+        supported=observation.supported,
+        clusterCount=observation.clusterCount,
+        agreementScore=observation.agreementScore,
     )
 
 
