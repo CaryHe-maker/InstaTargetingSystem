@@ -50,6 +50,11 @@ def buildParser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-frames", type=int, default=None, help="Limit frames for a smoke test."
     )
+    parser.add_argument(
+        "--hit-full-frame-experiment",
+        action="store_true",
+        help="initialize HiT from the geometry crop, then infer each later frame from one raw ERP image",
+    )
     parser.add_argument("--output", required=True)
     parser.add_argument("--config", required=True)
     return parser
@@ -94,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
             depthProcessor=runtime.depthProcessor,
             recorder=runtime.recorder,
             resultRecorder=resultRecorder,
+            hitFullFrameExperiment=args.hit_full_frame_experiment,
         )
         expectedCount = resultCount if getattr(source, "frameCount", 0) <= 0 else source.frameCount
         finalizeSink(runtime.sink, expectedCount)

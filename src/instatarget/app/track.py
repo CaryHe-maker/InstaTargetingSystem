@@ -26,6 +26,11 @@ def buildParser() -> argparse.ArgumentParser:
     parser.add_argument("--config", required=True)
     parser.add_argument("--sequence-id", default=None)
     parser.add_argument("--recursive", action="store_true")
+    parser.add_argument(
+        "--hit-full-frame-experiment",
+        action="store_true",
+        help="initialize HiT from the geometry crop, then infer each later frame from one raw ERP image",
+    )
     return parser
 
 
@@ -49,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
             sink=runtime.sink,
             depthProcessor=runtime.depthProcessor,
             recorder=runtime.recorder,
+            hitFullFrameExperiment=args.hit_full_frame_experiment,
         )
         finalizeSink(runtime.sink, resultCount if getattr(source, "frameCount", 0) <= 0 else source.frameCount)
         return 0

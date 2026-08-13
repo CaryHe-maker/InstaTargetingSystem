@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 from instatarget.controller import DepthAwareTrackController, remapLocalObservationFusedScores
 from instatarget.core.config import AppConfig
-from instatarget.core.errors import DecodeError, ProtocolError
+from instatarget.core.errors import DecodeError, GeometryError, ProtocolError
 from instatarget.core.protocols import FrameSource as FrameSourceProtocol
 from instatarget.core.protocols import MoreViewsRequired, SphericalGeometry, TrackerBackend
 from instatarget.core.protocols import ResultSink as ResultSinkProtocol
@@ -22,6 +22,8 @@ from instatarget.core.types import (
     LocalView,
     MotionState3D,
     ProjectedObservation,
+    TemplateCommand,
+    TemplateCommandKind,
 )
 from instatarget.geometry import SphericalGeometryImpl, makeSphericalPoint
 from instatarget.io.result_sink import FileResultSink
@@ -129,6 +131,7 @@ def runTracking(
     depthProcessor: DepthProcessor | None = None,
     recorder: VisualizationRecorder | None = None,
     resultRecorder: ResultVisualizationRecorder | None = None,
+    hitFullFrameExperiment: bool = False,
 ) -> int:
     """Run the sequential tracking pipeline and publish one result per frame."""
     try:
@@ -158,7 +161,32 @@ def runTracking(
             plan = controller.beginFrame(frame)
             depthRecorded = False
             while True:
-                views = tuple(geometry.cropViews(frame, plan.views))
+                if hitFullFrameExperiment:
+                    # The first frame remains a normal geometry crop (the anchor
+                    # template is initialized above).  Every later frame sends
+                    # exactly one unmodified ERP RGB image to HiT.
+                    plannedView = plan.views[0]
+                    fullFrameSpec = replace(
+                        plannedView,
+                        outputWidthPx=frame.rgb.shape[1],
+                        outputHeightPx=frame.rgb.shape[0],
+                    )
+                    views = (
+                        LocalView(
+                            spec=fullFrameSpec,
+                            rgb=frame.rgb.copy(),
+                        ),
+                    )
+                    command = TemplateCommand(
+                        kind=TemplateCommandKind.KEEP,
+                        frameIndex=plan.templateCommand.frameIndex,
+                        viewId=None,
+                        localBox=None,
+                        expectedRevision=plan.templateCommand.expectedRevision,
+                    )
+                else:
+                    views = tuple(geometry.cropViews(frame, plan.views))
+                    command = plan.templateCommand
                 if (
                     not depthRecorded
                     and recorder is not None
@@ -168,7 +196,7 @@ def runTracking(
                     depthRgb = depthProcessor.preprocess(frame.depth).depthRgb
                     recorder.recordDepthRgb(frame, {0: depthRgb})
                     depthRecorded = True
-                rawObservations = tuple(backend.infer(views, plan.templateCommand))
+                rawObservations = tuple(backend.infer(views, command))
                 observations = remapLocalObservationFusedScores(rawObservations)
                 projected = tuple(
                     _projectObservation(
@@ -177,6 +205,7 @@ def runTracking(
                         observation=observation,
                         predictedMotion=plan.predictedMotion,
                         geometry=geometry,
+                        fullFrame=hitFullFrameExperiment,
                     )
                     for view, observation in zip(views, observations, strict=True)
                 )
@@ -184,11 +213,18 @@ def runTracking(
                     recorder.recordLocalRgb(frame, views)
                     recorder.recordBackendBoxes(frame, views, observations)
                     recorder.recordGeometryBoxes(frame, projected)
-                step = controller.consume(plan, projected)
+                # A full-frame experiment deliberately uses one backend call and
+                # one controller attempt per frame, even when normal recovery
+                # policy would request more views.
+                step = (
+                    controller.update(plan, projected)
+                    if hitFullFrameExperiment
+                    else controller.consume(plan, projected)
+                )
                 if isinstance(step, MoreViewsRequired):
                     plan = step.plan
                     continue
-                result = step.result
+                result = step if hitFullFrameExperiment else step.result
                 break
             sink.write(result)
             if resultRecorder is not None:
@@ -230,9 +266,35 @@ def _projectObservation(
     observation: LocalObservation,
     predictedMotion: MotionState3D | None,
     geometry: SphericalGeometry,
+    fullFrame: bool = False,
 ) -> ProjectedObservation:
-    candidateBfov = geometry.localBoxToBfov(observation.bbox, view.spec)
-    bbox = geometry.bfovToBbox(candidateBfov, frame.rgb.shape[1], frame.rgb.shape[0])
+    if fullFrame:
+        # In this diagnostic mode the HiT coordinates are already ERP pixel
+        # coordinates because its input is the unmodified ERP image.
+        bbox = observation.bbox
+        frameWidthPx, frameHeightPx = frame.rgb.shape[1], frame.rgb.shape[0]
+        # A full-width ERP box has no finite spherical envelope at the seam.
+        # Use an inset proxy only for controller scoring; keep ``bbox`` itself
+        # untouched so the diagnostic image shows exactly what HiT returned.
+        bfovBox = BBoxXYWH(
+            xPx=min(max(0.0, bbox.xPx), max(0.0, frameWidthPx - 1.0)),
+            yPx=min(max(0.0, bbox.yPx), max(0.0, frameHeightPx - 1.0)),
+            widthPx=min(bbox.widthPx, max(1.0, frameWidthPx - 1.0)),
+            heightPx=min(bbox.heightPx, max(1.0, frameHeightPx - 1.0)),
+        )
+        if bfovBox.xPx + bfovBox.widthPx > frameWidthPx:
+            bfovBox = replace(bfovBox, xPx=max(0.0, frameWidthPx - bfovBox.widthPx))
+        if bfovBox.yPx + bfovBox.heightPx > frameHeightPx:
+            bfovBox = replace(bfovBox, yPx=max(0.0, frameHeightPx - bfovBox.heightPx))
+        try:
+            candidateBfov = geometry.bboxToBfov(bfovBox, frameWidthPx, frameHeightPx)
+        except GeometryError:
+            # Seam-spanning/near-panorama boxes do not have a finite BFoV;
+            # retain the controller's valid search envelope for scoring.
+            candidateBfov = view.spec.bfov
+    else:
+        candidateBfov = geometry.localBoxToBfov(observation.bbox, view.spec)
+        bbox = geometry.bfovToBbox(candidateBfov, frame.rgb.shape[1], frame.rgb.shape[0])
     motionScore = _motionScore(candidateBfov.center, predictedMotion)
     scaleScore = _scaleScore(observation.bbox, view)
     return ProjectedObservation(
