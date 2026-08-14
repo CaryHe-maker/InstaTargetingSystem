@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     edgePath = outputPath.with_name(f"{outputPath.stem}_edges{outputPath.suffix}")
     outputPath.parent.mkdir(parents=True, exist_ok=True)
     result = DepthPreprocessor().preprocess(depthPlane)
-    writeRgbPng(outputPath, result.depthRgb)
+    writeRgbPng(outputPath, result.edgeRgb)
     writeRgbPng(contrastPath, _contrastPreview(depthPlane.values))
     writeRgbPng(edgePath, _edgePreview(result.edge, result.validMask))
     print(

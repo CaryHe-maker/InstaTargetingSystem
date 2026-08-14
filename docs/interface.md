@@ -14,7 +14,7 @@
 | 数据入口 | AirSim360 入口必须至少提供 ERP RGB；Depth 可缺省 |
 | 内部位置 | 使用单位球面坐标、BFoV 和可选深度状态 |
 | 跟踪模型 | `TrackerBackend` 接收局部透视 `LocalView`，支持 RGB-only 与可选 RGB-D |
-| 深度使用 | RGB、Depth 在 geometry 中同步裁剪；深度预处理、伪彩色、深度分支和融合头统一封装在 `TrackerBackend` |
+| 深度使用 | RGB、Depth 在 geometry 中同步裁剪；深度边缘预测与 RGB 边缘增强统一封装在 `TrackerBackend`，随后只运行一个 HiT |
 | 输出 | 每个输入帧恰好一个 `TrackResult` |
 | 日志 | 比赛输出与日志分离；日志写 `stderr` |
 | 配置 | 启动时完成校验，运行期间只读 |
@@ -350,7 +350,7 @@ class TrackerBackend(Protocol):
 - `infer()` 输出与输入视图一一对应且顺序一致。
 - 局部框必须已裁剪到视图有效区域。
 - RGB-only 模式只消费 `LocalView.rgb`，并将 `depthScore` 固定为 `0.0`、`fusedScore` 固定为 `appearanceScore`、`depthSummary` 固定为 `None`。
-- RGB-D 模式在后端内部完成深度对齐检查、归一化、缺失掩码、伪彩色、深度分支推理和融合；深度分支结果必须参与 `fusedScore`。
+- RGB-D 模式在后端内部完成深度对齐检查、归一化、缺失掩码、边缘预测和 RGB 边缘改色；增强 RGB 进入与 RGB-only 相同的单 HiT，`depthScore=0` 且 `fusedScore=appearanceScore`。
 - 无论模式如何，后端不得生成 BFoV、改变状态机或执行全局搜索规划。
 - 同一后端实例只允许设备线程调用。
 - 不支持在线模板的后端必须只接受 `KEEP`，其能力在启动时声明。
@@ -446,7 +446,7 @@ transaction、attempt 和 revision，并以 copy-on-write 方式原子提交。
 
 `ProjectedObservation.depthScore` 和 `ProjectedObservation.fusedScore` 由 `TrackerBackend` 产生；
 `motionScore` 与 `scaleScore` 由控制层补充。DTC 可以按配置计算用于排序的 `decisionScore`，
-但不得把它写回 `fusedScore` 或重新实现 RGB/Depth 融合。低于 `tracking.candidateMinScore`
+但不得把它写回 `fusedScore` 或重新实现 HiT 分数。低于 `tracking.candidateMinScore`
 的单图候选不参与单帧聚类，仍可保留在诊断日志中。
 
 ---
@@ -632,8 +632,10 @@ depth:
   enabled: false
   minValidRatio: 0.35
   maxDepthJumpRatio: 0.60
-backendFusion:
-  depthScoreWeight: 0.0
+  edge:
+    threshold: 0.20
+    widthPx: 2
+    minContrast: 160
 decisionGate:
   motionScoreWeight: 0.25
   scaleScoreWeight: 0.15

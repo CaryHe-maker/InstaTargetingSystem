@@ -47,33 +47,33 @@
 
 6. 项目名：RGB-D 跟踪路线索引
 
-   借鉴技术：RGB 与 Depth 并行传递、特征级/分数级融合、模态缺失退化。
+   借鉴技术：RGB-D 跟踪路线、深度边缘线索、模态缺失退化。
 
-   技术简要介绍：多模态对象跟踪路线索引，提供 RGB-D 跟踪的代表性项目集合，用来确认本项目的融合方向和退化策略。
+   技术简要介绍：多模态对象跟踪路线索引，提供 RGB-D 跟踪的代表性项目集合，用来确认本项目的深度边缘使用方式和退化策略。
 
    GitHub 仓库地址：[https://github.com/983632847/Awesome-Multimodal-Object-Tracking](https://github.com/983632847/Awesome-Multimodal-Object-Tracking)
 
 7. 项目名：Depth-Anything-V2
 
-   借鉴技术：单目深度预训练初始化、轻量深度编码器、深度特征 warm start。
+   借鉴技术：深度边缘质量、深度预训练初始化参考。
 
-   技术简要介绍：本项目深度分支的初始化来源。用于把深度图先映射到可训练的深度编码空间，再接入融合头。
+   技术简要介绍：作为深度边缘质量的可选研究参考；当前运行后端不加载该模型，也没有独立深度分支。
 
    GitHub 仓库地址：[https://github.com/DepthAnything/Depth-Anything-V2](https://github.com/DepthAnything/Depth-Anything-V2)
 
 8. 项目名：space-stream
 
-   借鉴技术：深度 codec、`Linear` / `UniformHue` / `InverseHue` 编码、深度流伪彩色表达。
+   借鉴技术：深度梯度、边缘稳定性与缺失值处理。
 
-   技术简要介绍：用于参考“把深度转成更容易被视觉主干消费的颜色图”的做法。它更接近本项目采用的浮雕式深度颜色化路线，而不是单纯给深度图染色。
+   技术简要介绍：用于参考深度梯度、边缘稳定性与缺失值处理；当前 RGBD 模式只把深度边缘用于增强 RGB 图，不生成独立模型输入。
 
    GitHub 仓库地址：[https://github.com/cansik/space-stream](https://github.com/cansik/space-stream)
 
 9. 项目名：Intel RealSense / librealsense examples
 
-   借鉴技术：`align-depth2color`、深度与彩色对齐、深度伪彩色显示。
+   借鉴技术：`align-depth2color` 与深度和彩色对齐。
 
-   技术简要介绍：用于参考深度与彩色对齐、深度图可视化和伪彩色转换的基础做法，适合作为深度转颜色前处理的工程参照。
+   技术简要介绍：用于参考深度与彩色对齐和无效像素处理；当前深度图只预测边缘，不转换成独立模型输入。
 
    GitHub 仓库地址：[https://github.com/IntelRealSense/librealsense](https://github.com/IntelRealSense/librealsense)
 

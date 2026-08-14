@@ -26,14 +26,16 @@
 ## 2. `configs/RGBD.yaml`
 
 该文件是 RGB-D 运行配置；`configs/RGBonly.yaml` 用于无深度对照。两种模式保持相同配置结构，
-只有 `depth.enabled` 和深度权重不同。
+`depth.enabled` 决定是否应用深度边缘增强；两份文件可分别指向不同训练权重。
 
 | 参数名 | 当前行 | 当前值 | 简要职能 | 调大或切换后的主要影响 |
 |---|---:|---|---|---|
 | `model.backend` | 3 | `pytorch` | 选择推理运行时 | 切换后影响部署兼容性、速度与数值一致性 |
-| `model.variant` | 4 | `hit_small` | 选择 HiT 模型规模 | 更大变体通常提高容量，同时降低速度并增加显存 |
-| `model.weights` | 5 | `../models/hit_small.pth` | 指定模型权重 | 切换权重会直接改变精度、泛化和可复现性 |
-| `model.precision` | 6 | `fp16` | 指定推理数值精度 | 更低精度通常提高速度、降低显存，但可能增加临界分数误差 |
+| `model.variant` | 4 | `HiT_Small` | 选择官方 experiment YAML | 名称必须匹配 `experiments/HiT/<variant>.yaml` |
+| `model.source` | 5 | `../third_party/HiT` | 官方 HiT 源码根目录 | 缺失时生产启动直接失败 |
+| `model.weights` | 6 | `../models/hit_small.pth` | 指定模型权重 | 两种模式可使用不同微调权重 |
+| `model.precision` | 7 | `fp16` | 指定推理数值精度 | FP16 当前要求 CUDA |
+| `model.device` | 8 | `cuda` | PyTorch 运行设备 | 可设为 `cpu`，但需配合 FP32 |
 | `geometry.viewWidthPx` | 8 | `256` | 设置局部视图宽度 | 调大可保留更多细节，但提高投影和推理成本 |
 | `geometry.viewHeightPx` | 9 | `256` | 设置局部视图高度 | 调大可保留更多垂直细节，但提高投影和推理成本 |
 | `geometry.boundarySamplesPerEdge` | 10 | `65` | 控制每条边界的采样预算 | 调大可提高极区与跨经线边界的包络精度，但增加几何计算成本 |
@@ -42,7 +44,9 @@
 | `depth.enabled` | 14 | `true` | RGB-D 后端深度链路开关 | 关闭后严格退化为 RGB-only |
 | `depth.minValidRatio` | 15 | `0.35` | 深度摘要最小有效像素比例 | 调大提高深度可靠性，但会使可用深度帧减少 |
 | `depth.maxDepthJumpRatio` | 16 | `0.60` | 允许的深度跳变比例 | 调大容忍快速距离变化，也会放宽异常深度 |
-| `backendFusion.depthScoreWeight` | 18 | `0.15` | 后端融合中深度分支的基准权重 | 调大增强深度影响，也会放大深度噪声风险 |
+| `depth.edge.threshold` | 18 | `0.20` | 深度梯度成为边缘的阈值 | 调大减少边缘，调小会增强更多噪声 |
+| `depth.edge.widthPx` | 19 | `2` | 边缘线宽 | 调大使轮廓更醒目，也会覆盖更多原图 |
+| `depth.edge.minContrast` | 20 | `160` | 边缘改色的最小 RGB 欧氏色差 | 调大强化边缘与邻域色差 |
 | `decisionGate.motionScoreWeight` | 20 | `0.25` | 控制运动连续性门控权重 | 调大更偏好预测轨迹附近候选，可能抑制突变运动 |
 | `decisionGate.scaleScoreWeight` | 21 | `0.15` | 控制尺度连续性门控权重 | 调大更排斥尺度突变，也可能错过快速接近目标 |
 | `tracking.acceptThreshold` | 23 | `0.70` | 直接接受观测的最低置信度 | 调大可减少误接受，但会增加不确定和恢复状态 |
@@ -86,7 +90,9 @@
 | `depth.enabled` |  |  |  |  |  |  |  |  |  |
 | `depth.minValidRatio` |  |  |  |  |  |  |  |  |  |
 | `depth.maxDepthJumpRatio` |  |  |  |  |  |  |  |  |  |
-| `backendFusion.depthScoreWeight` |  |  |  |  |  |  |  |  |  |
+| `depth.edge.threshold` |  |  |  |  |  |  |  |  |  |
+| `depth.edge.widthPx` |  |  |  |  |  |  |  |  |  |
+| `depth.edge.minContrast` |  |  |  |  |  |  |  |  |  |
 | `decisionGate.motionScoreWeight` |  |  |  |  |  |  |  |  |  |
 | `decisionGate.scaleScoreWeight` |  |  |  |  |  |  |  |  |  |
 | `tracking.acceptThreshold` |  |  |  |  |  |  |  |  |  |
@@ -109,7 +115,7 @@
 | 参数名 | 当前行 | 当前值 | 简要职能 | 与 RGB-D 主配置的差异 |
 |---|---:|---|---|---|
 | `model.backend` | 3 | `pytorch` | 选择推理运行时 | 相同 |
-| `model.variant` | 4 | `hit_small` | 选择 HiT 模型规模 | 相同 |
+| `model.variant` | 4 | `HiT_Small` | 选择 HiT 模型规模 | 相同 |
 | `model.weights` | 5 | `../models/hit_small.pth` | 指定模型权重 | 相同 |
 | `model.precision` | 6 | `fp32` | 指定推理数值精度 | 使用 FP32 作为 RGB-only 参考精度 |
 | `geometry.viewWidthPx` | 8 | `256` | 设置局部视图宽度 | 相同 |
@@ -120,7 +126,7 @@
 | `depth.enabled` | 14 | `false` | 深度链路开关 | 关闭并退化为 RGB-only |
 | `depth.minValidRatio` | 15 | `0.35` | 深度摘要有效率门限 | RGB-only 下不参与计算 |
 | `depth.maxDepthJumpRatio` | 16 | `0.60` | 深度跳变门限 | RGB-only 下不参与计算 |
-| `backendFusion.depthScoreWeight` | 18 | `0.0` | 深度融合权重 | RGB-only 契约固定为零 |
+| `depth.edge.*` | 18-20 | 同 RGBD | 边缘增强参数 | `depth.enabled=false` 时不参与计算 |
 | `decisionGate.motionScoreWeight` | 20 | `0.25` | 控制运动连续性门控权重 | 相同 |
 | `decisionGate.scaleScoreWeight` | 21 | `0.15` | 控制尺度连续性门控权重 | 相同 |
 | `tracking.acceptThreshold` | 23 | `0.70` | 直接接受观测的最低置信度 | 相同 |
@@ -161,7 +167,7 @@
 | `depth.enabled` |  |  |  |  |  |  |  |  |  |
 | `depth.minValidRatio` |  |  |  |  |  |  |  |  |  |
 | `depth.maxDepthJumpRatio` |  |  |  |  |  |  |  |  |  |
-| `backendFusion.depthScoreWeight` |  |  |  |  |  |  |  |  |  |
+| `depth.edge.threshold` |  |  |  |  |  |  |  |  |  |
 | `decisionGate.motionScoreWeight` |  |  |  |  |  |  |  |  |  |
 | `decisionGate.scaleScoreWeight` |  |  |  |  |  |  |  |  |  |
 | `tracking.acceptThreshold` |  |  |  |  |  |  |  |  |  |
@@ -205,9 +211,9 @@
 
 ## 6. 已实现 tracker 后端登记
 
-当前后端已实现 RGB-only 和 RGB-D 两种模式：RGB-only 的 `depthScore=0` 和
-`fusedScore=appearanceScore` 是退化契约；RGB-D 的深度预处理、深度分支和 `FusionHead` 在
-`TrackerBackend` 内完成。HiT 的模型、权重、精度仍由现有 `model.*` 参数控制。
+当前后端已实现 RGB-only 和 RGB-D 两种模式：二者都满足 `depthScore=0` 和
+`fusedScore=appearanceScore`。RGB-D 只在 `TrackerBackend` 内用深度边缘增强 RGB，随后与
+RGB-only 一样运行单 HiT。模型源码、权重、精度和设备由 `model.*` 控制。
 
 以下固定行为也不计入超参数：锚点/近期/稳定三个模板槽位、模板特征传递顺序、命令 revision
 校验规则、局部框裁剪规则以及 `latencyNs` 的单调时钟来源。任何将来改变这些行为的数值配置，
@@ -215,29 +221,23 @@
 
 ---
 
-## 7. 已实现深度颜色化与双 HiT 融合
+## 7. 已实现深度边缘增强与单 HiT
 
 以下条目已进入 `configs/RGBD.yaml` 和 `configs/RGBonly.yaml`。RGB-only 配置仍关闭深度链路，
 但保留相同字段以保证模式切换时配置结构稳定。
 
 | 参数名 | 建议默认值 | 简要职能 | 备注 |
 |---|---:|---|---|
-| `depth.colorization.mode` | `relief` | 选择深度到颜色的编码方式 | 推荐浮雕式单调映射 |
-| `depth.colorization.nearBrightness` | `0.95` | 近处亮度上限 | 站立前景更亮 |
-| `depth.colorization.farBrightness` | `0.20` | 远处亮度下限 | 地面与背景更暗 |
-| `depth.colorization.reliefGain` | `1.00` | 浮雕起伏增益 | 控制前景“凸出”强度 |
-| `depth.colorization.edgeGain` | `0.35` | 轮廓增强增益 | 控制边缘锐化程度 |
-| `depth.colorization.smoothingKernel` | `7` | 背景平滑核尺寸 | 估计地面/背景平面 |
-| `fusionHead.rgbInitWeight` | `0.70` | 融合头初始 RGB 权重 | 初值偏向主视觉分支 |
-| `fusionHead.depthInitWeight` | `0.20` | 融合头初始深度权重 | 深度作为辅助判别 |
-| `fusionHead.contextInitWeight` | `0.10` | 融合头初始上下文权重 | 模板 / 运动 / 尺度残差 |
+| `depth.edge.threshold` | `0.20` | 选择深度边缘 | 作用于归一化梯度 |
+| `depth.edge.widthPx` | `2` | 扩宽边缘线 | 只影响被改色的像素范围 |
+| `depth.edge.minContrast` | `160` | 边缘最小 RGB 色差 | 不足时改用黑/白高反差色 |
 
 ### 7.1 设计说明
 
 - 这些参数服务于已实现的 RGB-D 后端；关闭深度链路时不会改变 RGB-only 行为。
-- `depth.colorization.*` 用于把深度图转成更容易被 HiT 分辨轮廓的伪彩色图。
-- `fusionHead.*` 只用于 MLP 融合头的初始值和训练起点，不代表最终固定权重。
-- 若后续选择改成显式深度编码器，也应保留同一组接口命名，以免文档和实验记录断裂。
+- `depth.edge.*` 只控制边缘掩码与改色，不改变非边缘像素。
+- RGBD 不包含独立深度模型分数或融合权重。
+- `RGBonly.yaml` 与 `RGBD.yaml` 保持独立，便于后续冻结 HiT 前几层后分别训练。
 
 ---
 

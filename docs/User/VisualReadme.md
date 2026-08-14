@@ -110,9 +110,9 @@ visualization:
 
 | stage | 内容 |
 |---|---|
-| `local_rgb` | geometry 裁剪出的局部 RGB 视图 |
-| `depth_rgb` | tracker 深度预处理生成的 RGB 图；RGB-only 配置不会产生有效深度图 |
-| `backend_box` | backend 在局部视图上的候选框及 `fuseScore` |
+| `local_rgb` | backend 实际送入 HiT 的局部图；RGBD 为边缘增强 RGB |
+| `depth_rgb` | 黑底白线的深度边缘预测图；RGB-only 不产生有效深度图 |
+| `backend_box` | 在同一张 HiT 输入图上的候选框及 `fuseScore` |
 | `geometry_box` | 候选框回投影到 ERP 全景图后的结果及 `fuseScore` |
 
 只保留需要检查的 stage 可减少 PNG 编码时间和磁盘占用。例如只检查回投影：
@@ -146,3 +146,32 @@ visualization:
 ```powershell
 & ".venv\Scripts\python.exe" "tools\run_airsim360_dataset.py" --help
 ```
+# Short Tracking Commands
+
+安装项目后，可用统一的 `run` 命令运行完整 AirSim360 跟踪：
+
+```powershell
+run -RGB_only /data/airsim360/nyc_sample /artifacts/airsim360/nyc_sample/test_rgb 2497023
+run -RGBD /data/airsim360/nyc_sample /artifacts/airsim360/nyc_sample/test_rgbd 2497023
+```
+
+位置参数依次为数据目录、输出目录和 instance ID。默认配置分别为 `configs/RGBonly.yaml` 与 `configs/RGBD.yaml`。
+
+可选参数：
+
+- `--config PATH`：覆盖模式默认配置。
+- `--sequence NAME`：选择数据根目录中的序列。
+- `--max-frames N`：只运行前 N 帧。
+- `--no-mid-visual`：不生成中间可视化。
+- `--no-result-visual`：不生成最终 ERP 框图。
+
+默认输出结构：
+
+```text
+<output>/
+  result/tracking.txt
+  result/visualResult/frame_*.png
+  midVisual/<sequence>/frame_*/
+```
+
+RGB-only 的 `local_rgb` 和 `backend_box` 使用原始局部 RGB。RGBD 的这两类图使用真正送入 HiT 的深度边缘增强 RGB；非边缘像素保持原图。`depth_rgb` 是黑底白线的深度边缘预测图。

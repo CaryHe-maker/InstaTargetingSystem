@@ -4,7 +4,13 @@ from pathlib import Path
 
 import numpy as np
 
-from instatarget.app.driver import buildRuntime, finalizeSink, openSink, runTracking
+from instatarget.app.driver import (
+    FallbackHiTSession,
+    buildRuntime,
+    finalizeSink,
+    openSink,
+    runTracking,
+)
 from instatarget.core.config import loadConfig
 from instatarget.core.types import BBoxXYWH
 from instatarget.data.frame_source import FrameSource
@@ -19,10 +25,13 @@ class DriverSmokeTest(unittest.TestCase):
             root = Path(directory) / "sequence"
             root.mkdir(parents=True, exist_ok=True)
             for index in range(2):
-                writeRgbPng(root / f"frame_{index:04d}.png", np.full((16, 24, 3), 40 + index * 10, dtype=np.uint8))
+                writeRgbPng(
+                    root / f"frame_{index:04d}.png",
+                    np.full((16, 24, 3), 40 + index * 10, dtype=np.uint8),
+                )
 
             config = loadConfig(REPOSITORY_ROOT / "configs" / "RGBonly.yaml")
-            runtime = buildRuntime(config)
+            runtime = buildRuntime(config, hitSession=FallbackHiTSession())
             source = FrameSource(sequenceId="sequence")
             source.open(str(root))
             output = Path(directory) / "result.txt"

@@ -35,8 +35,8 @@ AirSim360 / Raw panoramic video
 ```
 
 默认使用四个长生命周期线程。一个帧事务最多向 `T2` 发送两次有界 batch，不为候选创建线程。
-`T2` 负责局部 RGB 或 RGB-D 匹配、深度预处理、深度分支、融合头和模板执行；`T0` 负责窗口状态、
-多视图计划、单帧候选聚合、模板命令和最终门控。Depth-to-RGB 保持在 `T2` 的 TrackerBackend
+`T2` 负责局部 RGB 或 RGB-D 匹配、深度边缘预测、RGB 边缘增强、单 HiT 和模板执行；`T0` 负责窗口状态、
+多视图计划、单帧候选聚合、模板命令和最终门控。边缘增强保持在 `T2` 的 TrackerBackend
 内部，geometry 只提供对齐的 RGB/Depth 局部视图。
 
 ---
@@ -47,7 +47,7 @@ AirSim360 / Raw panoramic video
 |------|--------|----------|----------|
 | `T0 ControlThread` | `TrackState`、状态机、球面运动状态 | 多帧预测、搜索规划、回投影、模板更新决策、最终门控 | 直接操作 CUDA/HiT 会话 |
 | `T1 DecodeWorker` | 解码器 | 顺序解码、颜色转换、生成 `FramePacket` | 丢帧、修改跟踪状态 |
-| `T2 InferWorker` | HiT 会话、设备流、模板特征 | 局部 RGB/RGB-D 推理、深度融合、批处理模板命令、返回 `LocalObservation` | 自行改变状态机、全局恢复或输出最终结果 |
+| `T2 InferWorker` | 单 HiT 会话、设备流、模板特征 | 原始/边缘增强 RGB 推理、批处理模板命令、返回 `LocalObservation` | 自行改变状态机、全局恢复或输出最终结果 |
 | `T3 SinkWorker` | 输出文件、指标累加器 | 顺序写结果、可选可视化、统计耗时 | 阻塞控制线程、改写预测 |
 
 设备后端只允许 `T2` 访问。PyTorch、ONNX Runtime 或 TensorRT 会话不得跨线程调用。
@@ -128,7 +128,7 @@ T1                  T0                         T2                  T3
 | `DTC` | `T0` | 有状态、线程独占 |
 | `RecoveryPlanner` | `T0` | 纯计算 |
 | `DepthProcessor` | `T2` | 局部深度摘要和有效性 |
-| `FusionHead` | `T2` | RGB/Depth 后端融合和 `fusedScore` |
+| `DepthPreprocessor` | `T2` | 深度边缘预测、RGB 边缘增强和深度摘要 |
 | `BfovProjector` CPU 后端 | `T0` 或 `T2` | 无状态 |
 | `BfovProjector` GPU 后端 | `T2` | 设备独占 |
 | `HiTBackend` | `T2` | 有状态、设备独占 |
