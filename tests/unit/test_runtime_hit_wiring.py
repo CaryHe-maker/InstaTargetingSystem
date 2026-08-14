@@ -5,11 +5,19 @@ from instatarget.app.driver import buildRuntime, closeBackend
 from instatarget.core.config import loadConfig
 from instatarget.core.types import BBoxXYWH
 from instatarget.tracker.hit_backend import HiTPrediction
+from instatarget.tracker.pytorch_hit_session import _resolveHitRoot
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 class RuntimeHiTWiringTest(unittest.TestCase):
+    def testBundledHiTRuntimeIsInsideSourcePackage(self) -> None:
+        root = _resolveHitRoot()
+
+        self.assertEqual(root, REPOSITORY_ROOT / "src" / "instatarget" / "vendor" / "hit")
+        self.assertTrue((root / "configs" / "HiT_Small.yaml").is_file())
+        self.assertTrue((root / "lib" / "models" / "HiT").is_dir())
+
     def testRgbOnlyCreatesOneHiTSession(self) -> None:
         factory = _SessionFactory()
         config = loadConfig(REPOSITORY_ROOT / "configs" / "RGBonly.yaml")

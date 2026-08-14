@@ -160,8 +160,8 @@ InstaTargetingSystem/
   tools/
     eval_360/
     visualize_360/
-  third_party/
-    360VOT/
+  vendor/
+    hit/
   docs/
 ```
 
@@ -191,4 +191,3 @@ InstaTargetingSystem/
 项目主线建议是：
 
 **360VOT 几何与评测 + HiT/DyHiT 跟踪核心 + 自研丢失恢复。**
-

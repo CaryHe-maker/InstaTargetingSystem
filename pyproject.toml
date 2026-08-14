@@ -15,7 +15,6 @@ dependencies = [
   "torchvision>=0.21,<0.22",
   "timm==0.5.4",
   "easydict>=1.13,<2",
-  "tensorboardX>=2.6.4,<3",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +41,9 @@ getInstanceID = "instatarget.app.commands:getInstanceIdMain"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"instatarget.vendor.hit" = ["LICENSE", "configs/*.yaml"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
@@ -49,6 +51,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["src/instatarget/vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]

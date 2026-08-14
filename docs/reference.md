@@ -3,10 +3,10 @@
 ## 直接运行依赖
 
 - PyTorch `2.6.x` 与 torchvision `0.21.x`：加载和执行 HiT-Small。
-- `third_party/HiT`：官方 HiT-Small 源码树，运行时通过 `HIT_ROOT` 或仓库相对路径导入。
+- `src/instatarget/vendor/hit`：项目内置的最小 HiT-Small 运行时，可通过 `HIT_ROOT` 覆盖默认路径。
 - `models/hit_small.pth`：HiT-Small 权重文件，必须包含 `net` 状态字典。
 - OpenCV：视频解码、图像缩放、边界填充和 PNG 处理。
-- NumPy、PyYAML、timm、EasyDict、tensorboardX：数组、配置和官方 HiT 依赖。
+- NumPy、PyYAML、timm、EasyDict：数组、配置和 HiT-Small 运行依赖。
 
 ## 项目内部实现
 

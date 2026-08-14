@@ -9,11 +9,13 @@ from instatarget.visualization.instance_ids import (
 )
 from instatarget.visualization.recorder import VisualizationRecorder
 from instatarget.visualization.result import ResultVisualizationRecorder
+from instatarget.visualization.time_counter import TimeCounter
 
 __all__ = [
     "FLUORESCENT_GREEN_RGB",
     "InstanceIdGroup",
     "ResultVisualizationRecorder",
+    "TimeCounter",
     "VisualizationRecorder",
     "collectInstanceIdGroups",
     "drawBoxRgb",

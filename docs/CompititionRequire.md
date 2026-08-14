@@ -47,6 +47,6 @@ clon,clat,fov_h,fov_v
 | `DATASET_DIR` | `/mnt/dataset` |
 | `RESULT_DIR` | `/mnt/result` |
 | `CONFIG_PATH` | `/app/configs/RGBonly.yaml` |
-| `HIT_ROOT` | `/app/third_party/HiT` |
+| `HIT_ROOT` | `/app/src/instatarget/vendor/hit` |
 
-可视化记录器不参与比赛结果计算。启用或关闭可视化不会改变 HiT 输入、控制器状态、候选分数或 BFoV 输出，因此不影响测试逻辑；启用后只会增加磁盘写入和运行时间。
+比赛镜像通过 `.dockerignore` 排除 visualization、AirSim360、训练、评估和数据工具。正式入口只保留 RGB 视频输入、HiT-Small 推理、控制器和 BFoV 文本输出；完整开发代码仍可提交到 GitHub。

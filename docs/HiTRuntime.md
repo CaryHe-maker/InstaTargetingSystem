@@ -2,7 +2,7 @@
 
 ## 模型加载
 
-`buildRuntime()` 默认构造 `PyTorchHiTSession`。会话要求 `model.backend: pytorch`、`model.variant: hit_small`，并在 CUDA 设备上加载 `models/hit_small.pth` 的 `net` 状态字典。官方源代码从 `third_party/HiT` 载入，配置文件为 `experiments/HiT/HiT_Small.yaml`。
+`buildRuntime()` 默认构造 `PyTorchHiTSession`。会话要求 `model.backend: pytorch`、`model.variant: hit_small`，并在 CUDA 设备上加载 `models/hit_small.pth` 的 `net` 状态字典。最小 HiT-Small 运行时内置于 `src/instatarget/vendor/hit`，配置文件为 `configs/HiT_Small.yaml`。
 
 模板区域按目标框扩展后裁剪并缩放到 `128 x 128`；搜索 RGB 缩放到 `256 x 256`。输入转换为 RGB 浮点张量，使用 ImageNet 均值和标准差归一化。
 

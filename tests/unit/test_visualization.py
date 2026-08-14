@@ -1,5 +1,7 @@
+import json
 import struct
 import tempfile
+import time
 import unittest
 import zlib
 from pathlib import Path
@@ -24,6 +26,7 @@ from instatarget.core.types import (
 from instatarget.visualization import (
     FLUORESCENT_GREEN_RGB,
     ResultVisualizationRecorder,
+    TimeCounter,
     VisualizationRecorder,
     collectInstanceIdGroups,
     drawBoxRgb,
@@ -33,6 +36,23 @@ from instatarget.visualization import (
 
 
 class VisualizationRecorderTest(unittest.TestCase):
+    def testTimeCounterWritesWholeRunDuration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "result" / "time.json"
+            counter = TimeCounter()
+            counter.start()
+            time.sleep(0.001)
+
+            written = counter.stop(output)
+
+            self.assertEqual(written, output)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["format"], "instatarget.time.v1")
+            self.assertGreater(payload["elapsedNanoseconds"], 0)
+            self.assertGreater(payload["elapsedSeconds"], 0.0)
+            self.assertIn("startedAtUtc", payload)
+            self.assertIn("finishedAtUtc", payload)
+
     def testDisabledRecorderDoesNotCreateOutputRoot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             outputRoot = Path(directory) / "visualization"

@@ -6,7 +6,7 @@
 docker build -t instatarget:submission .
 ```
 
-镜像包含 CUDA PyTorch 运行时、项目源代码、`configs/RGBonly.yaml`、`third_party/HiT`、`models/hit_small.pth` 和无参数入口 `track.py`。运行主机需要 Docker Desktop、WSL 2 和 NVIDIA GPU 支持。
+镜像包含 CUDA PyTorch 运行时、比赛所需项目源码、`configs/RGBonly.yaml`、内置 `src/instatarget/vendor/hit`、`models/hit_small.pth` 和无参数入口 `track.py`。本地可视化、AirSim360、训练、评估和数据工具不会进入镜像。运行主机需要 Docker Desktop、WSL 2 和 NVIDIA GPU 支持。
 
 ## 数据目录
 
@@ -34,4 +34,4 @@ docker run --rm --gpus all -v "${PWD}\dataset:/mnt/dataset" -v "${PWD}\result:/m
 
 ## 视觉输出
 
-比赛默认关闭可视化。可视化只写诊断 PNG，不改变模型或控制器，因此不会影响官方测试结果；开启后会增加存储和运行时间。
+比赛镜像不包含 visualization 模块和诊断入口，因此只会写官方 BFoV 文本结果。可视化功能保留在 GitHub 开发源码中，仅用于本地调试与评估。

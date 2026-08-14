@@ -45,4 +45,4 @@ artifacts/easy_user/nyc_sample/RGB_only/
 artifacts/easy_user/nyc_sample/RGBD/
 ```
 
-`result/manifest.json` 记录数据根目录、目标实例、帧数和输出目录；`result/tracking.txt` 为逐帧像素框；`result/iou.json` 为逐帧和汇总 IoU；`result/visualResult` 与 `midVisual` 为诊断图像。
+`result/manifest.json` 记录数据根目录、目标实例、帧数和输出目录；`result/tracking.txt` 为逐帧像素框；`result/iou.json` 为逐帧和汇总 IoU；`result/time.json` 记录本次项目从入口开始到结果收尾的运行时间；`result/visualResult` 与 `midVisual` 为诊断图像。

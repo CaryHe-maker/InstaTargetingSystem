@@ -107,10 +107,10 @@ class PyTorchHiTSession:
             from lib.models.HiT.levit_utils import replace_batchnorm
         except Exception as error:
             raise ModelError(
-                f"cannot import official HiT source from {self._hitRoot}: {error}"
+                f"cannot import bundled HiT runtime from {self._hitRoot}: {error}"
             ) from error
 
-        yamlPath = self._hitRoot / "experiments" / "HiT" / "HiT_Small.yaml"
+        yamlPath = self._hitRoot / "configs" / "HiT_Small.yaml"
         if not yamlPath.is_file():
             raise ModelError(f"HiT-Small config does not exist: {yamlPath}")
         update_config_from_file(str(yamlPath))
@@ -176,20 +176,20 @@ def _importTorch() -> ModuleType:
     return torch
 
 
-def _resolveHitRoot(value: str | Path | None) -> Path:
+def _resolveHitRoot(value: str | Path | None = None) -> Path:
     candidates = []
     if value is not None:
         candidates.append(Path(value))
     environment = os.environ.get("HIT_ROOT")
     if environment:
         candidates.append(Path(environment))
-    candidates.append(Path(__file__).resolve().parents[3] / "third_party" / "HiT")
+    candidates.append(Path(__file__).resolve().parents[1] / "vendor" / "hit")
     for candidate in candidates:
         root = candidate.expanduser().resolve()
         if (root / "lib" / "models" / "HiT").is_dir():
             return root
     checked = ", ".join(str(item.expanduser()) for item in candidates)
-    raise ModelError(f"official HiT source tree was not found; checked: {checked}")
+    raise ModelError(f"bundled HiT runtime was not found; checked: {checked}")
 
 
 def _activateVendorTree(root: Path) -> None:

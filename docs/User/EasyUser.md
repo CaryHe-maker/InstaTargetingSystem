@@ -18,7 +18,7 @@ getInstanceID /data/airsim360/nyc_sample /artifacts/easy_user/nyc_sample/Instanc
 & ".venv\Scripts\python.exe" "tools\run_airsim360_dataset.py" --dataset-root "data\airsim360\nyc_sample" --config "configs\RGBonly.yaml" --target-instance 14211313 --output-dir "artifacts\easy_user\nyc_sample\RGB_only"
 ```
 
-该命令逐帧运行 RGB-only 路线，将结果写入指定目录的 `result` 子目录，并生成 `tracking.txt`、`iou.json`、`manifest.json`、`visualResult` 和 `midVisual`。
+该命令逐帧运行 RGB-only 路线，将结果写入指定目录的 `result` 子目录，并生成 `tracking.txt`、`iou.json`、`manifest.json`、`time.json`、`visualResult` 和 `midVisual`。
 
 ## RGB-D 一行命令
 

@@ -9,5 +9,21 @@ docs
 outputs
 tests
 tools
+third_party
+
+# Local-only visualization implementation and AirSim360 diagnostic entrypoints.
+src/instatarget/visualization/
+src/instatarget/app/commands.py
+src/instatarget/app/track.py
+src/instatarget/app/track_airsim360.py
+src/instatarget/data/
+src/instatarget/eval/
+src/instatarget/training/
+src/instatarget/adapters/
+src/instatarget/utils/
+src/instatarget/datasets/
+src/instatarget/track.py
+src/instatarget/track_airsim360.py
+
 *.tar
 *.zip

@@ -22,6 +22,7 @@ from instatarget.core.errors import (
 from instatarget.data.airsim360_source import AirSim360DataSource
 from instatarget.data.pseudo_track_builder import PseudoTrackBuilder
 from instatarget.visualization.result import ResultVisualizationRecorder
+from instatarget.visualization.time_counter import TimeCounter
 
 EXIT_CONFIG = 2
 EXIT_DECODE = 3
@@ -56,6 +57,8 @@ def buildParser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    timeCounter = TimeCounter()
+    timeCounter.start()
     args = buildParser().parse_args(argv)
     source = AirSim360DataSource(maxFrames=args.max_frames)
     runtime = None
@@ -126,6 +129,10 @@ def main(argv: list[str] | None = None) -> int:
             source.close()
         except Exception:
             pass
+        try:
+            timeCounter.stop(Path(args.output).expanduser().resolve().parent / "time.json")
+        except Exception as error:
+            _report(error)
 
 
 def _report(error: Exception) -> None:
