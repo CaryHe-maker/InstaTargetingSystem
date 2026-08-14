@@ -122,3 +122,28 @@ for sample in dataset:
 ```
 
 instance ID 的稳定范围由数据集生成方式决定，不要假设不同序列中的同一个整数一定代表同一个真实物体。应对每条序列分别列出并确认目标 ID。
+# Instance ID Commands
+
+安装项目后，可以用短命令读取 AirSim360 第一帧出现的实例 ID：
+
+```powershell
+getInstanceID /data/airsim360/nyc_sample /artifacts/airsim360/nyc_sample/InstanceID.txt
+```
+
+以 `/data/...` 和 `/artifacts/...` 开头的路径会相对仓库根目录解析。也可以传入普通相对路径或 Windows 绝对路径。
+
+输出按第一帧的语义类别分组，每行格式为：
+
+```text
+<semantic-name> <class-ordinal> <instance-id>
+```
+
+例如：
+
+```text
+concreteblock 1 2497023
+```
+
+可选参数：
+
+- `--sequence NAME`：数据根目录下存在多个序列时指定一个序列。

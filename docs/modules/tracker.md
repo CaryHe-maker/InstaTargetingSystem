@@ -1,187 +1,29 @@
-# InstaTargetingSystem 跟踪后端规范
+# Tracker Backend
 
-> 本文档定义 HiT 跟踪后端的输入、输出、模板命令和实现边界。  
-> 当前后端同时支持 RGB-only 和可选 RGB-D 形态；深度伪彩色、第二分支和融合头均在 backend 内部完成，控制层只消费统一观测契约。
+当前实现只有一个 HiT。`RGBonly.yaml` 直接把几何裁剪出的 RGB 局部图送入 HiT；`RGBD.yaml` 先让 backend 从对齐深度图预测边缘，再只修改这些边缘像素的 RGB 颜色，随后仍把这一张增强 RGB 图送入同一个 HiT。RGBD 不再有第二个 HiT、深度编码器或融合头。
 
----
+## 输入输出
 
-## 1. 职责边界
+`TrackerBackend.initialize(template, templateBox)` 编码一份增强后的模板。`infer(views, command)` 按输入顺序返回 `LocalObservation`，并原子执行 `KEEP`、`UPDATE_RECENT`、`UPDATE_STABLE` 和 `RESET_TO_ANCHOR`。
 
-| 输入 | 输出 | 不负责 |
-|------|------|--------|
-| `LocalView`、`TemplateCommand` | `LocalObservation` 序列 | 球面状态、全局恢复和搜索决策 |
+两种模式都输出同一字段：`bbox`、`modelScore`、`appearanceScore`、`depthScore`、`fusedScore`、`depthSummary` 和 `latencyNs`。当前分数契约是：
 
-后端以 HiT 为主，也可以替换成 HiT-Tiny、DyHiT、ONNX Runtime 或 TensorRT 版本。  
-深度链路是可选依赖；未配置深度组件时严格退化为 RGB-only 契约。
+- `fusedScore` 是单 HiT 的置信度，RGB-only 与 RGBD 都满足 `fusedScore == appearanceScore`。
+- `depthScore` 不再代表第二模型分数，固定为 `0.0`。
+- 深度有效时仍生成 `DepthSummary`，供控制层做几何/一致性门控；深度无效时摘要为 `None`。
 
----
+## RGBD 边缘增强
 
-## 2. 后端生命周期
+`DepthPreprocessor.preprocess()` 归一化深度并计算梯度边缘。`depth.edge.threshold` 选择边缘，`depth.edge.widthPx` 膨胀边缘宽度，`depth.edge.minContrast` 控制边缘改色的最小 RGB 欧氏距离。
 
-### 2.1 `initialize()`
+`enhanceRgb(rgb, depth)` 只写入预测边缘位置。非边缘像素逐字节保持原图；边缘像素选择原色的互补色或黑/白高反差色。增强图同时用于模板编码、HiT 搜索、在线模板更新和可视化。
 
-初始化模板特征。每个序列只调用一次。输入为模板视图和模板框。
+## 真实 HiT 会话
 
-### 2.2 `infer()`
+生产 driver 通过 `model.backend=pytorch`、`model.source`、`model.variant`、`model.weights`、`model.precision` 和 `model.device` 创建官方 `kangben258/HiT` 会话。源码目录必须包含官方 `lib/` 与 `experiments/HiT/`；权重缺失、依赖缺失或 CUDA 不可用都会抛出 `ModelError`，不会静默退回伪模型。测试可以显式注入 `FallbackHiTSession`。
 
-对一个或多个局部视图执行推理，返回同序的局部观测。RGB-only 模式的流程为：
+官方 HiT 原始输出没有分类概率，因此 adapter 使用 query 一致性、模板间框一致性和状态转移稳定度计算 `[0,1]` 的 `appearanceScore`，并将其作为 `fuseScore`。
 
-1. 读取局部 RGB。
-2. 校验模板命令与模板版本。
-3. 将 RGB 送入 HiT 主干做局部匹配。
-4. 输出裁剪后的局部框与外观分数。
-5. 将 `depthScore` 固定为 `0.0`，`fusedScore` 固定为 `appearanceScore`，`depthSummary` 固定为 `None`。
+## 边界
 
-配置深度组件时，后端额外对齐并归一化深度、生成单调浮雕伪彩色图，调用第二分支并由融合头统一产生 `depthScore` 与 `fusedScore`；深度不可用的单个视图仍按 RGB-only 退化。
-
-输出至少包含：
-
-- 局部框
-- 模型分数
-- 外观分数
-- 深度分数
-- 融合分数
-- 深度摘要
-- 推理耗时
-
-RGB-D 运行链路的固定顺序是：
-
-1. 读取局部 `depth`。
-2. 进行对齐、归一化、缺失值掩码与浮雕式伪彩色编码。
-3. 再把深度伪彩色图送入第二个 HiT。
-4. 以 MLP 融合 RGB HiT、深度 HiT、模板上下文和轻量几何参数。
-
-### 2.3 `close()`
-
-释放设备资源和缓存。序列结束前必须调用。
-
----
-
-## 3. 模板命令
-
-| 命令 | 含义 |
-|------|------|
-| `KEEP` | 不更新模板 |
-| `UPDATE_RECENT` | 更新近期模板 |
-| `UPDATE_STABLE` | 更新稳定模板 |
-| `RESET_TO_ANCHOR` | 清空动态模板，只保留首帧模板 |
-
-模板命令只由 DTC 决定。后端只负责执行，不负责判断何时更新。
-
----
-
-## 4. 输入视图规则
-
-1. 只接收局部透视视图，不接收完整 ERP 图作为主输入。
-2. 视图对象可以携带与 RGB 对齐的 `depth` 字段；只有启用深度组件时才消费该字段。
-3. 视图顺序必须和 `views` 顺序一致。
-
----
-
-## 5. 输出观测规则
-
-`LocalObservation` 应包含：
-
-- `viewId`
-- `bbox`
-- `modelScore`
-- `appearanceScore`
-- `depthScore`
-- `fusedScore`
-- `depthSummary`
-- `latencyNs`
-
-后端不得输出 BFoV、全局状态或恢复策略。回投影和搜索规划由控制层完成。
-
-RGB-only 模式的 `LocalObservation` 额外约束是：
-
-- `depthScore == 0.0`
-- `fusedScore == appearanceScore`
-- `depthSummary is None`
-
----
-
-## 6. 模型形态
-
-| 形态 | 作用 |
-|------|------|
-| `HiT-Small` | 主力实时后端 |
-| `HiT-Tiny` | 更轻量的速度版本 |
-| `DyHiT` | 复杂帧加速版本 |
-| `ONNX Runtime` | 部署后端 |
-| `TensorRT` | 高性能部署后端 |
-
-这些形态可以共享同一个逻辑接口，只是实现后端不同。
-当前仓库已落地 RGB-only 和 RGB-D 两种形态；深度分支仍可由配置关闭。
-
----
-
-## 7. 后端内部算法
-
-### 7.1 当前实现
-
-- 默认读取局部 RGB；启用深度组件时同时读取与 RGB 对齐的局部深度。
-- 使用 HiT 主干输出局部框与外观分数，并调用深度分支（若可用）。
-- 观测层统一写成 `LocalObservation`，每个输入视图恰好对应一个输出观测。
-
-### 7.2 RGB 主干
-
-- RGB 局部图进入 HiT 主干。
-- 主干输出局部框候选和外观特征。
-
-### 7.3 融合头
-
-- RGB-only 时不启用深度融合，`fusedScore` 退化为 `appearanceScore`。
-- RGB-D 时把 RGB 分支、深度分支、模板上下文和轻量几何参数送入轻量融合头；深度分支结果
-  必须实际参与 `fusedScore`，不能只填充 `depthScore` 而不进入融合。
-
-### 7.4 训练约束
-
-- 当前实现不在推理后端内训练深度分支或融合头。
-- 深度分支先做浮雕式伪彩色编码，融合头可在独立训练链路中替换。
-- 控制层不参与深度编码和 MLP 训练。
-- 训练和推理共用相同的 `LocalView`/`LocalObservation` 契约；训练结果必须能回灌到
-  `FusionHead`，并保持 RGB-only 退化路径。
-
-必须补充以下回归测试：固定 RGB 特征、改变深度分支输入时 `fusedScore` 应发生可检测变化；
-禁用深度或深度有效率不足时，`depthScore=0` 且 `fusedScore=appearanceScore`；在线模板命令
-在一次推理 batch 中原子执行，不允许边推理边替换模板。
-
-### 7.5 深度分支实现顺序
-
-该深度颜色化模块仍放在 `TrackerBackend` 内部，由后端统一完成，不上移到控制层。
-
-启用深度分支时采用下面的顺序：
-
-1. 深度图先做中值 / 分位数归一化，再估计局部背景面。
-2. 计算“浮雕量”，让更近的站立目标在图上更亮、更凸。
-3. 叠加边缘增强，让轮廓更硬、更容易被 HiT 分辨。
-4. 用单调伪彩色生成深度 RGB 图，近亮远暗，不使用彩虹色图。
-5. 深度 RGB 图再进入第二个 HiT。
-6. RGB HiT 输出、深度 HiT 输出、模板上下文和轻量几何参数一起进入 MLP。
-7. 融合头单独训练，初始值建议偏向 RGB，例如 RGB=0.70、Depth=0.20、Context=0.10。
-
----
-
-## 8. 失败处理
-
-- 模板未初始化时不得推理。
-- 观测为空时返回空序列，不得补造框。
-- 推理错误必须上抛，不得吞掉。
-- 设备异常时由上层线程转换为 `FatalError`。
-- 单个视图深度缺失时只对该视图退化为 RGB-only，不影响同一 batch 中其他有效深度视图。
-- `infer()` 输出顺序必须与输入 `LocalView` 顺序一致；批量拆分后由调用方按 `viewId` 恢复并校验。
-
----
-
-## 9. 接口对齐
-
-本跟踪文档对应 `interface.md` 中的：
-
-- `TrackerBackend`
-- `LocalView`
-- `LocalObservation`
-- `TemplateCommand`
-- `TemplateCommandKind`
-
-后端是 `T2` 的唯一职责，不参与 `DTC` 的状态决策。
+backend 不生成 BFoV、不规划搜索、不修改控制状态。geometry 负责 RGB/Depth 同步裁剪，DTC 负责多视图规划、候选聚合和模板命令决策。

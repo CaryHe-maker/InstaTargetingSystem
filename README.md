@@ -5,7 +5,7 @@
 ## 目录
 - `src/instatarget/core`：数据类型、协议、配置和错误
 - `src/instatarget/geometry`：ERP 与 BFoV 的裁剪、回投影和跨经线处理
-- `src/instatarget/tracker`：HiT 主干、深度分支、融合头和局部观测
+- `src/instatarget/tracker`：官方 HiT 主干、RGBD 深度边缘增强和局部观测
 - `src/instatarget/controller`：V2 帧事务、状态评估、多帧运动预测、分级恢复和模板更新
 - `src/instatarget/io`：帧读取、结果写入和 AirSim360 数据接入
 - `src/instatarget/visualization`：中间结果 PNG 记录
@@ -49,6 +49,7 @@ writes tracking output plus modality and stage visualizations. See
 ## 配置
 - `configs/RGBonly.yaml`：RGB-only
 - `configs/RGBD.yaml`：RGB-D
+- `model.source` 必须指向官方 `kangben258/HiT` 源码目录；`model.weights` 指向对应权重。生产运行不会静默使用 fallback。
 - `docs/hyperparameters.md`：已登记的超参数和约束
 
 ## 文档

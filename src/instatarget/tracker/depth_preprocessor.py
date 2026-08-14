@@ -1,9 +1,4 @@
-"""Deterministic NumPy depth processing used by the RGB-D tracker branch.
-
-The preprocessor deliberately owns no tracking state.  It converts an aligned
-``DepthPlane`` into robust normalized values, a local background estimate and
-an RGB pseudo-colour image suitable for a second visual encoder.
-"""
+"""Depth-edge prediction and RGB edge enhancement for the RGB-D mode."""
 
 from __future__ import annotations
 
@@ -25,11 +20,16 @@ class DepthPreprocessResult:
     backgroundPlane: NDArray[np.float32]
     relief: NDArray[np.float32]
     edge: NDArray[np.float32]
-    depthRgb: NDArray[np.uint8]
+    edgeMask: NDArray[np.bool_]
 
     @property
     def normalizedDepth(self) -> NDArray[np.float32]:
         return self.normalized
+
+    @property
+    def edgeRgb(self) -> NDArray[np.uint8]:
+        gray = self.edgeMask.astype(np.uint8) * 255
+        return np.repeat(gray[..., None], 3, axis=2)
 
 
 class DepthPreprocessor(DepthProcessor):
@@ -39,49 +39,34 @@ class DepthPreprocessor(DepthProcessor):
         self,
         minValidRatio: float | object = 0.35,
         maxDepthJumpRatio: float = 0.60,
-        colorizationMode: str = "relief",
-        nearBrightness: float = 0.95,
-        farBrightness: float = 0.20,
-        reliefGain: float = 1.0,
-        edgeGain: float = 0.35,
-        smoothingKernel: int = 7,
+        edgeThreshold: float = 0.20,
+        edgeWidthPx: int = 2,
+        minContrast: int = 160,
     ) -> None:
         # Accept the immutable core ``DepthConfig`` directly as a convenience
         # for application wiring while keeping scalar arguments usable in tests.
         if not isinstance(minValidRatio, (int, float)) and hasattr(minValidRatio, "minValidRatio"):
             config = minValidRatio
-            colorization = getattr(config, "colorization", None)
+            edge = getattr(config, "edge", None)
             minValidRatio = config.minValidRatio
             maxDepthJumpRatio = config.maxDepthJumpRatio
-            if colorization is not None:
-                colorizationMode = colorization.mode
-                nearBrightness = colorization.nearBrightness
-                farBrightness = colorization.farBrightness
-                reliefGain = colorization.reliefGain
-                edgeGain = colorization.edgeGain
-                smoothingKernel = colorization.smoothingKernel
+            if edge is not None:
+                edgeThreshold = edge.threshold
+                edgeWidthPx = edge.widthPx
+                minContrast = edge.minContrast
         if not 0.0 <= minValidRatio <= 1.0 or not 0.0 <= maxDepthJumpRatio <= 1.0:
             raise DepthError("depth validity thresholds must be in [0, 1]")
-        if colorizationMode not in {"relief", "grayscale"}:
-            raise DepthError(f"unsupported depth colorization mode: {colorizationMode}")
-        for name, value in (
-            ("nearBrightness", nearBrightness),
-            ("farBrightness", farBrightness),
-            ("reliefGain", reliefGain),
-            ("edgeGain", edgeGain),
-        ):
-            if not np.isfinite(value) or value < 0.0:
-                raise DepthError(f"{name} must be finite and non-negative")
-        if smoothingKernel < 1 or smoothingKernel % 2 == 0:
-            raise DepthError("smoothingKernel must be a positive odd integer")
+        if not np.isfinite(edgeThreshold) or not 0.0 <= edgeThreshold <= 1.0:
+            raise DepthError("edgeThreshold must be in [0, 1]")
+        if edgeWidthPx < 1:
+            raise DepthError("edgeWidthPx must be positive")
+        if not 0 <= minContrast <= 255:
+            raise DepthError("minContrast must be in [0, 255]")
         self.minValidRatio = float(minValidRatio)
         self.maxDepthJumpRatio = float(maxDepthJumpRatio)
-        self.colorizationMode = colorizationMode
-        self.nearBrightness = float(nearBrightness)
-        self.farBrightness = float(farBrightness)
-        self.reliefGain = float(reliefGain)
-        self.edgeGain = float(edgeGain)
-        self.smoothingKernel = int(smoothingKernel)
+        self.edgeThreshold = float(edgeThreshold)
+        self.edgeWidthPx = int(edgeWidthPx)
+        self.minContrast = int(minContrast)
 
     def preprocess(self, depth: DepthPlane | NDArray[np.float32]) -> DepthPreprocessResult:
         values, mask = _coerceDepth(depth)
@@ -94,8 +79,8 @@ class DepthPreprocessor(DepthProcessor):
         # log depth keeps a large distant background from dominating the edge map.
         logDepth = np.log1p(np.where(mask, values, 0.0))
         edge = _edgeMagnitude(self.normalize(logDepth, mask), mask)
-        depthRgb = self._colorizeArrays(normalized, mask, relief, edge)
-        return DepthPreprocessResult(normalized, mask, background, relief, edge, depthRgb)
+        edgeMask = _dilate(edge >= self.edgeThreshold, self.edgeWidthPx) & mask
+        return DepthPreprocessResult(normalized, mask, background, relief, edge, edgeMask)
 
     def normalize(
         self,
@@ -132,20 +117,40 @@ class DepthPreprocessor(DepthProcessor):
         plane = coefficients[0] * xx + coefficients[1] * yy + coefficients[2]
         median = float(np.median(values[valid]))
         plane = np.clip(plane, 0.0, max(float(np.max(values[valid])) * 1.5, median))
-        return _boxSmooth(plane.astype(np.float32), self.smoothingKernel)
+        return plane.astype(np.float32)
 
     estimateLocalBackground = estimateBackgroundPlane
 
-    def colorize(
+    def predictEdges(
         self,
         views: DepthPlane | NDArray[np.float32] | Mapping[int, LocalView] | Sequence[LocalView],
-    ) -> NDArray[np.uint8] | dict[int, NDArray[np.uint8]]:
-        """Return RGB uint8 pseudo-colour output, preserving view IDs when supplied."""
+    ) -> NDArray[np.bool_] | dict[int, NDArray[np.bool_]]:
+        """Return the depth-predicted edge mask, preserving view IDs when supplied."""
         if isinstance(views, DepthPlane) or isinstance(views, np.ndarray):
-            return self.preprocess(views).depthRgb
+            return self.preprocess(views).edgeMask
         if isinstance(views, Mapping):
-            return {int(viewId): self._colorizeView(view) for viewId, view in views.items()}
-        return {view.spec.viewId: self._colorizeView(view) for view in views}
+            return {int(viewId): self._edgeView(view) for viewId, view in views.items()}
+        return {view.spec.viewId: self._edgeView(view) for view in views}
+
+    def enhanceRgb(self, rgb: NDArray[np.uint8], depth: DepthPlane) -> NDArray[np.uint8]:
+        """Change only predicted edge pixels to a high-contrast RGB value."""
+        if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
+            raise ProtocolError("RGB edge enhancement requires uint8 [H, W, 3]")
+        if rgb.shape[:2] != depth.values.shape:
+            raise ProtocolError("RGB and depth must be aligned before edge enhancement")
+        edgeMask = self.preprocess(depth).edgeMask
+        enhanced = rgb.copy()
+        if not edgeMask.any():
+            return enhanced
+        pixels = enhanced[edgeMask]
+        inverse = 255 - pixels
+        delta = inverse.astype(np.float32) - pixels.astype(np.float32)
+        contrast = np.linalg.norm(delta, axis=1)
+        toBlack = np.linalg.norm(pixels.astype(np.float32), axis=1)
+        toWhite = np.linalg.norm(255.0 - pixels.astype(np.float32), axis=1)
+        fallback = np.where((toBlack >= toWhite)[:, None], 0, 255).astype(np.uint8)
+        enhanced[edgeMask] = np.where((contrast >= self.minContrast)[:, None], inverse, fallback)
+        return enhanced
 
     def summarize(self, frame: FramePacket, bbox: BBoxXYWH) -> DepthSummary | None:
         if frame.depth is None:
@@ -182,76 +187,10 @@ class DepthPreprocessor(DepthProcessor):
     def score(self, summary: DepthSummary | None) -> float:
         return 0.0 if summary is None else float(np.clip(summary.confidence, 0.0, 1.0))
 
-    def _colorizeView(self, view: LocalView) -> NDArray[np.uint8]:
+    def _edgeView(self, view: LocalView) -> NDArray[np.bool_]:
         if view.depth is None:
-            return np.zeros((*view.rgb.shape[:2], 3), dtype=np.uint8)
-        return self.preprocess(view.depth).depthRgb
-
-    def _colorizeArrays(
-        self,
-        normalized: NDArray[np.float32],
-        mask: NDArray[np.bool_],
-        relief: NDArray[np.float32],
-        edge: NDArray[np.float32],
-    ) -> NDArray[np.uint8]:
-        if self.colorizationMode == "grayscale":
-            return self._grayscaleArrays(normalized, mask, relief, edge)
-
-        # This view is deliberately not a metric colormap.  The near range gets
-        # several cyclic hue bands so adjacent depth layers can be separated even
-        # when the same hue is reused later.  The far range is compressed into a
-        # dark, nearly neutral background.
-        foreground = 1.0 - _smoothstep(0.70, 0.90, normalized)
-        foregroundDepth = np.clip(normalized / 0.70, 0.0, 1.0)
-        proximity = np.clip(1.0 - foregroundDepth, 0.0, 1.0)
-
-        cycles = 2.75
-        foregroundHue = np.mod(0.04 + cycles * (1.0 - foregroundDepth), 1.0)
-        backgroundHue = np.full_like(normalized, 0.62)
-        hue = backgroundHue + foreground * (foregroundHue - backgroundHue)
-
-        # A sharp jump receives roughly a half-cycle hue rotation, which makes
-        # the border visibly different from either smooth side of the surface.
-        edgeImpact = np.clip(
-            edge * (0.15 + 0.85 * foreground) * (1.45 + 0.35 * self.reliefGain),
-            0.0,
-            1.0,
-        )
-        hue = np.mod(hue + 0.50 * edgeImpact, 1.0)
-
-        backgroundSaturation = 0.08
-        saturation = (
-            backgroundSaturation * (1.0 - foreground)
-            + (0.84 + 0.16 * edgeImpact) * foreground
-            + 0.12 * edgeImpact
-        )
-        saturation = np.clip(saturation, 0.0, 1.0)
-
-        near = np.clip(self.nearBrightness, 0.0, 1.0)
-        far = np.clip(self.farBrightness, 0.0, 1.0)
-        foregroundValue = far + (near - far) * (0.20 + 0.80 * proximity**0.55)
-        backgroundValue = np.clip(far * 0.35, 0.03, 0.16)
-        value = backgroundValue * (1.0 - foreground) + foreground * foregroundValue
-        value = np.clip(value + 0.30 * self.edgeGain * edgeImpact, 0.0, 1.0)
-
-        rgb = _hsvToRgb(hue, saturation, value)
-        rgb[~mask] = 0
-        return np.rint(rgb * 255.0).astype(np.uint8)
-
-    def _grayscaleArrays(
-        self,
-        normalized: NDArray[np.float32],
-        mask: NDArray[np.bool_],
-        relief: NDArray[np.float32],
-        edge: NDArray[np.float32],
-    ) -> NDArray[np.uint8]:
-        brightness = self.farBrightness + (
-            self.nearBrightness - self.farBrightness
-        ) * (1.0 - normalized)
-        brightness = brightness + self.edgeGain * edge
-        brightness[~mask] = 0.0
-        gray = np.rint(np.clip(brightness, 0.0, 1.0) * 255.0).astype(np.uint8)
-        return np.repeat(gray[..., None], 3, axis=2)
+            return np.zeros(view.rgb.shape[:2], dtype=np.bool_)
+        return self.preprocess(view.depth).edgeMask
 
 
 def _coerceDepth(
@@ -290,47 +229,17 @@ def _edgeMagnitude(normalized: NDArray[np.float32], mask: NDArray[np.bool_]) -> 
     return np.clip(edge / scale, 0.0, 1.0).astype(np.float32)
 
 
-def _smoothstep(edge0: float, edge1: float, value: NDArray[np.float32]) -> NDArray[np.float32]:
-    scaled = np.clip((value - edge0) / max(edge1 - edge0, 1e-6), 0.0, 1.0)
-    return scaled * scaled * (3.0 - 2.0 * scaled)
-
-
-def _hsvToRgb(
-    hue: NDArray[np.float32],
-    saturation: NDArray[np.float32],
-    value: NDArray[np.float32],
-) -> NDArray[np.float32]:
-    """Convert aligned HSV planes to RGB without an imaging dependency."""
-    sector = np.floor(np.mod(hue, 1.0) * 6.0).astype(np.int32)
-    fraction = np.mod(hue, 1.0) * 6.0 - sector
-    chromaLow = value * (1.0 - saturation)
-    descending = value * (1.0 - fraction * saturation)
-    ascending = value * (1.0 - (1.0 - fraction) * saturation)
-    red = np.choose(sector, (value, descending, chromaLow, chromaLow, ascending, value))
-    green = np.choose(sector, (ascending, value, value, descending, chromaLow, chromaLow))
-    blue = np.choose(sector, (chromaLow, chromaLow, ascending, value, value, descending))
-    return np.stack((red, green, blue), axis=-1).astype(np.float32)
-
-
-def _boxSmooth(values: NDArray[np.float32], kernel: int) -> NDArray[np.float32]:
-    if kernel <= 1 or min(values.shape) < 2:
-        return values
-    radius = kernel // 2
-    padded = np.pad(values.astype(np.float64), radius, mode="edge")
-    integral = padded.cumsum(axis=0).cumsum(axis=1)
-    integral = np.pad(integral, ((1, 0), (1, 0)))
-    height, width = values.shape
-    y0 = np.arange(height)
-    y1 = y0 + kernel
-    x0 = np.arange(width)
-    x1 = x0 + kernel
-    total = (
-        integral[y1[:, None], x1[None, :]]
-        - integral[y0[:, None], x1[None, :]]
-        - integral[y1[:, None], x0[None, :]]
-        + integral[y0[:, None], x0[None, :]]
-    )
-    return (total / float(kernel * kernel)).astype(np.float32)
+def _dilate(mask: NDArray[np.bool_], widthPx: int) -> NDArray[np.bool_]:
+    if widthPx <= 1 or not mask.any():
+        return mask.copy()
+    radius = widthPx - 1
+    padded = np.pad(mask, radius, mode="constant")
+    result = np.zeros_like(mask)
+    height, width = mask.shape
+    for yOffset in range(2 * radius + 1):
+        for xOffset in range(2 * radius + 1):
+            result |= padded[yOffset : yOffset + height, xOffset : xOffset + width]
+    return result
 
 
 __all__ = ["DepthPreprocessResult", "DepthPreprocessor"]

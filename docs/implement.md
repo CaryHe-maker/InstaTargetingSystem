@@ -8,7 +8,7 @@
 
 - `core`：统一数据类型、协议、配置和错误层。
 - `geometry`：ERP 与 BFoV 之间的裁剪、回投影和跨经线处理。
-- `tracker`：HiT 主干、深度预处理、双分支融合和模板命令执行。
+- `tracker`：官方 HiT 主干、深度边缘预测、RGB 边缘增强和模板命令执行。
 - `controller`：DTC 负责多视图计划、候选聚合、运动预测、状态机和恢复策略。
 - `controller V2`：已接入不可变状态实例、`StateEvaluator/StateObservation`、可靠测量滑动窗口、
   球面切平面预测、恢复去重记忆、真实六面 cube-map 和最多一次同帧有界升级。

@@ -13,10 +13,25 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+hit = [
+  "torch>=2,<3",
+  "torchvision>=0.20,<1",
+  "timm>=0.5.4",
+  "yacs>=0.1.8",
+  "easydict>=1.13,<2",
+  "h5py>=3,<4",
+  "scipy>=1,<2",
+  "pandas>=2,<4",
+  "tensorboard>=2.18,<3",
+]
 dev = [
   "pytest>=8,<9",
   "ruff>=0.12,<1",
 ]
+
+[project.scripts]
+run = "instatarget.app.commands:runMain"
+getInstanceID = "instatarget.app.commands:getInstanceIdMain"
 
 [tool.setuptools.packages.find]
 where = ["src"]
