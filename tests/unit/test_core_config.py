@@ -10,7 +10,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 class CoreConfigTest(unittest.TestCase):
     def testLoadConfigConvertsAnglesAndResolvesWeights(self) -> None:
-        config = loadConfig(REPOSITORY_ROOT / "configs" / "RGBD.yaml")
+        config = loadConfig(REPOSITORY_ROOT / "configs" / "RGBonly.yaml")
 
         self.assertAlmostEqual(config.geometry.minFovRad, 0.3490658503988659)
         self.assertEqual(config.geometry.boundarySamplesPerEdge, 65)
@@ -23,9 +23,9 @@ class CoreConfigTest(unittest.TestCase):
         self.assertEqual(config.evaluator.minReacquireViews, 2)
         self.assertEqual(config.motion.minSamplesForVelocity, 2)
         self.assertAlmostEqual(config.motion.processNoiseRadPerSec, 0.04)
-        self.assertTrue(config.depth.enabled)
-        self.assertEqual(config.depth.edge.widthPx, 2)
-        self.assertEqual(config.model.source, REPOSITORY_ROOT / "third_party" / "HiT")
+        self.assertFalse(config.depth.enabled)
+        self.assertEqual(config.backendFusion.depthScoreWeight, 0.0)
+        self.assertEqual(config.model.precision, "fp32")
         self.assertEqual(config.model.weights, REPOSITORY_ROOT / "models" / "hit_small.pth")
         self.assertFalse(config.visualization.enabled)
         self.assertEqual(
@@ -39,7 +39,7 @@ class CoreConfigTest(unittest.TestCase):
 
     def testLoadConfigRejectsUnknownFields(self) -> None:
         source = (REPOSITORY_ROOT / "configs" / "RGBonly.yaml").read_text(encoding="utf-8")
-        source = source.replace("schemaVersion: 2", "schemaVersion: 2\nunknownField: true")
+        source = source.replace("schemaVersion: 1", "schemaVersion: 1\nunknownField: true")
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "invalid.yaml"

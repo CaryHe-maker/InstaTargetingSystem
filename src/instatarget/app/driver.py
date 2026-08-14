@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 from instatarget.controller import DepthAwareTrackController, remapLocalObservationFusedScores
-from instatarget.core.config import AppConfig
-from instatarget.core.errors import DecodeError, ProtocolError
+from instatarget.core.config import AppConfig, ModelConfig
+from instatarget.core.errors import DecodeError
 from instatarget.core.protocols import FrameSource as FrameSourceProtocol
 from instatarget.core.protocols import MoreViewsRequired, SphericalGeometry, TrackerBackend
 from instatarget.core.protocols import ResultSink as ResultSinkProtocol
@@ -26,15 +26,17 @@ from instatarget.core.types import (
 from instatarget.geometry import SphericalGeometryImpl, makeSphericalPoint
 from instatarget.io.result_sink import FileResultSink
 from instatarget.tracker import (
+    DepthEncoder,
     DepthPreprocessor,
+    FusionHead,
     HiTBackend,
+    PyTorchHiTSession,
     TrackerBackendImpl,
-    createHiTSession,
 )
-from instatarget.tracker.hit_backend import HiTPrediction
 
 if TYPE_CHECKING:
     from instatarget.core.protocols import DepthProcessor
+    from instatarget.tracker.hit_backend import HiTSession
     from instatarget.visualization.recorder import VisualizationRecorder
     from instatarget.visualization.result import ResultVisualizationRecorder
 
@@ -49,58 +51,33 @@ class RuntimeBundle:
     recorder: VisualizationRecorder | None = None
 
 
-class FallbackHiTSession:
-    """A deterministic local backend that keeps the CLI runnable without weights."""
-
-    supportsOnlineTemplates = True
-
-    def encodeTemplate(self, rgb: np.ndarray, bbox: BBoxXYWH) -> object:
-        crop = _cropRgb(rgb, bbox)
-        return {
-            "bbox": (float(bbox.xPx), float(bbox.yPx), float(bbox.widthPx), float(bbox.heightPx)),
-            "mean": crop.mean(axis=(0, 1)).astype(np.float32),
-        }
-
-    def infer(self, rgb: np.ndarray, templateFeatures: Iterable[object]) -> HiTPrediction:
-        templates = [_coerceTemplate(feature) for feature in templateFeatures]
-        if not templates:
-            raise ProtocolError("fallback HiT session requires at least one template")
-        templateBox = _meanBox(template["bbox"] for template in templates)
-        templateMean = np.mean(np.stack([template["mean"] for template in templates]), axis=0)
-        currentMean = rgb.mean(axis=(0, 1)).astype(np.float32)
-        colorDelta = (currentMean - templateMean) / 255.0
-        widthPx, heightPx = rgb.shape[1], rgb.shape[0]
-        centerX = (
-            templateBox.xPx + templateBox.widthPx / 2.0 + float(colorDelta[0]) * 0.35 * widthPx
-        )
-        centerY = (
-            templateBox.yPx + templateBox.heightPx / 2.0 - float(colorDelta[1]) * 0.35 * heightPx
-        )
-        width = max(2.0, min(float(widthPx), templateBox.widthPx))
-        height = max(2.0, min(float(heightPx), templateBox.heightPx))
-        bbox = BBoxXYWH(
-            xPx=_clamp(centerX - width / 2.0, 0.0, max(0.0, widthPx - width)),
-            yPx=_clamp(centerY - height / 2.0, 0.0, max(0.0, heightPx - height)),
-            widthPx=width,
-            heightPx=height,
-        )
-        appearanceScore = float(np.clip(1.0 - np.mean(np.abs(colorDelta)), 0.0, 1.0))
-        return HiTPrediction(bbox=bbox, modelScore=appearanceScore, appearanceScore=appearanceScore)
-
-    def close(self) -> None:
-        return None
-
-
-def buildRuntime(config: AppConfig, *, hitSession: object | None = None) -> RuntimeBundle:
+def buildRuntime(
+    config: AppConfig,
+    *,
+    hitSessionFactory: Callable[[ModelConfig], HiTSession] | None = None,
+) -> RuntimeBundle:
+    sessionFactory = hitSessionFactory or PyTorchHiTSession
     geometry = SphericalGeometryImpl(
         boundarySamplesPerEdge=config.geometry.boundarySamplesPerEdge,
     )
     depthProcessor: DepthPreprocessor | None = (
         DepthPreprocessor(config.depth) if config.depth.enabled else None
     )
+    rgbSession = sessionFactory(config.model)
+    try:
+        depthEncoder = (
+            DepthEncoder(session=sessionFactory(config.model)) if config.depth.enabled else None
+        )
+    except Exception:
+        rgbSession.close()
+        raise
     backend = TrackerBackendImpl(
-        HiTBackend(hitSession if hitSession is not None else createHiTSession(config.model)),
+        HiTBackend(rgbSession),
         depthProcessor=depthProcessor,
+        depthEncoder=depthEncoder,
+        fusionHead=FusionHead(
+            config.fusionHead, depthScoreWeight=config.backendFusion.depthScoreWeight
+        ),
         depthEnabled=config.depth.enabled,
     )
     controller = DepthAwareTrackController(geometry, config)
@@ -131,7 +108,6 @@ def runTracking(
         initPlan = controller.buildInitialization(frame0, initialBox)
         templateView = geometry.cropViews(frame0, [initPlan.templateView])[0]
         backend.initialize(templateView, initPlan.templateBox)
-        visualTemplateView = backend.lastPreparedViews[0]
         initDepth = (
             depthProcessor.summarize(frame0, initialBox) if depthProcessor is not None else None
         )
@@ -141,10 +117,10 @@ def runTracking(
             resultRecorder.record(frame0, initialResult, stateScore=None)
         resultCount = 1
         if recorder is not None:
-            recorder.recordLocalRgb(frame0, [visualTemplateView])
+            recorder.recordLocalRgb(frame0, [templateView])
             if depthProcessor is not None and frame0.depth is not None:
                 recorder.recordDepthRgb(
-                    frame0, {0: depthProcessor.preprocess(frame0.depth).edgeRgb}
+                    frame0, {0: depthProcessor.preprocess(frame0.depth).depthRgb}
                 )
 
         while True:
@@ -161,11 +137,10 @@ def runTracking(
                     and depthProcessor is not None
                     and frame.depth is not None
                 ):
-                    depthRgb = depthProcessor.preprocess(frame.depth).edgeRgb
+                    depthRgb = depthProcessor.preprocess(frame.depth).depthRgb
                     recorder.recordDepthRgb(frame, {0: depthRgb})
                     depthRecorded = True
                 rawObservations = tuple(backend.infer(views, plan.templateCommand))
-                backendViews = tuple(backend.lastPreparedViews)
                 observations = remapLocalObservationFusedScores(rawObservations)
                 projected = tuple(
                     _projectObservation(
@@ -178,8 +153,8 @@ def runTracking(
                     for view, observation in zip(views, observations, strict=True)
                 )
                 if recorder is not None:
-                    recorder.recordLocalRgb(frame, backendViews)
-                    recorder.recordBackendBoxes(frame, backendViews, observations)
+                    recorder.recordLocalRgb(frame, views)
+                    recorder.recordBackendBoxes(frame, views, observations)
                     recorder.recordGeometryBoxes(frame, projected)
                 step = controller.consume(plan, projected)
                 if isinstance(step, MoreViewsRequired):
@@ -273,49 +248,7 @@ def _requireFrame(frame: FramePacket | None) -> FramePacket:
     return frame
 
 
-def _cropRgb(rgb: np.ndarray, box: BBoxXYWH) -> np.ndarray:
-    x0 = max(0, int(math.floor(box.xPx)))
-    y0 = max(0, int(math.floor(box.yPx)))
-    x1 = min(rgb.shape[1], int(math.ceil(box.xPx + box.widthPx)))
-    y1 = min(rgb.shape[0], int(math.ceil(box.yPx + box.heightPx)))
-    if x1 <= x0 or y1 <= y0:
-        return rgb[:1, :1].copy()
-    return rgb[y0:y1, x0:x1].copy()
-
-
-def _coerceTemplate(feature: object) -> dict[str, np.ndarray | tuple[float, float, float, float]]:
-    if isinstance(feature, dict) and "bbox" in feature and "mean" in feature:
-        bbox = tuple(float(value) for value in feature["bbox"])
-        mean = np.asarray(feature["mean"], dtype=np.float32).reshape(3)
-        return {"bbox": bbox, "mean": mean}
-    if isinstance(feature, tuple) and len(feature) == 2:
-        bbox, mean = feature
-        return {
-            "bbox": tuple(float(value) for value in bbox),
-            "mean": np.asarray(mean, dtype=np.float32).reshape(3),
-        }
-    raise ProtocolError("fallback HiT feature has an unsupported shape")
-
-
-def _meanBox(boxes: Iterable[tuple[float, float, float, float]]) -> BBoxXYWH:
-    items = list(boxes)
-    if not items:
-        return BBoxXYWH(0.0, 0.0, 2.0, 2.0)
-    array = np.asarray(items, dtype=np.float64)
-    return BBoxXYWH(
-        xPx=float(np.mean(array[:, 0])),
-        yPx=float(np.mean(array[:, 1])),
-        widthPx=float(np.mean(array[:, 2])),
-        heightPx=float(np.mean(array[:, 3])),
-    )
-
-
-def _clamp(value: float, lower: float, upper: float) -> float:
-    return float(max(lower, min(upper, value)))
-
-
 __all__ = [
-    "FallbackHiTSession",
     "RuntimeBundle",
     "buildRuntime",
     "closeBackend",

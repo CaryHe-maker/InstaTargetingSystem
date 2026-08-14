@@ -1,22 +1,26 @@
-# Visualization
+# 可视化模块
 
-可视化是 app 层的只读旁路，不参与 HiT 推理、分数计算或控制决策。recorder 保存 backend 实际送入 HiT 的局部图，因此诊断图与模型输入逐像素一致。
+可视化是诊断输出层，不是跟踪决策层。`VisualizationRecorder` 接收已经生成的帧、局部视图、后端观测和几何投影，只写 PNG 文件，不修改输入数组、控制器状态或结果对象。
 
-| stage | 内容 |
+## 阶段
+
+配置允许四个阶段：
+
+| 阶段 | 内容 |
 |---|---|
-| `local_rgb` | backend 实际使用的局部 RGB。RGB-only 为原图；RGBD 为深度边缘增强后的 RGB。 |
-| `depth_rgb` | RGBD 深度边缘预测图：白色表示边缘，黑色表示非边缘。RGB-only 不产生有效深度图。 |
-| `backend_box` | 在与 HiT 输入完全相同的局部 RGB 上绘制候选框与 `fuseScore`。 |
-| `geometry_box` | 在原始 ERP RGB 上绘制回投影框与 `fuseScore`。 |
+| `local_rgb` | 每个局部视图的 RGB 裁剪 |
+| `depth_rgb` | 深度预处理器生成的伪彩色图 |
+| `backend_box` | 局部 RGB 上绘制后端框和融合分数 |
+| `geometry_box` | 原始 ERP RGB 上绘制回投影框和融合分数 |
 
-RGBD 的 `local_rgb` 与 `backend_box` 都来自 `TrackerBackend.lastPreparedViews`；不会重新生成伪彩色深度图，也不会绘制第二个模型结果。PNG 写出保持无损 `uint8 [H,W,3]`。
-
-目录结构：
+路径格式为：
 
 ```text
-<root>/<sequence>/frame_000000/
-  local_rgb/view_0000.png
-  depth_rgb/view_0000.png
-  backend_box/view_0000.png
-  geometry_box/view_0000.png
+<outputRoot>/<sequence>/frame_<六位帧号>/<stage>/view_<四位视图号>.png
 ```
+
+`ResultVisualizationRecorder` 另写每帧一张最终 ERP 图，在 `resultVisualRoot/frame_<六位帧号>.png` 中绘制已提交框和状态分数。
+
+## 对测试的影响
+
+可视化阶段不会向 HiT、融合头、控制器或结果 sink 回传任何值，因此不会影响测试精度、状态转换和 BFoV 输出。它会产生额外图像写入和磁盘占用；比赛容器默认关闭可视化。

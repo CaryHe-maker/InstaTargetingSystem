@@ -1,55 +1,32 @@
-# InstaTargetingSystem 交付状态
+# 实现说明
 
-> 这是本仓库当前的最终交付说明。系统已完成球面几何、RGB-only/RGB-D 跟踪后端、控制层、应用入口、I/O、竞赛适配和评测链路；训练链路仍保留为后续扩展。
+本文汇总仓库内可执行运行线路及其边界。架构关系见 [Design.md](Design.md)，逐帧行为见 [process.md](process.md)。
 
----
+## 可执行功能
 
-## 已交付
+- 严格 YAML 配置加载与参数约束。
+- ERP 边界框、球面 BFoV、单位方向和局部透视视图转换。
+- 真实 PyTorch HiT-Small 模型加载、模板编码和 CUDA 推理。
+- RGB-only 单会话后端。
+- RGB-D 双会话后端、深度伪彩色编码和分数融合。
+- 球面运动估计、多视角候选聚类、状态评估、同帧升级和恢复搜索。
+- AirSim360 RGB、深度、语义图和实例图读取。
+- `.mp4` 比赛视频读取及 BFoV 结果输出。
+- 开发结果、IoU 指标、中间可视化和最终结果图像输出。
+- 原子结果发布与严格帧序检查。
 
-- `core`：统一数据类型、协议、配置和错误层。
-- `geometry`：ERP 与 BFoV 之间的裁剪、回投影和跨经线处理。
-- `tracker`：官方 HiT 主干、深度边缘预测、RGB 边缘增强和模板命令执行。
-- `controller`：DTC 负责多视图计划、候选聚合、运动预测、状态机和恢复策略。
-- `controller V2`：已接入不可变状态实例、`StateEvaluator/StateObservation`、可靠测量滑动窗口、
-  球面切平面预测、恢复去重记忆、真实六面 cube-map 和最多一次同帧有界升级。
-- `app / io`：命令行入口、视频/序列读取、结果写出和 AirSim360 数据接入。
-- `adapters / eval`：官方结果格式转换、球面指标、OTB 指标和性能统计。
-- `visualization`：局部 RGB、深度诊断图、后端框和回投影框的无损记录。
+## HiT 集成
 
-## 运行入口
+`PyTorchHiTSession` 从 `third_party/HiT` 导入官方源代码，读取 `experiments/HiT/HiT_Small.yaml`，并加载 `models/hit_small.pth` 中的 `net` 状态字典。模板裁剪为 `128 x 128`，搜索图缩放为 `256 x 256`，输入使用 ImageNet 均值与标准差归一化。
 
-```bash
-python -m instatarget.track \
-  --input input.mp4 \
-  --init-box 120.0,80.0,64.0,96.0 \
-  --output result.txt \
-  --config configs/RGBonly.yaml
-```
+模型置信度由角点头两个热图的归一化熵和集中度计算。FP16 前向产生非有限边界框或热图时，适配器使用同一模型执行 FP32 重算；该处理不切换模型结构或权重。
 
-```bash
-python -m instatarget.track_airsim360 \
-  --dataset-root data/AirSim360 \
-  --sequence NYC_001 \
-  --target-instance 305 \
-  --output result.txt \
-  --config configs/RGBonly.yaml
-```
+## 仓库范围
 
-## 输出
+生产运行时只连接 PyTorch HiT-Small。训练目录提供 NumPy 数据样本、伪真值和损失接口，仓库不包含完整的模型训练任务。导出、替代推理后端以及通用日志和计时辅助文件不属于比赛容器执行路径。
 
-- 开发期结果文件采用每行一个框的纯文本格式：`xPx,yPx,widthPx,heightPx`
-- 比赛格式由 `CompetitionAdapter` 统一转换
-- 结果文件采用 `.partial` 原子落盘，只有 `finalize()` 成功后才会变成最终输出
+`third_party/HiT` 是运行依赖而非文档备份。源代码不会被复制到项目文档中，但本地运行和 Docker 构建都会引用该目录；`.gitignore` 可忽略其工作树内容，提交环境仍须以规定方式提供相同源码。
 
-## 当前约束
+## 资源生命周期
 
-- RGB-only 与 RGB-D 共用同一套控制层和结果协议
-- 深度缺失时自动退化为 RGB-only
-- 不相交候选不会做输出框并集；支持不足时输出运动预测框并令 `valid=false`
-- 每帧最终只提交一个结果；Backend template revision 与 Controller state revision 分开推进
-- 训练链路尚未落地，当前仓库不包含端到端再训练实现
-
-## 最终边界
-
-本项目目前的产品边界是“可运行、可评测、可导出、可诊断”的全景单目标跟踪系统。
-后续如果补训练链路，只需要在现有 `training` 目录下扩展，不需要改动当前推理契约。
+运行时创建模型会话后，由 `TrackerBackend.close()` 统一释放会话、前向钩子和 CUDA 缓存。RGB-D 创建第二会话失败时，已创建的 RGB 会话会立即关闭。CLI 在正常结束和异常退出路径中都会关闭数据源与后端。

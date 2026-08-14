@@ -9,7 +9,13 @@ description = "Spherical RGB-D single-object tracking system"
 requires-python = ">=3.11"
 dependencies = [
   "numpy>=1.26,<3",
+  "opencv-python-headless>=4.11,<5",
   "PyYAML>=6,<7",
+  "torch>=2.6,<2.7",
+  "torchvision>=0.21,<0.22",
+  "timm==0.5.4",
+  "easydict>=1.13,<2",
+  "tensorboardX>=2.6.4,<3",
 ]
 
 [project.optional-dependencies]

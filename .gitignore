@@ -105,6 +105,9 @@ checkpoints/
 *.plan
 *.trt
 
+# Vendored reference implementations
+third_party/
+
 # Docker and package artifacts
 *.tar
 *.tar.gz

@@ -1,125 +1,46 @@
-# AirSim360 数据接口方案
+# AirSim360 数据处理方案
 
-本文说明新的数据接口层。它把磁盘布局转换为项目统一的 `FramePacket`，因此跟踪器、几何模块、可视化和训练数据集都不需要知道输入文件的具体名字。
+本文说明 AirSim360 数据在 InstaTargetingSystem 中的读取、目标选择、跟踪与评估流程。数据接口与比赛视频接口共用 `FramePacket`、球面几何、控制器和 HiT 后端，输出格式根据运行入口分别适配。
 
-## 推荐的数据组织
+## 数据读取
 
-以后增加测试用例时，建议把每个序列放在一个独立目录中：
+`AirSim360SequenceSource` 按帧匹配 RGB、深度、语义分割和实例分割文件。RGB 是必需输入；其余模态按文件是否存在写入 `FramePacket`。RGB-only 配置允许帧中携带深度数据，但后端不会建立深度处理器，也不会使用深度参与推理或决策。
 
-```text
-data/
-  airsim360/
-    nyc_0001/
-      raw/                 # panorama_000000.png ...（RGB/RGBA 均可）
-      depth/               # Depth_0.h5 ... 或同帧号 .npy/.png
-      semantic/            # 同帧号语义 mask
-      instance/            # 同帧号实例 mask
-      semantic_lists.txt
+支持的目录别名如下：
+
+| 模态 | 目录名 |
+|---|---|
+| RGB | `rgb`、`raw` |
+| 深度 | `depth`、`Depth` |
+| 语义分割 | `semantic`、`segmentation` |
+| 实例分割 | `instance`、`instances` |
+
+读取器也支持 `meta.json` 中的显式 `records` 列表。深度文件支持 HDF5、NumPy 数组和图像；RGBA 分割图的 Alpha 通道用于语义 ID，RGB 三通道按 24 位整数组合为实例 ID。
+
+## 目标初始化
+
+目标由整数 `instance ID` 指定。`PseudoTrackBuilder` 在第 0 帧实例掩码中计算目标框，并使用水平循环区间处理跨越 ERP 左右边界的目标。第 0 帧框作为初始化输入，不计入 IoU 汇总中的模型预测帧。
+
+实例清单可通过一条命令生成：
+
+```powershell
+& ".venv\Scripts\python.exe" "tools\generate_instance_ids.py" --dataset-root "data\airsim360\nyc_sample" --output "artifacts\easy_user\nyc_sample\InstanceID.txt"
 ```
 
-文件只需共享末尾数字即可对齐，例如 `panorama_10.png`、`Depth_10.h5`、`10.png` 会组成 `frameIndex=10`。帧按数字而不是字符串排序，所以不会出现 `10` 排在 `2` 前面的错误。
+## 跟踪与评估
 
-规范目录使用 `raw/depth/semantic/instance`；为兼容旧项目，`rgb/depth/semantic/instance` 仍然有效。目录名可通过 `AirSim360SequenceSource` 的 alias 字段扩展，不需要修改跟踪代码。
+`tools/run_airsim360_dataset.py` 完成以下操作：
 
-## 解码规则
+1. 读取第 0 帧并生成初始化框。
+2. 按配置创建真实 HiT-Small 运行时。
+3. 顺序处理所有帧并写入 `tracking.txt`。
+4. 由实例掩码生成逐帧伪真值并计算循环边界框 IoU。
+5. 写入清单、指标和可视化产物。
 
-- RGB 读取为 `uint8[H,W,3]`；RGBA 会丢弃 alpha。
-- `.h5/.hdf5` 深度使用 `readAirSim360DepthH5`，输出米制 `float32` 和显式 `validMask`。
-- RGBA 语义图使用 alpha 通道作为类别 ID。
-- RGBA 实例图把 RGB 以 `R | G<<8 | B<<16` 解码为 `int32` 实例 ID；单通道 PNG/NPY 保持原值，便于兼容已有标注。
-- `semantic_lists.txt` 支持 `name id` 和 `id name` 两种行格式，结果放入 `SegmentationPlane.classNames`。
-- 缺失模态保持 `None`，不会伪造零深度图；RGB、深度和 mask 若尺寸不一致会立即报告 `DecodeError/ProtocolError`。
+RGB-only 与 RGB-D 的完整一行命令见 [User/EasyUser.md](User/EasyUser.md)。输出目录结构和指标定义见 [Verification.md](Verification.md)。
 
-## 程序接口
+## 模态行为
 
-```python
-from instatarget.data import openDataset
+RGB-only 使用一个 HiT-Small 会话处理局部 RGB 视图。RGB-D 使用两个相互独立的 HiT-Small 会话：RGB 会话处理彩色图像，深度会话处理深度预处理器生成的伪彩色三通道图像；融合模块将模型、外观、深度和控制器证据组合为候选分数。
 
-source = openDataset("data/airsim360/nyc_0001", format="auto")
-try:
-    while (frame := source.read()) is not None:
-        # frame.rgb, frame.depth, frame.segmentation
-        pass
-finally:
-    source.close()
-```
-
-等价的底层入口是 `AirSim360DataSource.open(root, sequenceId=None)`。传入包含多个序列的父目录时可以指定 `sequenceId`；传入单序列目录时省略它即可。`registerDatasetFormat("my_format", factory)` 为以后不同比赛输入注册新的适配器，适配器只需要实现 `open/read/close` 并产生 `FramePacket`。
-
-## 目标选择
-
-目标实例必须显式指定，不再自动选择。RGBA instance mask 的 RGB 三通道会解码为 packed ID，例如 `--target-instance 14198374`。该 ID 用于首帧生成初始框，后续帧由 tracker 持续跟踪同一个目标。语义类别 ID 不是 instance ID；要测试另一个物体，需要先获得它的 instance ID。
-
-## 跟踪、测试输出和中间可视化
-
-一条命令会生成最终结果、IoU 评估、最终绿色框图片和中间阶段可视化：
-
-```bash
-python tools/run_airsim360_dataset.py \
-  --dataset-root data/airsim360/nyc_sample \
-  --config configs/RGBonly.yaml \
-  --output-dir artifacts/airsim360_smoke \
-  --target-instance 14198374 \
-  --max-frames 1
-```
-
-输出包括：
-
-```text
-artifacts/airsim360_smoke/
-  result/
-    manifest.json
-    tracking.txt
-    iou.json
-    visualResult/frame_000000.png
-  midVisual/<sequence>/frame_000000/{local_rgb,depth_rgb,backend_box,geometry_box}/
-```
-
-`result/visualResult/` 是最终提交框的绿色框可视化；`midVisual/` 保存局部裁剪、深度、backend 候选框和 geometry 候选框。`result/iou.json` 输出逐帧 IoU 以及 `meanIoU`、`successRate@0.5`、`auc`，并按 ERP seam 拆分后计算。
-
-不传 `--output-dir` 时，工具会根据数据集相对 `data/` 的路径自动分配输出目录，并选择下一个编号：
-
-```text
-data/airsim360/nyc_sample/
-  -> artifacts/airsim360/nyc_sample/output_1/
-  -> artifacts/airsim360/nyc_sample/output_2/
-```
-
-如果显式传入 `--output-dir`，则使用用户指定的位置，不参与自动编号。
-
-也可以直接调用：
-
-```bash
-python -m instatarget.track_airsim360 \
-  --dataset-root data/airsim360 \
-  --sequence nyc_0001 \
-  --target-instance 14198374 \
-  --output artifacts/nyc_0001/result.txt \
-  --config configs/RGBD.yaml \
-  --mid-visual-root artifacts/nyc_0001/midVisual \
-  --result-visual-root artifacts/nyc_0001/result/visualResult
-```
-
-`--max-frames` 只用于快速回归；不传时会自动跑完整序列。当前后端没有加载第三方权重时使用确定性的 fallback HiT，因此仍可验证 I/O、几何、结果写出和可视化链路。
-
-## 训练接口
-
-`AirSim360TrainingDataset` 是不绑定 PyTorch 的懒加载数据集：
-
-```python
-from instatarget.training import AirSim360TrainingDataset
-
-dataset = AirSim360TrainingDataset(
-    "data/airsim360/nyc_0001", targetInstanceId=14198374
-)
-for sample in dataset:
-    rgb = sample.rgb
-    depth = sample.frame.depth
-    box, visible = sample.targetBox, sample.visible
-```
-
-每个 `TrainingSample` 同时保留原始 `FramePacket`、伪标注框和可见性，后续可在训练脚本中转换为 Torch/ONNX tensor；数据层不把 I/O 绑定到某个框架。首帧实例框由跨 ERP seam 的最小圆周区间生成，适合 360° 图像。
-
-## 扩展和数据质量检查
-
-新增格式建议实现独立的 `DatasetSource`，完成以下检查后再注册：帧号唯一、RGB 与所有保留模态尺寸一致、深度单位明确、缺失文件显式为空。这样比赛最终输入格式变化时只需增加一个 adapter，不会修改 `runTracking`、控制器或模型训练代码。
+深度图缺失或有效比例不足时，深度摘要为空，控制器仍可依据 RGB、运动、尺度和多视角一致性提交结果。

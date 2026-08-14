@@ -9,7 +9,7 @@ from typing import cast
 
 from instatarget.core.errors import ConfigError
 
-SUPPORTED_SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSION = 1
 VISUALIZATION_STAGES = frozenset({"local_rgb", "depth_rgb", "backend_box", "geometry_box"})
 
 
@@ -17,10 +17,8 @@ VISUALIZATION_STAGES = frozenset({"local_rgb", "depth_rgb", "backend_box", "geom
 class ModelConfig:
     backend: str
     variant: str
-    source: Path
     weights: Path
     precision: str
-    device: str
 
     def __post_init__(self) -> None:
         if self.backend not in {"pytorch", "onnxruntime", "tensorrt"}:
@@ -29,8 +27,6 @@ class ModelConfig:
             raise ConfigError("model.variant must be non-empty")
         if self.precision not in {"fp32", "fp16"}:
             raise ConfigError(f"unsupported model.precision: {self.precision}")
-        if not self.device.strip():
-            raise ConfigError("model.device must be non-empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,17 +47,27 @@ class GeometryConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class DepthEdgeConfig:
-    threshold: float = 0.20
-    widthPx: int = 2
-    minContrast: int = 160
+class DepthColorizationConfig:
+    mode: str = "relief"
+    nearBrightness: float = 0.95
+    farBrightness: float = 0.20
+    reliefGain: float = 1.0
+    edgeGain: float = 0.35
+    smoothingKernel: int = 7
 
     def __post_init__(self) -> None:
-        _requireProbability("depth.edge.threshold", self.threshold)
-        if self.widthPx < 1:
-            raise ConfigError("depth.edge.widthPx must be positive")
-        if not 0 <= self.minContrast <= 255:
-            raise ConfigError("depth.edge.minContrast must be in [0, 255]")
+        if self.mode not in {"relief", "grayscale"}:
+            raise ConfigError(f"unsupported depth.colorization.mode: {self.mode}")
+        for name, value in (
+            ("nearBrightness", self.nearBrightness),
+            ("farBrightness", self.farBrightness),
+            ("reliefGain", self.reliefGain),
+            ("edgeGain", self.edgeGain),
+        ):
+            if not isfinite(value) or value < 0.0:
+                raise ConfigError(f"depth.colorization.{name} must be finite and non-negative")
+        if self.smoothingKernel < 1 or self.smoothingKernel % 2 == 0:
+            raise ConfigError("depth.colorization.smoothingKernel must be a positive odd integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,11 +75,33 @@ class DepthConfig:
     enabled: bool
     minValidRatio: float
     maxDepthJumpRatio: float
-    edge: DepthEdgeConfig = field(default_factory=DepthEdgeConfig)
+    colorization: DepthColorizationConfig = field(default_factory=DepthColorizationConfig)
 
     def __post_init__(self) -> None:
         _requireProbability("depth.minValidRatio", self.minValidRatio)
         _requireProbability("depth.maxDepthJumpRatio", self.maxDepthJumpRatio)
+
+
+@dataclass(frozen=True, slots=True)
+class BackendFusionConfig:
+    depthScoreWeight: float
+
+    def __post_init__(self) -> None:
+        _requireProbability("backendFusion.depthScoreWeight", self.depthScoreWeight)
+
+
+@dataclass(frozen=True, slots=True)
+class FusionHeadConfig:
+    rgbInitWeight: float = 0.70
+    depthInitWeight: float = 0.20
+    contextInitWeight: float = 0.10
+
+    def __post_init__(self) -> None:
+        weights = (self.rgbInitWeight, self.depthInitWeight, self.contextInitWeight)
+        if any(not isfinite(value) or value < 0.0 for value in weights):
+            raise ConfigError("fusionHead weights must be finite and non-negative")
+        if sum(weights) <= 0.0:
+            raise ConfigError("fusionHead must contain a positive weight")
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +282,8 @@ class AppConfig:
     model: ModelConfig
     geometry: GeometryConfig
     depth: DepthConfig
+    backendFusion: BackendFusionConfig
+    fusionHead: FusionHeadConfig
     decisionGate: DecisionGateConfig
     evaluator: EvaluatorConfig
     motion: MotionConfig
@@ -289,6 +319,8 @@ def loadConfig(path: str | Path) -> AppConfig:
             "model",
             "geometry",
             "depth",
+            "backendFusion",
+            "fusionHead",
             "decisionGate",
             "evaluator",
             "motion",
@@ -306,9 +338,7 @@ def loadConfig(path: str | Path) -> AppConfig:
             f"actual={schemaVersion}"
         )
 
-    modelRaw = _section(
-        root, "model", {"backend", "variant", "source", "weights", "precision", "device"}
-    )
+    modelRaw = _section(root, "model", {"backend", "variant", "weights", "precision"})
     geometryRaw = _section(
         root,
         "geometry",
@@ -318,13 +348,19 @@ def loadConfig(path: str | Path) -> AppConfig:
     _requireKeys(
         "depth",
         depthRoot,
-        {"enabled", "minValidRatio", "maxDepthJumpRatio", "edge"},
+        {"enabled", "minValidRatio", "maxDepthJumpRatio", "colorization"},
     )
     depthRaw = cast(dict[str, object], depthRoot)
-    edgeRaw = _section(
+    colorizationRaw = _section(
         depthRaw,
-        "edge",
-        {"threshold", "widthPx", "minContrast"},
+        "colorization",
+        {"mode", "nearBrightness", "farBrightness", "reliefGain", "edgeGain", "smoothingKernel"},
+    )
+    fusionRaw = _section(root, "backendFusion", {"depthScoreWeight"})
+    fusionHeadRaw = _section(
+        root,
+        "fusionHead",
+        {"rgbInitWeight", "depthInitWeight", "contextInitWeight"},
     )
     gateRaw = _section(
         root,
@@ -402,11 +438,6 @@ def loadConfig(path: str | Path) -> AppConfig:
     if not weightsPath.is_absolute():
         weightsPath = (configPath.parent / weightsPath).resolve()
 
-    sourceValue = _requireStr("model.source", modelRaw["source"])
-    sourcePath = Path(sourceValue).expanduser()
-    if not sourcePath.is_absolute():
-        sourcePath = (configPath.parent / sourcePath).resolve()
-
     outputRootValue = _requireStr("visualization.outputRoot", visualizationRaw["outputRoot"])
     outputRoot = Path(outputRootValue).expanduser()
     if not outputRoot.is_absolute():
@@ -417,10 +448,8 @@ def loadConfig(path: str | Path) -> AppConfig:
         model=ModelConfig(
             backend=_requireStr("model.backend", modelRaw["backend"]),
             variant=_requireStr("model.variant", modelRaw["variant"]),
-            source=sourcePath,
             weights=weightsPath,
             precision=_requireStr("model.precision", modelRaw["precision"]),
-            device=_requireStr("model.device", modelRaw["device"]),
         ),
         geometry=GeometryConfig(
             viewWidthPx=_requireInt("geometry.viewWidthPx", geometryRaw["viewWidthPx"]),
@@ -441,10 +470,35 @@ def loadConfig(path: str | Path) -> AppConfig:
             maxDepthJumpRatio=_requireFloat(
                 "depth.maxDepthJumpRatio", depthRaw["maxDepthJumpRatio"]
             ),
-            edge=DepthEdgeConfig(
-                threshold=_requireFloat("depth.edge.threshold", edgeRaw["threshold"]),
-                widthPx=_requireInt("depth.edge.widthPx", edgeRaw["widthPx"]),
-                minContrast=_requireInt("depth.edge.minContrast", edgeRaw["minContrast"]),
+            colorization=DepthColorizationConfig(
+                mode=_requireStr("depth.colorization.mode", colorizationRaw["mode"]),
+                nearBrightness=_requireFloat(
+                    "depth.colorization.nearBrightness", colorizationRaw["nearBrightness"]
+                ),
+                farBrightness=_requireFloat(
+                    "depth.colorization.farBrightness", colorizationRaw["farBrightness"]
+                ),
+                reliefGain=_requireFloat(
+                    "depth.colorization.reliefGain", colorizationRaw["reliefGain"]
+                ),
+                edgeGain=_requireFloat("depth.colorization.edgeGain", colorizationRaw["edgeGain"]),
+                smoothingKernel=_requireInt(
+                    "depth.colorization.smoothingKernel", colorizationRaw["smoothingKernel"]
+                ),
+            ),
+        ),
+        backendFusion=BackendFusionConfig(
+            depthScoreWeight=_requireFloat(
+                "backendFusion.depthScoreWeight", fusionRaw["depthScoreWeight"]
+            )
+        ),
+        fusionHead=FusionHeadConfig(
+            rgbInitWeight=_requireFloat("fusionHead.rgbInitWeight", fusionHeadRaw["rgbInitWeight"]),
+            depthInitWeight=_requireFloat(
+                "fusionHead.depthInitWeight", fusionHeadRaw["depthInitWeight"]
+            ),
+            contextInitWeight=_requireFloat(
+                "fusionHead.contextInitWeight", fusionHeadRaw["contextInitWeight"]
             ),
         ),
         decisionGate=DecisionGateConfig(

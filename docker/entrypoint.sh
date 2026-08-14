@@ -1,1 +1,4 @@
-# TODO: Container entrypoint placeholder.
+#!/bin/sh
+set -eu
+
+exec python /app/track.py "$@"

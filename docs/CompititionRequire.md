@@ -1,46 +1,52 @@
-# 全景视频智能跟踪赛道
+# 比赛提交要求
 
-> 面向 360° 全景视频的实时单目标跟踪。
+本文件保留原路径，用于说明项目对 InstaTest 参考格式的适配结论。完整构建与运行规范见 [CompetitionSubmission.md](CompetitionSubmission.md)。
 
----
+## 输入约定
 
-## 赛题目标
+比赛数据根目录由多个序列目录组成。每个有效序列包含一个 `.mp4` 视频和一个 `init.txt` 文件；根目录可通过 `seqlist.txt` 指定序列顺序。`init.txt` 前四个逗号分隔值依次为：
 
-全景相机一次拍摄即可记录周身 360° 视野，但真正需要跟踪的通常只是其中一个目标。赛题要求系统在整段全景视频中持续输出目标在球面上的位置，并在遮挡、经线跨越、极区畸变和长时丢失场景下保持稳定。
+```text
+clon,clat,fov_h,fov_v
+```
 
-## 主要挑战
+四个值均使用角度制。经度范围为 `[-180, 180)`，纬度范围为 `[-90, 90]`，水平与垂直视场角均位于 `(0, 180)`。
 
-1. 全景畸变下的准确跟踪
-2. 长时跟踪与目标找回
-3. 低算力下的实时推理
+## 视频与模态
 
-## 比赛要求
+`OpenCvVideoSource` 使用一个持久化的 `cv2.VideoCapture` 顺序解码视频，将 OpenCV 的 BGR 帧转换为连续内存的 RGB 数组，并为每帧生成严格递增的 `frameIndex`。InstaTest 路线只提供色彩视频，不读取深度信息。
 
-- 输入：全景视频或等价 ERP 视频 + 初始框
-- 输出：逐帧目标框
-- 提交方式：将算法封装为 Docker 镜像后上传评测
-- 评分方式：精度、速度、方案答辩综合评估
+官方提交入口强制使用 RGB-only 配置：
 
-## 评测指标
+- `depth.enabled` 必须为 `false`。
+- `backendFusion.depthScoreWeight` 必须为 `0.0`。
+- 每个序列只创建一个真实 HiT-Small 会话。
 
-采用 OTB 协议，以 IoU 为基础计算：
+## 输出约定
 
-- `Success Rate@0.5`
-- `AUC`
+每个输入帧对应一行 BFoV 结果，顺序与输入帧一致：
 
-其中 `AUC` 是成功率曲线在 `t=0..1` 上的平均表现，`Success Rate@0.5` 表示 IoU 大于 0.5 的帧占比。
+```text
+clon,clat,fov_h,fov_v
+```
 
-## 数据来源
+结果使用角度制并保留三位小数。第 0 帧写入 `init.txt` 给定的初始 BFoV；无有效观测的帧写为：
 
-- AirSim360 仿真平台全景追踪数据
-- 真实场景全景追踪数据
+```text
+0.000,0.000,0.000,0.000
+```
 
-## 参考
+写入过程先生成 `.partial` 文件，帧数核对成功后再原子替换最终结果文件。
 
-- AirSim360: <https://insta360-research-team.github.io/AirSim360-website/>
-- 360VOT: <https://360vots.hkustvgd.com/>
-- 论文: <https://arxiv.org/abs/2307.14630>
+## 容器入口
 
-## 备注
+根目录 `track.py` 是无参数容器入口，从环境变量读取：
 
-比赛提交网站、训练集和评测接口将按官方开放安排提供。开放前可先基于公开数据完成方案验证。
+| 变量 | 默认值 |
+|---|---|
+| `DATASET_DIR` | `/mnt/dataset` |
+| `RESULT_DIR` | `/mnt/result` |
+| `CONFIG_PATH` | `/app/configs/RGBonly.yaml` |
+| `HIT_ROOT` | `/app/third_party/HiT` |
+
+可视化记录器不参与比赛结果计算。启用或关闭可视化不会改变 HiT 输入、控制器状态、候选分数或 BFoV 输出，因此不影响测试逻辑；启用后只会增加磁盘写入和运行时间。

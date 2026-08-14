@@ -1,11 +1,9 @@
-schemaVersion: 2
+schemaVersion: 1
 model:
   backend: pytorch
-  variant: HiT_Small
-  source: ../third_party/HiT
+  variant: hit_small
   weights: ../models/hit_small.pth
   precision: fp32
-  device: cuda
 geometry:
   viewWidthPx: 256
   viewHeightPx: 256
@@ -16,10 +14,19 @@ depth:
   enabled: false
   minValidRatio: 0.35
   maxDepthJumpRatio: 0.60
-  edge:
-    threshold: 0.20
-    widthPx: 2
-    minContrast: 160
+  colorization:
+    mode: relief
+    nearBrightness: 0.95
+    farBrightness: 0.20
+    reliefGain: 1.00
+    edgeGain: 0.35
+    smoothingKernel: 7
+backendFusion:
+  depthScoreWeight: 0.0
+fusionHead:
+  rgbInitWeight: 0.70
+  depthInitWeight: 0.20
+  contextInitWeight: 0.10
 decisionGate:
   motionScoreWeight: 0.25
   scaleScoreWeight: 0.15
