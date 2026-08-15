@@ -29,21 +29,26 @@ class DriverSmokeTest(unittest.TestCase):
             source.open(str(root))
             output = Path(directory) / "result.txt"
             openSink(runtime.sink, str(output))
+            timer = _BoundaryTimer()
 
             resultCount = runTracking(
-                source=source,
+                source=_CheckingSource(source, timer),
                 initialBox=BBoxXYWH(4.0, 4.0, 8.0, 8.0),
                 geometry=runtime.geometry,
                 controller=runtime.controller,
                 backend=runtime.backend,
-                sink=runtime.sink,
+                sink=_CheckingSink(runtime.sink, timer),
                 depthProcessor=runtime.depthProcessor,
-                recorder=runtime.recorder,
+                recorder=_CheckingRecorder(runtime.recorder, timer),
+                resultRecorder=_CheckingResultRecorder(timer),
+                processingTimer=timer,
             )
             finalizeSink(runtime.sink, resultCount)
 
             self.assertEqual(resultCount, 2)
             self.assertEqual(len(output.read_text(encoding="utf-8").splitlines()), 2)
+            self.assertEqual(timer.starts, timer.stops)
+            self.assertFalse(timer.active)
 
 
 class _TestHiTSession:
@@ -63,6 +68,87 @@ class _TestHiTSession:
 
     def close(self) -> None:
         pass
+
+
+class _BoundaryTimer:
+    def __init__(self) -> None:
+        self.active = False
+        self.starts = 0
+        self.stops = 0
+
+    def startProcessing(self) -> None:
+        if self.active:
+            raise AssertionError("processing interval started twice")
+        self.active = True
+        self.starts += 1
+
+    def stopProcessing(self) -> None:
+        if not self.active:
+            raise AssertionError("processing interval stopped while inactive")
+        self.active = False
+        self.stops += 1
+
+
+class _CheckingSource:
+    def __init__(self, source, timer: _BoundaryTimer) -> None:
+        self._source = source
+        self._timer = timer
+
+    def read(self):
+        if not self._timer.active:
+            raise AssertionError("frame read must be timed")
+        return self._source.read()
+
+
+class _CheckingSink:
+    def __init__(self, sink, timer: _BoundaryTimer) -> None:
+        self._sink = sink
+        self._timer = timer
+
+    def write(self, result) -> None:
+        if self._timer.active:
+            raise AssertionError("result sink must not be timed")
+        self._sink.write(result)
+
+
+class _CheckingRecorder:
+    def __init__(self, recorder, timer: _BoundaryTimer) -> None:
+        self._recorder = recorder
+        self._timer = timer
+
+    def _outsideProcessing(self) -> None:
+        if self._timer.active:
+            raise AssertionError("intermediate visualization must not be timed")
+
+    def recordLocalRgb(self, *args, **kwargs):
+        self._outsideProcessing()
+        return self._call("recordLocalRgb", *args, **kwargs)
+
+    def recordDepthRgb(self, *args, **kwargs):
+        self._outsideProcessing()
+        return self._call("recordDepthRgb", *args, **kwargs)
+
+    def recordBackendBoxes(self, *args, **kwargs):
+        self._outsideProcessing()
+        return self._call("recordBackendBoxes", *args, **kwargs)
+
+    def recordGeometryBoxes(self, *args, **kwargs):
+        self._outsideProcessing()
+        return self._call("recordGeometryBoxes", *args, **kwargs)
+
+    def _call(self, methodName, *args, **kwargs):
+        if self._recorder is None:
+            return ()
+        return getattr(self._recorder, methodName)(*args, **kwargs)
+
+
+class _CheckingResultRecorder:
+    def __init__(self, timer: _BoundaryTimer) -> None:
+        self._timer = timer
+
+    def record(self, *_args, **_kwargs) -> None:
+        if self._timer.active:
+            raise AssertionError("result visualization must not be timed")
 
 
 if __name__ == "__main__":

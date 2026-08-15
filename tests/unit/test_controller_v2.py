@@ -289,7 +289,7 @@ class ControllerV2Test(unittest.TestCase):
         assert controller.lastStateObservation is not None
         self.assertGreater(controller.lastStateObservation.selectedOverlapRate or 0.0, 0.70)
 
-    def testFirstRoundFusionKeepsWideErpUnionBox(self) -> None:
+    def testFirstRoundFusionUsesErpIntersectionBox(self) -> None:
         frame0 = FramePacket(
             SequenceId("wide-fusion"),
             FrameIndex(0),
@@ -312,9 +312,40 @@ class ControllerV2Test(unittest.TestCase):
             ),
         )
 
-        self.assertAlmostEqual(result.bbox.widthPx, 200.0)
-        self.assertGreater(result.bfov.horizontalFovRad, math.pi)
+        self.assertAlmostEqual(result.bbox.xPx, 80.0)
+        self.assertAlmostEqual(result.bbox.widthPx, 40.0)
+        self.assertLess(result.bfov.horizontalFovRad, math.pi)
         self.assertFalse(result.valid)
+
+    def testFusedResultUsesIntersectionAcrossErpSeam(self) -> None:
+        frame0 = FramePacket(
+            SequenceId("seam-intersection"),
+            FrameIndex(0),
+            0,
+            np.zeros((180, 360, 3), dtype=np.uint8),
+        )
+        controller = DepthAwareTrackController(self.geometry, self.config)
+        init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
+        controller.commitInitialization(init, None)
+        frame1 = FramePacket(
+            SequenceId("seam-intersection"),
+            FrameIndex(1),
+            1_000_000_000,
+            frame0.rgb,
+        )
+        plan = controller.beginFrame(frame1)
+
+        result = controller.update(
+            plan,
+            (
+                _boxedCandidate(0, 340.0, 0.95, widthPx=40.0),
+                _boxedCandidate(1, 350.0, 0.95, widthPx=30.0),
+            ),
+        )
+
+        self.assertAlmostEqual(result.bbox.xPx, 350.0)
+        self.assertAlmostEqual(result.bbox.widthPx, 30.0)
+        self.assertTrue(result.valid)
 
     def testUncertainUsesThirdRoundAndLostUsesCubemapThenLocalRound(self) -> None:
         frame0 = FramePacket(

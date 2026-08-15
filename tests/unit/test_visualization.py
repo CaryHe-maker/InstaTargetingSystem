@@ -36,22 +36,52 @@ from instatarget.visualization import (
 
 
 class VisualizationRecorderTest(unittest.TestCase):
-    def testTimeCounterWritesWholeRunDuration(self) -> None:
+    def testTimeCounterWritesProcessingDuration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "result" / "time.json"
             counter = TimeCounter()
             counter.start()
+            counter.startProcessing()
             time.sleep(0.001)
+            counter.stopProcessing()
 
             written = counter.stop(output)
 
             self.assertEqual(written, output)
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(payload["format"], "instatarget.time.v1")
+            self.assertEqual(payload["scope"], "tracking_processing")
             self.assertGreater(payload["elapsedNanoseconds"], 0)
             self.assertGreater(payload["elapsedSeconds"], 0.0)
             self.assertIn("startedAtUtc", payload)
             self.assertIn("finishedAtUtc", payload)
+
+    def testTimeCounterExcludesSurroundingWork(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "time.json"
+            counter = TimeCounter()
+            counter.start()
+            time.sleep(0.005)
+            counter.startProcessing()
+            time.sleep(0.001)
+            counter.stopProcessing()
+            time.sleep(0.005)
+
+            counter.stop(output)
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertLess(payload["elapsedMilliseconds"], 4.0)
+
+    def testTimeCounterReportsZeroWhenNoProcessingIntervalRan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "time.json"
+            counter = TimeCounter()
+            counter.start()
+
+            counter.stop(output)
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["elapsedNanoseconds"], 0)
 
     def testDisabledRecorderDoesNotCreateOutputRoot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

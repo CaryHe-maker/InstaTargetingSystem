@@ -31,6 +31,7 @@ class AppCommandsTest(unittest.TestCase):
             self.assertEqual(code, EXIT_CONFIG)
             payload = json.loads((resultRoot / "time.json").read_text(encoding="utf-8"))
             self.assertEqual(payload["format"], "instatarget.time.v1")
+            self.assertEqual(payload["scope"], "tracking_processing")
             self.assertGreaterEqual(payload["elapsedNanoseconds"], 0)
 
     def testRepositoryStyleAbsolutePathIsResolvedInsideRepository(self) -> None:

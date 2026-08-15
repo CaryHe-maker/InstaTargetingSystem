@@ -5,32 +5,27 @@ from instatarget.core.types import BBoxXYWH, LocalObservation
 
 
 class FusedScoreRemappingTest(unittest.TestCase):
-    def testMapsRequestedIntervalsContinuously(self) -> None:
+    def testBetaCalibrationHitsRequestedAnchors(self) -> None:
         expected = {
             0.00: 0.00,
-            0.30: 0.05,
-            0.60: 0.10,
-            0.70: 0.25,
-            0.80: 0.40,
-            0.85: 0.55,
-            0.90: 0.70,
-            0.925: 0.80,
-            0.95: 0.90,
-            0.975: 0.95,
+            0.80: 0.15,
+            0.90: 0.45,
+            0.95: 0.70,
             1.00: 1.00,
         }
 
         for rawScore, remappedScore in expected.items():
             with self.subTest(rawScore=rawScore):
-                self.assertAlmostEqual(remapFusedScore(rawScore), remappedScore)
+                self.assertAlmostEqual(remapFusedScore(rawScore), remappedScore, places=7)
 
-    def testPreservesOrderingWhileStretchingHighValueDifferences(self) -> None:
-        rawScores = (0.50, 0.60, 0.80, 0.85, 0.90, 0.95, 1.00)
+    def testLowersScoresAndStretchesTargetInterval(self) -> None:
+        rawScores = (0.60, 0.80, 0.85, 0.90, 0.925, 0.95, 0.975, 0.99)
         remapped = tuple(remapFusedScore(score) for score in rawScores)
+        oldRemapped = (0.10, 0.40, 0.55, 0.70, 0.80, 0.90, 0.95, 0.98)
 
         self.assertEqual(remapped, tuple(sorted(remapped)))
-        self.assertGreater(remapped[5] - remapped[2], rawScores[5] - rawScores[2])
-        self.assertLessEqual(remapFusedScore(0.60), 0.10)
+        self.assertTrue(all(new < old for new, old in zip(remapped, oldRemapped, strict=True)))
+        self.assertGreater(remapFusedScore(0.95) - remapFusedScore(0.80), 0.50)
 
     def testCreatesNewObservationsWithOnlyFusedScoreChanged(self) -> None:
         original = _observation(0.85)
@@ -39,7 +34,7 @@ class FusedScoreRemappingTest(unittest.TestCase):
 
         self.assertIsNot(remapped, original)
         self.assertEqual(original.fusedScore, 0.85)
-        self.assertAlmostEqual(remapped.fusedScore, 0.55)
+        self.assertAlmostEqual(remapped.fusedScore, 0.26728930, places=7)
         self.assertEqual(remapped.bbox, original.bbox)
         self.assertEqual(remapped.appearanceScore, original.appearanceScore)
 

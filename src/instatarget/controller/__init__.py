@@ -6,7 +6,7 @@ from instatarget.controller.depth_aware_track_controller import (
     TrackerControllerImpl,
 )
 from instatarget.controller.fused_score import (
-    FUSED_SCORE_REMAP_POINTS,
+    FUSED_SCORE_BETA_PARAMETERS,
     remapFusedScore,
     remapLocalObservationFusedScores,
 )
@@ -29,7 +29,7 @@ from instatarget.controller.template_policy import TemplateDecision, TemplatePol
 __all__ = [
     "DecisionGate",
     "DepthAwareTrackController",
-    "FUSED_SCORE_REMAP_POINTS",
+    "FUSED_SCORE_BETA_PARAMETERS",
     "FrameAggregate",
     "MotionEstimatorImpl",
     "PlannedView",

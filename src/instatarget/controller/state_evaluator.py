@@ -299,8 +299,10 @@ def _fuseCandidates(
         if first.viewId in used or second.viewId in used:
             continue
         used.update((first.viewId, second.viewId))
-        bbox = _minimalUnionBox(first.bbox, second.bbox, frameWidthPx, frameHeightPx)
-        bfov = _unionBfov(bbox, geometry, frameWidthPx, frameHeightPx)
+        bbox = _intersectionBox(first.bbox, second.bbox, frameWidthPx, frameHeightPx)
+        if bbox is None:
+            continue
+        bfov = _intersectionBfov(bbox, geometry, frameWidthPx, frameHeightPx)
         confidence = 1.0 - (
             (2.0 - second.fusedScore - first.fusedScore) * (1.0 - overlap) / 2.0
         )
@@ -328,7 +330,7 @@ def _fuseCandidates(
     return tuple(fused)
 
 
-def _unionBfov(
+def _intersectionBfov(
     bbox: BBoxXYWH,
     geometry: SphericalGeometry,
     frameWidthPx: int,
@@ -338,8 +340,8 @@ def _unionBfov(
     if horizontalSpan < pi:
         return geometry.bboxToBfov(bbox, frameWidthPx, frameHeightPx)
 
-    # A perspective BFoV cannot span 180 degrees. Keep the exact ERP union bbox and
-    # attach an equirectangular envelope so wide first-round FuseBoxes remain usable.
+    # A perspective BFoV cannot span 180 degrees. Keep the exact ERP intersection bbox
+    # and attach an equirectangular envelope for this unusual wide intersection.
     center = erpPixelToSphericalPoint(
         (bbox.xPx + bbox.widthPx / 2.0) % frameWidthPx,
         min(float(frameHeightPx), max(0.0, bbox.yPx + bbox.heightPx / 2.0)),
@@ -385,37 +387,50 @@ def _xSegments(box: BBoxXYWH, frameWidthPx: int) -> tuple[tuple[float, float], .
     return ((start, float(frameWidthPx)), (0.0, end - frameWidthPx))
 
 
-def _minimalUnionBox(
+def _intersectionBox(
     first: BBoxXYWH,
     second: BBoxXYWH,
     frameWidthPx: int,
     frameHeightPx: int,
-) -> BBoxXYWH:
-    segments = sorted((*_xSegments(first, frameWidthPx), *_xSegments(second, frameWidthPx)))
+) -> BBoxXYWH | None:
+    intersections = sorted(
+        (
+            max(firstStart, secondStart),
+            min(firstEnd, secondEnd),
+        )
+        for firstStart, firstEnd in _xSegments(first, frameWidthPx)
+        for secondStart, secondEnd in _xSegments(second, frameWidthPx)
+        if min(firstEnd, secondEnd) > max(firstStart, secondStart)
+    )
+    if not intersections:
+        return None
+
+    # A circular intersection can be split at the ERP seam. Merge only seam-adjacent
+    # pieces; if two large arcs intersect in disconnected pieces, retain the largest
+    # connected component because BBoxXYWH can represent one region only.
     merged: list[list[float]] = []
-    for start, end in segments:
+    for start, end in intersections:
         if merged and start <= merged[-1][1]:
             merged[-1][1] = max(merged[-1][1], end)
         else:
             merged.append([start, end])
-    gaps: list[tuple[float, float]] = []
-    for index, (_, end) in enumerate(merged):
-        nextStart = merged[(index + 1) % len(merged)][0]
-        if index == len(merged) - 1:
-            nextStart += frameWidthPx
-        gaps.append((max(0.0, nextStart - end), nextStart % frameWidthPx))
-    largestGap, coverStart = max(gaps, key=lambda item: item[0])
-    width = max(1e-6, frameWidthPx - largestGap)
-    yStart = max(0.0, min(first.yPx, second.yPx))
-    yEnd = min(
-        float(frameHeightPx),
-        max(first.yPx + first.heightPx, second.yPx + second.heightPx),
-    )
+    if len(merged) > 1 and merged[0][0] == 0.0 and merged[-1][1] == frameWidthPx:
+        seamStart = merged[-1][0]
+        seamWidth = merged[0][1] + frameWidthPx - seamStart
+        horizontalStart, horizontalWidth = seamStart, seamWidth
+    else:
+        component = max(merged, key=lambda item: item[1] - item[0])
+        horizontalStart = component[0]
+        horizontalWidth = component[1] - component[0]
+    yStart = max(0.0, first.yPx, second.yPx)
+    yEnd = min(float(frameHeightPx), first.yPx + first.heightPx, second.yPx + second.heightPx)
+    if yEnd <= yStart or horizontalWidth <= 0.0:
+        return None
     return BBoxXYWH(
-        xPx=coverStart,
+        xPx=horizontalStart,
         yPx=yStart,
-        widthPx=width,
-        heightPx=max(1e-6, yEnd - yStart),
+        widthPx=horizontalWidth,
+        heightPx=yEnd - yStart,
     )
 
 
