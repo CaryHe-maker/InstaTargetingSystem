@@ -6,7 +6,7 @@ from instatarget.controller.depth_aware_track_controller import (
     TrackerControllerImpl,
 )
 from instatarget.controller.fused_score import (
-    FUSED_SCORE_REMAP_POINTS,
+    FUSED_SCORE_BETA_PARAMETERS,
     remapFusedScore,
     remapLocalObservationFusedScores,
 )
@@ -15,7 +15,9 @@ from instatarget.controller.recovery_planner import PlannedView, RecoveryPlanner
 from instatarget.controller.state_evaluator import StateEvaluator
 from instatarget.controller.state_machine import StateUpdate, TrackStateMachine
 from instatarget.controller.state_model import (
+    EvaluatedCandidate,
     EvidenceLevel,
+    MeasurementEvidence,
     MotionPrediction,
     RecoveryMemory,
     StateInstance,
@@ -27,7 +29,7 @@ from instatarget.controller.template_policy import TemplateDecision, TemplatePol
 __all__ = [
     "DecisionGate",
     "DepthAwareTrackController",
-    "FUSED_SCORE_REMAP_POINTS",
+    "FUSED_SCORE_BETA_PARAMETERS",
     "FrameAggregate",
     "MotionEstimatorImpl",
     "PlannedView",
@@ -39,6 +41,8 @@ __all__ = [
     "StateInstance",
     "StateObservation",
     "EvidenceLevel",
+    "EvaluatedCandidate",
+    "MeasurementEvidence",
     "MotionPrediction",
     "RecoveryMemory",
     "SphericalMotionEstimator",

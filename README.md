@@ -24,11 +24,11 @@ getInstanceID /data/airsim360/nyc_sample /artifacts/easy_user/nyc_sample/Instanc
 
 ## 文档
 
-- [文档索引](docs/README.md)
-- [系统设计](docs/Design.md)
-- [HiT 运行时](docs/HiTRuntime.md)
-- [比赛提交](docs/CompetitionSubmission.md)
-- [环境说明](docs/environment.md)
-- [验证记录](docs/Verification.md)
+- [文档索引](docs/Overall/README.md)
+- [系统设计](docs/Overall/structure.md)
+- [HiT 运行时](docs/Tracker/structure.md)
+- [比赛提交](docs/Competition/structure.md)
+- [运行环境与编排](docs/Runtime/structure.md)
+- [验证与评估](docs/Evaluation/structure.md)
 
 `docs/Prepare/` 保存设计讨论材料，不作为交付实现规范。

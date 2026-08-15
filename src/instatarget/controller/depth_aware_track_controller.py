@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from math import asin, atan2
+from math import asin, atan2, tan
 from typing import TYPE_CHECKING
 
 from instatarget.controller.motion_estimator import SphericalMotionEstimator
@@ -16,6 +16,7 @@ from instatarget.controller.state_model import (
     AttemptKind,
     AttemptRecord,
     FrameTransaction,
+    MeasurementEvidence,
     MotionPrediction,
     RecoveryMemory,
     StateInstance,
@@ -58,7 +59,7 @@ from instatarget.core.types import (
     TrackStatus,
     ViewSpec,
 )
-from instatarget.geometry.projection_math import makeSphericalPoint
+from instatarget.geometry.projection_math import fovToFocalLengthPx, makeSphericalPoint
 
 if TYPE_CHECKING:
     from instatarget.core.protocols import MotionEstimator
@@ -134,6 +135,7 @@ class DepthAwareTrackController(TrackController):
         self._modeAgeFrames = 0
         self._weakFrames = 0
         self._recoveryFrames = 0
+        self._recoveryConfirmFrames = 0
         self._stableFrames = 0
         self._reacquireCooldown = 0
         self._lastFrame: FramePacket | None = None
@@ -172,23 +174,21 @@ class DepthAwareTrackController(TrackController):
         if int(frame.frameIndex) != 0:
             raise ProtocolError("initialization must use frameIndex 0")
         objectBfov = self._geometry.bboxToBfov(initialBox, frame.rgb.shape[1], frame.rgb.shape[0])
-        templateBfov = self._planner.contextBfov(
-            objectBfov.center,
-            frame.rgb.shape[1],
-            frame.rgb.shape[0],
-            initialBox,
-            initialBox,
+        templateBfov = BFoV(
+            center=objectBfov.center,
+            horizontalFovRad=self._geometryConfig.maxFovRad,
+            verticalFovRad=self._geometryConfig.maxFovRad,
         )
         plan = InitializationPlan(
             sequenceId=frame.sequenceId,
             frameIndex=FrameIndex(0),
             stateRevision=0,
             templateView=self._makeViewSpec(0, templateBfov),
-            templateBox=_centerBoxInView(
+            templateBox=_boxForBfov(
                 self._geometryConfig.viewWidthPx,
                 self._geometryConfig.viewHeightPx,
-                self._trackingConfig.contextScale,
-                self._trackingConfig.contextMarginRatio,
+                templateBfov,
+                objectBfov,
             ),
         )
         self._initialPlan = plan
@@ -284,6 +284,7 @@ class DepthAwareTrackController(TrackController):
             transactionId=self._transactionId,
             frame=frame,
             state=state,
+            startingMode=self._mode,
             remainingViews=self._trackingConfig.maxViewsPerFrameTotal,
             recoveryMemory=deepcopy(self._recovery),
         )
@@ -314,7 +315,6 @@ class DepthAwareTrackController(TrackController):
             plan,
             observations,
             allowEscalation=False,
-            legacyCompatibility=True,
         )
         if isinstance(step, MoreViewsRequired):
             raise ProtocolError("legacy update path cannot return a second search plan")
@@ -326,7 +326,6 @@ class DepthAwareTrackController(TrackController):
         observations: Sequence[ProjectedObservation],
         *,
         allowEscalation: bool,
-        legacyCompatibility: bool = False,
     ) -> MoreViewsRequired | FrameCommitted:
         self._requireInitialized()
         planned = self._planned
@@ -356,22 +355,6 @@ class DepthAwareTrackController(TrackController):
             frameWidthPx=planned.frame.rgb.shape[1],
             frameHeightPx=planned.frame.rgb.shape[0],
         )
-        decision = self._stateMachine.transition(
-            planned.state.mode,
-            evaluation,
-            self._weakFrames,
-            self._recoveryFrames,
-        )
-        if (
-            legacyCompatibility
-            and planned.state.mode is TrackMode.TRACKING
-            and decision.nextMode is TrackMode.RECOVERING
-        ):
-            decision = replace(
-                decision,
-                nextMode=TrackMode.UNCERTAIN,
-                reason=TransitionReason.HARD_MISS,
-            )
         transaction.attempts.append(
             AttemptRecord(
                 kind=AttemptKind.PRIMARY if plan.attemptIndex == 0 else AttemptKind.ESCALATION,
@@ -381,9 +364,9 @@ class DepthAwareTrackController(TrackController):
                 evaluation=evaluation,
             )
         )
-        if self._shouldEscalate(decision.action, transaction, allowEscalation):
+        transaction.completedAttempts += 1
+        if self._shouldEscalate(evaluation, transaction, allowEscalation):
             transaction.attemptIndex += 1
-            transaction.escalationUsed = True
             self._planned = None
             nextPlan = self._buildAttempt(
                 frame=planned.frame,
@@ -395,6 +378,12 @@ class DepthAwareTrackController(TrackController):
                 viewIdStart=max((view.viewId for view in plan.views), default=-1) + 1,
             )
             return MoreViewsRequired(nextPlan)
+        decision = self._stateMachine.transition(
+            planned.state.mode,
+            evaluation,
+            self._weakFrames,
+            self._recoveryConfirmFrames,
+        )
         result = self._commit(planned, evaluation, decision)
         self._lastStateObservation = evaluation
         self._lastTransition = decision
@@ -414,7 +403,7 @@ class DepthAwareTrackController(TrackController):
         transaction = self._transaction
         if transaction is None:
             raise ProtocolError("attempt requires an active frame transaction")
-        status = _publicStatus(state.mode)
+        status = _publicStatus(transaction.startingMode)
         views = self._planner.buildViews(
             int(frame.frameIndex),
             frame.rgb.shape[1],
@@ -423,7 +412,7 @@ class DepthAwareTrackController(TrackController):
             self._currentBox,
             self._currentBfov,
             prediction.motionState,
-            status if attemptIndex == 0 else TrackStatus.RECOVERING,
+            status,
             searchSeedCenter=searchSeed,
             attemptIndex=attemptIndex,
             viewIdStart=viewIdStart,
@@ -470,15 +459,14 @@ class DepthAwareTrackController(TrackController):
 
     def _shouldEscalate(
         self,
-        action: str,
+        evaluation: StateObservation,
         transaction: FrameTransaction,
         allowEscalation: bool,
     ) -> bool:
         return (
-            action == "ESCALATE"
+            evaluation.escalationRecommended
             and allowEscalation
             and self._trackingConfig.sameFrameEscalationEnabled
-            and not transaction.escalationUsed
             and transaction.attemptIndex + 1 < self._trackingConfig.maxAttemptsPerFrame
             and transaction.remainingViews > 0
         )
@@ -486,13 +474,22 @@ class DepthAwareTrackController(TrackController):
     def _commit(self, planned, evaluation, decision) -> TrackResult:
         if self._transaction is not None and self._transaction.recoveryMemory is not None:
             self._recovery = self._transaction.recoveryMemory
-        accepted = decision.acceptMeasurement and evaluation.measuredBfov is not None
+        hasCandidate = evaluation.bestCandidate is not None
+        accepted = decision.acceptMeasurement and hasCandidate
+        outputBfov = evaluation.proposedOutputBfov
+        outputBox = evaluation.proposedOutputBbox
+        outputDepth = evaluation.depthSummary if hasCandidate else self._currentDepth
+        outputConfidence = (
+            evaluation.stateScore
+            if hasCandidate
+            else max(0.0, planned.prediction.confidence * 0.5)
+        )
         if accepted:
+            assert evaluation.measuredBfov is not None
+            assert evaluation.measuredBbox is not None
             outputBfov = evaluation.measuredBfov
             outputBox = evaluation.measuredBbox
             assert outputBox is not None
-            outputDepth = evaluation.depthSummary
-            outputConfidence = evaluation.stateScore
             if decision.resetMotionHistory and hasattr(self._motion, "resetFromMeasurement"):
                 self._motion.resetFromMeasurement(  # type: ignore[attr-defined]
                     outputBfov.center,
@@ -512,11 +509,9 @@ class DepthAwareTrackController(TrackController):
             self._currentBfov = outputBfov
             self._currentDepth = outputDepth
         else:
-            outputBfov = evaluation.proposedOutputBfov
-            outputBox = evaluation.proposedOutputBbox
-            outputDepth = self._currentDepth
-            outputConfidence = max(0.0, planned.prediction.confidence * 0.5)
-            source = ResultSource.MOTION_PREDICTED
+            source = (
+                ResultSource.OBSERVED_WEAK_BLEND if hasCandidate else ResultSource.MOTION_PREDICTED
+            )
         oldMode = self._mode
         self._mode = decision.nextMode
         self._entryReason = decision.reason
@@ -528,10 +523,19 @@ class DepthAwareTrackController(TrackController):
         else:
             self._stableFrames = 0
             if self._mode is TrackMode.UNCERTAIN:
-                self._weakFrames += 1
+                self._weakFrames = 1 if oldMode is TrackMode.TRACKING else self._weakFrames + 1
             elif self._mode in {TrackMode.RECOVERING, TrackMode.LOST}:
                 self._recoveryFrames += 1
                 self._recovery.framesSpent += 1
+        if self._mode is TrackMode.RECOVERING:
+            if evaluation.evidence is MeasurementEvidence.RELIABLE_SINGLE:
+                self._recoveryConfirmFrames = (
+                    1 if oldMode is TrackMode.LOST else self._recoveryConfirmFrames + 1
+                )
+            else:
+                self._recoveryConfirmFrames = 0
+        else:
+            self._recoveryConfirmFrames = 0
         if (
             oldMode not in {TrackMode.RECOVERING, TrackMode.LOST}
             and self._mode is TrackMode.RECOVERING
@@ -650,14 +654,16 @@ def _publicStatus(mode: TrackMode) -> TrackStatus:
     return TrackStatus.TRACKING
 
 
-def _centerBoxInView(
+def _boxForBfov(
     viewWidthPx: int,
     viewHeightPx: int,
-    contextScale: float,
-    contextMarginRatio: float,
+    viewBfov: BFoV,
+    objectBfov: BFoV,
 ) -> BBoxXYWH:
-    width = float(viewWidthPx) / (contextScale * (1.0 + contextMarginRatio))
-    height = float(viewHeightPx) / (contextScale * (1.0 + contextMarginRatio))
+    focalX = fovToFocalLengthPx(viewBfov.horizontalFovRad, viewWidthPx)
+    focalY = fovToFocalLengthPx(viewBfov.verticalFovRad, viewHeightPx)
+    width = 2.0 * focalX * tan(objectBfov.horizontalFovRad / 2.0)
+    height = 2.0 * focalY * tan(objectBfov.verticalFovRad / 2.0)
     width = max(2.0, min(float(viewWidthPx), width))
     height = max(2.0, min(float(viewHeightPx), height))
     return BBoxXYWH(

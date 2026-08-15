@@ -1,5 +1,7 @@
 # 第五阶段修改蓝图：DTC 与控制层建议
 
+> **历史文档，已被取代。** 当前 controller 的实现依据是 [`../StateChangePlan.md`](../StateChangePlan.md) 和 [`../modules/controller.md`](../modules/controller.md)。本文中的 guard triplet、自适应 FOV、环搜及旧视图预算仅用于追溯，不得作为当前修改依据。
+
 > 本文是第五阶段（控制层 DTC）的实现蓝图，不是对现有代码的重写授权。它以当前仓库已经落地的 `core`、`geometry`、`tracker` 和 `visualization` 为基线，吸收 `docs/Suggestions.md` 中的要求，并把必须的接口补充、算法边界和验收条件明确下来。
 >
 > 优先级约定：**必须**表示没有该项就无法形成可靠的第五阶段闭环；**建议**表示用于提升效果或可维护性；**可选**表示不应阻塞首个可运行版本。

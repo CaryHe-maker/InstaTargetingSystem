@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from instatarget.tracker.hit_backend import HiTSession
     from instatarget.visualization.recorder import VisualizationRecorder
     from instatarget.visualization.result import ResultVisualizationRecorder
+    from instatarget.visualization.time_counter import TimeCounter
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,17 +102,22 @@ def runTracking(
     depthProcessor: DepthProcessor | None = None,
     recorder: VisualizationRecorder | None = None,
     resultRecorder: ResultVisualizationRecorder | None = None,
+    processingTimer: TimeCounter | None = None,
 ) -> int:
     """Run the sequential tracking pipeline and publish one result per frame."""
     try:
-        frame0 = _requireFrame(source.read())
-        initPlan = controller.buildInitialization(frame0, initialBox)
-        templateView = geometry.cropViews(frame0, [initPlan.templateView])[0]
-        backend.initialize(templateView, initPlan.templateBox)
-        initDepth = (
-            depthProcessor.summarize(frame0, initialBox) if depthProcessor is not None else None
-        )
-        initialResult = controller.commitInitialization(initPlan, initDepth)
+        _startProcessing(processingTimer)
+        try:
+            frame0 = _requireFrame(source.read())
+            initPlan = controller.buildInitialization(frame0, initialBox)
+            templateView = geometry.cropViews(frame0, [initPlan.templateView])[0]
+            backend.initialize(templateView, initPlan.templateBox)
+            initDepth = (
+                depthProcessor.summarize(frame0, initialBox) if depthProcessor is not None else None
+            )
+            initialResult = controller.commitInitialization(initPlan, initDepth)
+        finally:
+            _stopProcessing(processingTimer)
         sink.write(initialResult)
         if resultRecorder is not None:
             resultRecorder.record(frame0, initialResult, stateScore=None)
@@ -124,44 +130,51 @@ def runTracking(
                 )
 
         while True:
-            frame = source.read()
+            _startProcessing(processingTimer)
+            try:
+                frame = source.read()
+                if frame is not None:
+                    plan = controller.beginFrame(frame)
+                    visualizationBatches: list[
+                        tuple[
+                            tuple[LocalView, ...],
+                            tuple[LocalObservation, ...],
+                            tuple[ProjectedObservation, ...],
+                        ]
+                    ] = []
+                    while True:
+                        views = tuple(geometry.cropViews(frame, plan.views))
+                        rawObservations = tuple(backend.infer(views, plan.templateCommand))
+                        observations = remapLocalObservationFusedScores(rawObservations)
+                        projected = tuple(
+                            _projectObservation(
+                                frame=frame,
+                                view=view,
+                                observation=observation,
+                                predictedMotion=plan.predictedMotion,
+                                geometry=geometry,
+                            )
+                            for view, observation in zip(views, observations, strict=True)
+                        )
+                        visualizationBatches.append((views, observations, projected))
+                        step = controller.consume(plan, projected)
+                        if isinstance(step, MoreViewsRequired):
+                            plan = step.plan
+                            continue
+                        result = step.result
+                        break
+            finally:
+                _stopProcessing(processingTimer)
             if frame is None:
                 break
-            plan = controller.beginFrame(frame)
-            depthRecorded = False
-            while True:
-                views = tuple(geometry.cropViews(frame, plan.views))
-                if (
-                    not depthRecorded
-                    and recorder is not None
-                    and depthProcessor is not None
-                    and frame.depth is not None
-                ):
+            if recorder is not None:
+                if depthProcessor is not None and frame.depth is not None:
                     depthRgb = depthProcessor.preprocess(frame.depth).depthRgb
                     recorder.recordDepthRgb(frame, {0: depthRgb})
-                    depthRecorded = True
-                rawObservations = tuple(backend.infer(views, plan.templateCommand))
-                observations = remapLocalObservationFusedScores(rawObservations)
-                projected = tuple(
-                    _projectObservation(
-                        frame=frame,
-                        view=view,
-                        observation=observation,
-                        predictedMotion=plan.predictedMotion,
-                        geometry=geometry,
-                    )
-                    for view, observation in zip(views, observations, strict=True)
-                )
-                if recorder is not None:
+                for views, observations, projected in visualizationBatches:
                     recorder.recordLocalRgb(frame, views)
                     recorder.recordBackendBoxes(frame, views, observations)
                     recorder.recordGeometryBoxes(frame, projected)
-                step = controller.consume(plan, projected)
-                if isinstance(step, MoreViewsRequired):
-                    plan = step.plan
-                    continue
-                result = step.result
-                break
             sink.write(result)
             if resultRecorder is not None:
                 stateObservation = controller.lastStateObservation
@@ -246,6 +259,16 @@ def _requireFrame(frame: FramePacket | None) -> FramePacket:
     if frame is None:
         raise DecodeError("input source is empty")
     return frame
+
+
+def _startProcessing(timer: TimeCounter | None) -> None:
+    if timer is not None:
+        timer.startProcessing()
+
+
+def _stopProcessing(timer: TimeCounter | None) -> None:
+    if timer is not None:
+        timer.stopProcessing()
 
 
 __all__ = [

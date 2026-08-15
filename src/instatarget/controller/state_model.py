@@ -41,10 +41,18 @@ class EvidenceLevel(Enum):
     REACQUIRED = auto()
 
 
+class MeasurementEvidence(Enum):
+    RELIABLE_FUSED = auto()
+    RELIABLE_SINGLE = auto()
+    WEAK = auto()
+    MISSING = auto()
+
+
 class EvaluationReason(StrEnum):
     NO_ELIGIBLE_CLUSTER = "no_eligible_cluster"
     INSUFFICIENT_VIEW_SUPPORT = "insufficient_view_support"
     BELOW_UNCERTAIN_THRESHOLD = "below_uncertain_threshold"
+    SOURCE_CONFIDENCE_BELOW_THRESHOLD = "source_confidence_below_threshold"
 
 
 class TransitionReason(Enum):
@@ -145,6 +153,21 @@ class StateInstance:
 
 
 @dataclass(frozen=True, slots=True)
+class EvaluatedCandidate:
+    bfov: BFoV
+    bbox: BBoxXYWH
+    confidence: float
+    sourceViewIds: tuple[int, ...]
+    fused: bool
+    overlapRate: float | None
+    minSourceConfidence: float | None
+    sourceConfidencePassed: bool
+    representativeViewId: int
+    representativeLocalBox: BBoxXYWH | None
+    depthSummary: DepthSummary | None
+
+
+@dataclass(frozen=True, slots=True)
 class StateObservation:
     sequenceId: SequenceId
     frameIndex: FrameIndex
@@ -153,6 +176,12 @@ class StateObservation:
     stateId: int
     attemptIndex: int
     evaluatedMode: TrackMode
+    isFinalAttempt: bool
+    successRate: float
+    fusionThreshold: float
+    overlapThreshold: float
+    fusionSourceMinConfidence: float
+    bestCandidate: EvaluatedCandidate | None
     predictedCenter: SphericalPoint
     searchSeedCenter: SphericalPoint
     measuredBfov: BFoV | None
@@ -167,6 +196,12 @@ class StateObservation:
     sourceViewIds: tuple[int, ...]
     representativeViewId: int | None
     representativeLocalBox: BBoxXYWH | None
+    selectedIsFused: bool
+    selectedOverlapRate: float | None
+    selectedMinSourceConfidence: float | None
+    selectedSourceConfidencePassed: bool
+    fusedCandidateCount: int
+    outputEligible: bool
     supportViewCount: int
     backendScore: float
     motionScore: float
@@ -175,7 +210,7 @@ class StateObservation:
     supportScore: float
     agreementScore: float
     stateScore: float
-    evidence: EvidenceLevel
+    evidence: MeasurementEvidence
     hardGatePassed: bool
     supported: bool
     escalationRecommended: bool
@@ -229,8 +264,9 @@ class FrameTransaction:
     transactionId: int
     frame: object
     state: StateInstance
+    startingMode: TrackMode
     attemptIndex: int = 0
-    escalationUsed: bool = False
+    completedAttempts: int = 0
     remainingViews: int = 0
     attempts: list[AttemptRecord] = field(default_factory=list)
     recoveryMemory: RecoveryMemory | None = None
@@ -254,9 +290,11 @@ __all__ = [
     "AttemptKind",
     "AttemptRecord",
     "ConfirmedTargetState",
+    "EvaluatedCandidate",
     "EvidenceLevel",
     "EvaluationReason",
     "FrameTransaction",
+    "MeasurementEvidence",
     "MotionPrediction",
     "MotionSample",
     "RecoveryMemory",

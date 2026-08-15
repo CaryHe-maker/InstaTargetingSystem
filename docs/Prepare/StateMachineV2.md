@@ -1,6 +1,8 @@
 # InstaTargetingSystem 状态机与控制器重构蓝图 V2
 
-> 本文最初是 `StateMachine.md` 的评审和重构蓝图，现已作为 Controller V2 的实现规范。
+> **历史文档，已停止作为实现依据。** 当前已实现的固定 120° 视域、按状态区分的 2/3/3/2 轮路线、双框 FuseBox、四级测量证据及状态转换规则，以 [`../StateChangePlan.md`](../StateChangePlan.md) 为唯一执行规范。本文保留用于追溯早期设计，其中的自适应 FOV、五视图、恢复环搜和旧轮次规则不得用于修改当前实现。
+
+> 本文最初是 `StateMachine.md` 的评审和 Controller V2 重构蓝图，以下内容记录当时方案。
 > 2026-08-11 已落地：状态实例、帧事务、`StateEvaluator`、可靠测量滑动窗口、状态相关五视图、
 > 恢复记忆、六面 cube-map、同帧最多一次升级、结果来源和独立 backend revision。
 > 本文中的“当前缺口/后续修改”章节保留设计审计价值；实际交付状态以第 13 节标记为准。

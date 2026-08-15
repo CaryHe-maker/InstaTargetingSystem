@@ -1,40 +1,39 @@
-"""Monotonic fused-score contrast stretching before state evaluation."""
+"""Monotonic beta calibration for backend fused scores."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
+from math import exp, isfinite, log, log1p
 
+from instatarget.core.errors import ProtocolError
 from instatarget.core.types import LocalObservation
 
-FUSED_SCORE_REMAP_POINTS = (
-    (0.00, 0.00),
-    (0.60, 0.10),
-    (0.80, 0.40),
-    (0.90, 0.70),
-    (0.95, 0.90),
-    (1.00, 1.00),
-)
+# Parameters solve the beta-calibration model for these anchors:
+# 0.80 -> 0.15, 0.90 -> 0.45, 0.95 -> 0.70.
+FUSED_SCORE_BETA_PARAMETERS = (7.62702021, 0.91697230, -1.50849067)
 
 
 def remapFusedScore(score: float) -> float:
-    """Stretch a probability using a continuous monotonic piecewise-linear curve."""
+    """Calibrate a backend probability with a monotonic beta map."""
     value = float(score)
-    for (inputLow, outputLow), (inputHigh, outputHigh) in zip(
-        FUSED_SCORE_REMAP_POINTS,
-        FUSED_SCORE_REMAP_POINTS[1:],
-        strict=True,
-    ):
-        if value <= inputHigh:
-            ratio = (value - inputLow) / (inputHigh - inputLow)
-            return outputLow + ratio * (outputHigh - outputLow)
-    return 1.0
+    if not isfinite(value) or not 0.0 <= value <= 1.0:
+        raise ProtocolError(f"backend fusedScore must be in [0, 1], actual={score}")
+    if value == 0.0 or value == 1.0:
+        return value
+
+    alpha, beta, intercept = FUSED_SCORE_BETA_PARAMETERS
+    calibratedLogit = intercept + alpha * log(value) - beta * log1p(-value)
+    if calibratedLogit >= 0.0:
+        return 1.0 / (1.0 + exp(-calibratedLogit))
+    exponential = exp(calibratedLogit)
+    return exponential / (1.0 + exponential)
 
 
 def remapLocalObservationFusedScores(
     observations: Sequence[LocalObservation],
 ) -> tuple[LocalObservation, ...]:
-    """Return immutable observation copies carrying contrast-stretched fused scores."""
+    """Return immutable observations carrying beta-calibrated fused scores."""
     return tuple(
         replace(observation, fusedScore=remapFusedScore(observation.fusedScore))
         for observation in observations
@@ -42,7 +41,7 @@ def remapLocalObservationFusedScores(
 
 
 __all__ = [
-    "FUSED_SCORE_REMAP_POINTS",
+    "FUSED_SCORE_BETA_PARAMETERS",
     "remapFusedScore",
     "remapLocalObservationFusedScores",
 ]

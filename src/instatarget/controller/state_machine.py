@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from instatarget.controller.state_model import (
     EvidenceLevel,
+    MeasurementEvidence,
     StateObservation,
     TrackMode,
     TransitionDecision,
@@ -60,50 +61,52 @@ class TrackStateMachine:
         mode: TrackMode,
         observation: StateObservation,
         uncertainFrames: int,
-        recoveryFrames: int,
+        recoveryConfirmFrames: int,
     ) -> TransitionDecision:
-        """Reduce one evaluated attempt without mutating controller memory."""
+        """Reduce one final frame observation without mutating controller memory."""
         if mode is TrackMode.INIT:
             return TransitionDecision(
                 "COMMIT", TrackMode.TRACKING, TransitionReason.INITIALIZED, True
             )
         evidence = observation.evidence
+        reliable = {
+            MeasurementEvidence.RELIABLE_FUSED,
+            MeasurementEvidence.RELIABLE_SINGLE,
+        }
         if mode is TrackMode.TRACKING:
-            if evidence is EvidenceLevel.CONFIRMED:
+            if evidence in reliable:
                 return TransitionDecision(
                     "COMMIT", TrackMode.TRACKING, TransitionReason.RELIABLE_MEASUREMENT, True
-                )
-            if evidence is EvidenceLevel.WEAK and observation.escalationRecommended:
-                return TransitionDecision(
-                    "ESCALATE", TrackMode.UNCERTAIN, TransitionReason.WEAK_MEASUREMENT, False
-                )
-            if evidence is EvidenceLevel.REJECTED and observation.escalationRecommended:
-                return TransitionDecision(
-                    "ESCALATE", TrackMode.RECOVERING, TransitionReason.HARD_MISS, False
                 )
             return TransitionDecision(
-                "COMMIT", TrackMode.RECOVERING, TransitionReason.HARD_MISS, False
+                "COMMIT",
+                TrackMode.UNCERTAIN,
+                (
+                    TransitionReason.HARD_MISS
+                    if evidence is MeasurementEvidence.MISSING
+                    else TransitionReason.WEAK_MEASUREMENT
+                ),
+                False,
             )
         if mode is TrackMode.UNCERTAIN:
-            if evidence in {EvidenceLevel.CONFIRMED, EvidenceLevel.REACQUIRED}:
+            if evidence in reliable:
                 return TransitionDecision(
                     "COMMIT", TrackMode.TRACKING, TransitionReason.RELIABLE_MEASUREMENT, True
                 )
-            if (
-                evidence is EvidenceLevel.WEAK
-                and uncertainFrames + 1 < self._config.uncertainPatience
+            if evidence is MeasurementEvidence.WEAK and (
+                uncertainFrames + 1 < self._config.uncertainPatience
             ):
                 return TransitionDecision(
-                    "ESCALATE" if observation.escalationRecommended else "COMMIT",
+                    "COMMIT",
                     TrackMode.UNCERTAIN,
                     TransitionReason.WEAK_MEASUREMENT,
                     False,
                 )
             return TransitionDecision(
-                "COMMIT", TrackMode.RECOVERING, TransitionReason.PATIENCE_EXHAUSTED, False
+                "COMMIT", TrackMode.LOST, TransitionReason.PATIENCE_EXHAUSTED, False
             )
         if mode is TrackMode.RECOVERING:
-            if evidence is EvidenceLevel.REACQUIRED:
+            if evidence is MeasurementEvidence.RELIABLE_FUSED:
                 return TransitionDecision(
                     "COMMIT",
                     TrackMode.TRACKING,
@@ -112,22 +115,27 @@ class TrackStateMachine:
                     resetMotionHistory=True,
                     resetRecoveryEpoch=True,
                 )
-            if evidence is EvidenceLevel.CONFIRMED:
+            if evidence is MeasurementEvidence.RELIABLE_SINGLE:
+                if recoveryConfirmFrames + 1 >= self._config.recoverConfirmFrames:
+                    return TransitionDecision(
+                        "COMMIT",
+                        TrackMode.TRACKING,
+                        TransitionReason.REACQUIRED,
+                        True,
+                        resetMotionHistory=True,
+                        resetRecoveryEpoch=True,
+                    )
                 return TransitionDecision(
-                    "COMMIT", TrackMode.UNCERTAIN, TransitionReason.WEAK_MEASUREMENT, False
-                )
-            if recoveryFrames + 1 >= self._config.maxRecoveryFrames:
-                return TransitionDecision(
-                    "COMMIT", TrackMode.LOST, TransitionReason.RECOVERY_EXHAUSTED, False
+                    "COMMIT", TrackMode.RECOVERING, TransitionReason.RECOVERY_PROGRESS, False
                 )
             return TransitionDecision(
-                "ESCALATE" if observation.escalationRecommended else "COMMIT",
-                TrackMode.RECOVERING,
-                TransitionReason.RECOVERY_PROGRESS,
+                "COMMIT",
+                TrackMode.LOST,
+                TransitionReason.HARD_MISS,
                 False,
             )
         if mode is TrackMode.LOST:
-            if evidence is EvidenceLevel.REACQUIRED:
+            if evidence is MeasurementEvidence.RELIABLE_FUSED:
                 return TransitionDecision(
                     "COMMIT",
                     TrackMode.TRACKING,
@@ -136,7 +144,7 @@ class TrackStateMachine:
                     resetMotionHistory=True,
                     resetRecoveryEpoch=True,
                 )
-            if evidence in {EvidenceLevel.CONFIRMED, EvidenceLevel.WEAK}:
+            if evidence is MeasurementEvidence.RELIABLE_SINGLE:
                 return TransitionDecision(
                     "COMMIT", TrackMode.RECOVERING, TransitionReason.RECOVERY_PROGRESS, False
                 )
