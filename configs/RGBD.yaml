@@ -35,6 +35,10 @@ evaluator:
   supportWeight: 0.25
   agreementWeight: 0.25
   minReacquireViews: 2
+  successRate: 0.90
+  firstRoundFusionOverlap: 0.30
+  overlapThreshold: 0.70
+  fusionSourceMinConfidence: 0.80
 motion:
   minSamplesForVelocity: 2
   maxTangentSpanRad: 1.20
@@ -58,10 +62,11 @@ tracking:
   guardYawStepDeg: 120.0
   minViewsForCommit: 2
   sameFrameEscalationEnabled: true
-  maxAttemptsPerFrame: 2
-  maxViewsPerFrameTotal: 12
+  maxAttemptsPerFrame: 3
+  maxViewsPerFrameTotal: 14
   uncertainFovScale: 1.25
   reacquireCooldownFrames: 2
+  recoverConfirmFrames: 2
 recovery:
   maxViewsPerFrame: 12
   globalSearchInterval: 5

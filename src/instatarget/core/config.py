@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import isfinite, pi
+from math import isclose, isfinite, pi
 from pathlib import Path
 from typing import cast
 
@@ -44,6 +44,8 @@ class GeometryConfig:
             raise ConfigError("geometry.boundarySamplesPerEdge must be at least 2")
         if not 0.0 < self.minFovRad < self.maxFovRad < pi:
             raise ConfigError("geometry FOV must satisfy 0 < minFovRad < maxFovRad < pi")
+        if not isclose(self.maxFovRad, 2.0 * pi / 3.0, abs_tol=1e-9):
+            raise ConfigError("geometry.maxFovDeg must be 120 for fixed search views")
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +125,10 @@ class EvaluatorConfig:
     supportWeight: float = 0.25
     agreementWeight: float = 0.25
     minReacquireViews: int = 2
+    successRate: float = 0.90
+    firstRoundFusionOverlap: float = 0.30
+    overlapThreshold: float = 0.70
+    fusionSourceMinConfidence: float = 0.80
 
     def __post_init__(self) -> None:
         _requireProbability("evaluator.supportWeight", self.supportWeight)
@@ -131,6 +137,18 @@ class EvaluatorConfig:
             raise ConfigError("evaluator support and agreement weights must sum to at most 1")
         if self.minReacquireViews <= 0:
             raise ConfigError("evaluator.minReacquireViews must be positive")
+        _requireProbability("evaluator.successRate", self.successRate)
+        _requireProbability(
+            "evaluator.firstRoundFusionOverlap", self.firstRoundFusionOverlap
+        )
+        _requireProbability("evaluator.overlapThreshold", self.overlapThreshold)
+        _requireProbability(
+            "evaluator.fusionSourceMinConfidence", self.fusionSourceMinConfidence
+        )
+        if self.firstRoundFusionOverlap >= self.overlapThreshold:
+            raise ConfigError(
+                "evaluator thresholds must satisfy firstRoundFusionOverlap < overlapThreshold"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,10 +191,11 @@ class TrackingConfig:
     guardYawStepRad: float = 2.0 * pi / 3.0
     minViewsForCommit: int = 2
     sameFrameEscalationEnabled: bool = True
-    maxAttemptsPerFrame: int = 2
-    maxViewsPerFrameTotal: int = 12
+    maxAttemptsPerFrame: int = 3
+    maxViewsPerFrameTotal: int = 14
     uncertainFovScale: float = 1.25
     reacquireCooldownFrames: int = 2
+    recoverConfirmFrames: int = 2
 
     def __post_init__(self) -> None:
         _requireProbability("tracking.acceptThreshold", self.acceptThreshold)
@@ -205,17 +224,20 @@ class TrackingConfig:
             raise ConfigError("tracking.guardYawStepRad must be in (0, pi)")
         if self.minViewsForCommit <= 0:
             raise ConfigError("tracking.minViewsForCommit must be positive")
-        if self.maxAttemptsPerFrame not in {1, 2}:
-            raise ConfigError("tracking.maxAttemptsPerFrame must be 1 or 2")
-        if self.maxViewsPerFrameTotal < max(6, self.minViewsForCommit):
+        if self.maxAttemptsPerFrame not in {1, 2, 3}:
+            raise ConfigError("tracking.maxAttemptsPerFrame must be 1, 2 or 3")
+        minimumBudget = 14 if self.maxAttemptsPerFrame == 3 else 6
+        if self.maxViewsPerFrameTotal < max(minimumBudget, self.minViewsForCommit):
             raise ConfigError(
-                "tracking.maxViewsPerFrameTotal must cover minViewsForCommit "
+                "tracking.maxViewsPerFrameTotal must cover the configured state routes "
                 "and all six cube-map faces"
             )
         if not isfinite(self.uncertainFovScale) or self.uncertainFovScale < 1.0:
             raise ConfigError("tracking.uncertainFovScale must be at least 1")
         if self.reacquireCooldownFrames < 0:
             raise ConfigError("tracking.reacquireCooldownFrames must be non-negative")
+        if self.recoverConfirmFrames <= 0:
+            raise ConfigError("tracking.recoverConfirmFrames must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,7 +392,15 @@ def loadConfig(path: str | Path) -> AppConfig:
     evaluatorRaw = _section(
         root,
         "evaluator",
-        {"supportWeight", "agreementWeight", "minReacquireViews"},
+        {
+            "supportWeight",
+            "agreementWeight",
+            "minReacquireViews",
+            "successRate",
+            "firstRoundFusionOverlap",
+            "overlapThreshold",
+            "fusionSourceMinConfidence",
+        },
     )
     motionRaw = _section(
         root,
@@ -407,6 +437,7 @@ def loadConfig(path: str | Path) -> AppConfig:
             "maxViewsPerFrameTotal",
             "uncertainFovScale",
             "reacquireCooldownFrames",
+            "recoverConfirmFrames",
         },
     )
     recoveryRaw = _section(
@@ -520,6 +551,18 @@ def loadConfig(path: str | Path) -> AppConfig:
             minReacquireViews=_requireInt(
                 "evaluator.minReacquireViews", evaluatorRaw["minReacquireViews"]
             ),
+            successRate=_requireFloat("evaluator.successRate", evaluatorRaw["successRate"]),
+            firstRoundFusionOverlap=_requireFloat(
+                "evaluator.firstRoundFusionOverlap",
+                evaluatorRaw["firstRoundFusionOverlap"],
+            ),
+            overlapThreshold=_requireFloat(
+                "evaluator.overlapThreshold", evaluatorRaw["overlapThreshold"]
+            ),
+            fusionSourceMinConfidence=_requireFloat(
+                "evaluator.fusionSourceMinConfidence",
+                evaluatorRaw["fusionSourceMinConfidence"],
+            ),
         ),
         motion=MotionConfig(
             minSamplesForVelocity=_requireInt(
@@ -594,6 +637,9 @@ def loadConfig(path: str | Path) -> AppConfig:
             ),
             reacquireCooldownFrames=_requireInt(
                 "tracking.reacquireCooldownFrames", trackingRaw["reacquireCooldownFrames"]
+            ),
+            recoverConfirmFrames=_requireInt(
+                "tracking.recoverConfirmFrames", trackingRaw["recoverConfirmFrames"]
             ),
         ),
         recovery=RecoveryConfig(

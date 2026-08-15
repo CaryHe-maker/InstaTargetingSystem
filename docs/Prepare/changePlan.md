@@ -4,7 +4,7 @@
 > 目标是把项目整理成一条可直接实现的统一链路，并作为后续改代码的执行模板。
 > 这是一份历史提案。前四阶段的实现状态以 `docs/implement.md`、`docs/interface.md` 和
 > `docs/modules/tracker.md` 为准；其中 RGB-D 深度伪彩色、深度分支和融合头已经落地。
-> 第五阶段 DTC 的现行蓝图以 `docs/ReplySugg.md` 和 `docs/modules/controller.md` 为准，本文
+> 第五阶段 DTC 的现行规范以 `docs/StateChangePlan.md` 和 `docs/modules/controller.md` 为准，本文
 > 中与“DTC 直接读取 BFoV 深度块”“单视图正常跟踪”冲突的描述均已废止。
 
 ---

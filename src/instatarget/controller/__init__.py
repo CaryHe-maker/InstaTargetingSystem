@@ -15,7 +15,9 @@ from instatarget.controller.recovery_planner import PlannedView, RecoveryPlanner
 from instatarget.controller.state_evaluator import StateEvaluator
 from instatarget.controller.state_machine import StateUpdate, TrackStateMachine
 from instatarget.controller.state_model import (
+    EvaluatedCandidate,
     EvidenceLevel,
+    MeasurementEvidence,
     MotionPrediction,
     RecoveryMemory,
     StateInstance,
@@ -39,6 +41,8 @@ __all__ = [
     "StateInstance",
     "StateObservation",
     "EvidenceLevel",
+    "EvaluatedCandidate",
+    "MeasurementEvidence",
     "MotionPrediction",
     "RecoveryMemory",
     "SphericalMotionEstimator",

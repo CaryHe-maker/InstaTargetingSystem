@@ -1,9 +1,9 @@
-"""State-aware five-view, recovery-ring, and true cubemap planning."""
+"""Fixed 120-degree four-corner and cubemap search planning."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import asin, atan2, cos, pi, sin
+from math import asin, atan2, cos, pi, sin, sqrt, tan
 
 from instatarget.controller.state_model import RecoveryMemory
 from instatarget.core.config import GeometryConfig, RecoveryConfig, TrackingConfig
@@ -16,7 +16,7 @@ from instatarget.core.types import (
     TrackStatus,
     ViewSpec,
 )
-from instatarget.geometry.projection_math import makeSphericalPoint
+from instatarget.geometry.projection_math import makeSphericalPoint, unitVectorToYawPitch
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +26,7 @@ class PlannedView:
 
 
 class RecoveryPlanner:
-    """Build deterministic views while retaining cross-frame recovery coverage."""
+    """Build the state-specific bounded view sequence from the design specification."""
 
     def __init__(
         self,
@@ -55,102 +55,32 @@ class RecoveryPlanner:
         viewBudget: int | None = None,
         recoveryMemory: RecoveryMemory | None = None,
     ) -> tuple[PlannedView, ...]:
+        del frameIndex, anchorBox, currentBox, recoveryMemory
         if frameWidthPx <= 0 or frameHeightPx <= 0:
             raise ProtocolError("frame dimensions must be positive")
+        if attemptIndex < 0 or attemptIndex >= self._tracking.maxAttemptsPerFrame:
+            raise ProtocolError(f"unsupported attemptIndex: {attemptIndex}")
+
         center = searchSeedCenter or (
             _motionCenter(predictedMotion) if predictedMotion is not None else fallbackBfov.center
         )
-        horizontalFov, verticalFov = self._contextFov(
-            frameWidthPx, frameHeightPx, anchorBox, currentBox
+        useCubeMap = (
+            status is TrackStatus.LOST and attemptIndex == 0
+        ) or (
+            status in {TrackStatus.UNCERTAIN, TrackStatus.RECOVERING} and attemptIndex == 2
         )
-        budget = min(
-            viewBudget or self._recovery.maxViewsPerFrame,
-            self._tracking.maxViewsPerFrameTotal,
-        )
-        planned: list[PlannedView] = []
-        keys: set[tuple[int, int, int, int, int, int]] = set()
+        if status in {TrackStatus.TRACKING, TrackStatus.LOST} and attemptIndex >= 2:
+            raise ProtocolError(f"{status.name} does not support a third search round")
 
-        def add(
-            yawRad: float,
-            pitchRad: float,
-            hFov: float,
-            vFov: float,
-            role: str,
-            *,
-            allowPreviouslyAttempted: bool = False,
-        ) -> None:
-            if len(planned) >= budget:
-                return
-            point = makeSphericalPoint(yawRad, max(-pi / 2.0, min(pi / 2.0, pitchRad)))
-            spec = ViewSpec(
-                viewId=viewIdStart + len(planned),
-                bfov=BFoV(
-                    center=point,
-                    horizontalFovRad=_clampFov(hFov, self._geometry),
-                    verticalFovRad=_clampFov(vFov, self._geometry),
-                ),
-                outputWidthPx=self._geometry.viewWidthPx,
-                outputHeightPx=self._geometry.viewHeightPx,
+        requiredViews = 6 if useCubeMap else 4
+        budget = viewBudget if viewBudget is not None else self._tracking.maxViewsPerFrameTotal
+        if budget < requiredViews:
+            raise ProtocolError(
+                f"view budget cannot fit attempt: required={requiredViews}, available={budget}"
             )
-            epochId = recoveryMemory.epochId if recoveryMemory is not None else 0
-            key = _planKey(spec, role, epochId)
-            if key in keys or (
-                not allowPreviouslyAttempted
-                and recoveryMemory is not None
-                and key in recoveryMemory.attemptedPlanKeys
-            ):
-                return
-            keys.add(key)
-            planned.append(PlannedView(spec=spec, role=role))
-            if recoveryMemory is not None and status in {TrackStatus.RECOVERING, TrackStatus.LOST}:
-                if len(recoveryMemory.attemptedPlanKeys) >= self._recovery.maxCoveredCells:
-                    recoveryMemory.attemptedPlanKeys.clear()
-                recoveryMemory.attemptedPlanKeys.add(key)
-                recoveryMemory.coveredCells.add(_sphereCell(point))
-
-        if status is TrackStatus.TRACKING:
-            self._addLocalFive(add, center, horizontalFov, verticalFov, "local_corner_guard")
-        elif status is TrackStatus.UNCERTAIN:
-            scale = self._tracking.uncertainFovScale
-            self._addLocalFive(
-                add,
-                center,
-                horizontalFov * scale,
-                verticalFov * scale,
-                "uncertain_corner_guard",
-            )
-        elif status is TrackStatus.RECOVERING:
-            add(
-                center.yawRad,
-                center.pitchRad,
-                horizontalFov * 1.25,
-                verticalFov * 1.25,
-                "recovery_seed",
-            )
-            self._addRings(add, center, horizontalFov, verticalFov)
-        elif frameIndex % self._recovery.globalSearchInterval == 0 or attemptIndex > 0:
-            phase = recoveryMemory.globalScanPhase if recoveryMemory is not None else 0
-            self._addCubeMap(add, center.yawRad + phase * pi / 8.0)
-            if recoveryMemory is not None:
-                recoveryMemory.globalScanPhase = (phase + 1) % 8
-                recoveryMemory.lastGlobalScanFrameIndex = frameIndex
-        else:
-            add(
-                center.yawRad, center.pitchRad, horizontalFov * 1.5, verticalFov * 1.5, "lost_probe"
-            )
-
-        if not planned:
-            # Deduplication against previous attempts may consume the entire preferred plan.  A
-            # phase-shifted seed remains bounded and guarantees forward progress.
-            add(
-                center.yawRad + 0.125,
-                center.pitchRad,
-                horizontalFov * 1.25,
-                verticalFov * 1.25,
-                "fallback_probe",
-                allowPreviouslyAttempted=True,
-            )
-        return tuple(planned)
+        if useCubeMap:
+            return self._cubeMap(viewIdStart, attemptIndex)
+        return self._fourCorners(center, viewIdStart, attemptIndex)
 
     def contextBfov(
         self,
@@ -161,68 +91,95 @@ class RecoveryPlanner:
         currentBox: BBoxXYWH,
         uncertaintyRad: float = 0.0,
     ) -> BFoV:
-        horizontalFov, verticalFov = self._contextFov(
-            frameWidthPx, frameHeightPx, anchorBox, currentBox
-        )
-        return BFoV(
-            center=center,
-            horizontalFovRad=_clampFov(horizontalFov + 2.0 * uncertaintyRad, self._geometry),
-            verticalFovRad=_clampFov(verticalFov + 2.0 * uncertaintyRad, self._geometry),
-        )
-
-    def _contextFov(
-        self,
-        frameWidthPx: int,
-        frameHeightPx: int,
-        anchorBox: BBoxXYWH,
-        currentBox: BBoxXYWH,
-    ) -> tuple[float, float]:
+        """Build the motion fallback envelope; search ViewSpecs do not use this size."""
         widthPx = self._tracking.contextScale * max(anchorBox.widthPx, currentBox.widthPx)
         heightPx = self._tracking.contextScale * max(anchorBox.heightPx, currentBox.heightPx)
         widthPx *= 1.0 + self._tracking.contextMarginRatio
         heightPx *= 1.0 + self._tracking.contextMarginRatio
-        return (
-            _clampFov(2.0 * pi * widthPx / frameWidthPx, self._geometry),
-            _clampFov(pi * heightPx / frameHeightPx, self._geometry),
+        horizontalFov = 2.0 * pi * widthPx / frameWidthPx + 2.0 * uncertaintyRad
+        verticalFov = pi * heightPx / frameHeightPx + 2.0 * uncertaintyRad
+        return BFoV(
+            center=center,
+            horizontalFovRad=_clampFov(horizontalFov, self._geometry),
+            verticalFovRad=_clampFov(verticalFov, self._geometry),
         )
 
-    def _addLocalFive(
-        self, add, center, horizontalFov: float, verticalFov: float, role: str
-    ) -> None:
-        add(center.yawRad, center.pitchRad, horizontalFov, verticalFov, "primary")
-        yawOffset = 0.45 * horizontalFov
-        pitchOffset = 0.45 * verticalFov
-        for yawSign, pitchSign in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
-            add(
-                center.yawRad + yawSign * yawOffset,
-                center.pitchRad + pitchSign * pitchOffset,
-                horizontalFov,
-                verticalFov,
-                role,
+    def _fourCorners(
+        self,
+        center: SphericalPoint,
+        viewIdStart: int,
+        attemptIndex: int,
+    ) -> tuple[PlannedView, ...]:
+        offset = 40.0 * pi / 180.0
+        roles = (
+            ("left_top", -offset, offset),
+            ("right_top", offset, offset),
+            ("left_bottom", -offset, -offset),
+            ("right_bottom", offset, -offset),
+        )
+        return tuple(
+            PlannedView(
+                spec=self._viewSpec(
+                    viewIdStart + index,
+                    _offsetDirection(center, yawOffset, pitchOffset),
+                ),
+                role=f"round{attemptIndex + 1}_{role}",
             )
+            for index, (role, yawOffset, pitchOffset) in enumerate(roles)
+        )
 
-    def _addRings(self, add, center, horizontalFov: float, verticalFov: float) -> None:
-        baseRadius = max(horizontalFov, verticalFov)
-        for radius, count in zip(
-            self._recovery.ringRadii, self._recovery.viewsPerRing, strict=True
-        ):
-            for index in range(count):
-                angle = 2.0 * pi * index / count
-                offset = radius * baseRadius
-                add(
-                    center.yawRad + cos(angle) * offset,
-                    center.pitchRad + sin(angle) * offset,
-                    horizontalFov * 1.25,
-                    verticalFov * 1.25,
-                    "recovery_ring",
-                )
+    def _cubeMap(self, viewIdStart: int, attemptIndex: int) -> tuple[PlannedView, ...]:
+        directions = (
+            ("front", 0.0, 0.0),
+            ("right", pi / 2.0, 0.0),
+            ("back", -pi, 0.0),
+            ("left", -pi / 2.0, 0.0),
+            ("up", 0.0, pi / 2.0),
+            ("down", 0.0, -pi / 2.0),
+        )
+        return tuple(
+            PlannedView(
+                spec=self._viewSpec(viewIdStart + index, makeSphericalPoint(yaw, pitch)),
+                role=f"round{attemptIndex + 1}_cubemap_{role}",
+            )
+            for index, (role, yaw, pitch) in enumerate(directions)
+        )
 
-    def _addCubeMap(self, add, phaseYawRad: float) -> None:
-        fov = min(self._geometry.maxFovRad, pi / 2.0 * (1.0 + self._recovery.cubeMapOverlapRatio))
-        for index in range(4):
-            add(phaseYawRad + index * pi / 2.0, 0.0, fov, fov, "cubemap_equator")
-        add(phaseYawRad, pi / 2.0 - 1e-5, fov, fov, "cubemap_pole")
-        add(phaseYawRad, -pi / 2.0 + 1e-5, fov, fov, "cubemap_pole")
+    def _viewSpec(self, viewId: int, center: SphericalPoint) -> ViewSpec:
+        return ViewSpec(
+            viewId=viewId,
+            bfov=BFoV(
+                center=center,
+                horizontalFovRad=self._geometry.maxFovRad,
+                verticalFovRad=self._geometry.maxFovRad,
+            ),
+            outputWidthPx=self._geometry.viewWidthPx,
+            outputHeightPx=self._geometry.viewHeightPx,
+        )
+
+
+def _offsetDirection(
+    center: SphericalPoint,
+    localYawOffsetRad: float,
+    localPitchOffsetRad: float,
+) -> SphericalPoint:
+    yaw = center.yawRad
+    pitch = center.pitchRad
+    forward = (center.x, center.y, center.z)
+    right = (cos(yaw), 0.0, -sin(yaw))
+    up = (-sin(pitch) * sin(yaw), cos(pitch), -sin(pitch) * cos(yaw))
+    yawScale = tan(localYawOffsetRad)
+    pitchScale = tan(localPitchOffsetRad)
+    vector = tuple(
+        forward[index] + yawScale * right[index] + pitchScale * up[index]
+        for index in range(3)
+    )
+    norm = sqrt(sum(value * value for value in vector))
+    if norm <= 1e-12:
+        raise ProtocolError("local view offset produced a degenerate direction")
+    normalized = tuple(value / norm for value in vector)
+    yawRad, pitchRad = unitVectorToYawPitch(normalized)
+    return makeSphericalPoint(yawRad, pitchRad)
 
 
 def _motionCenter(motion: MotionState3D) -> SphericalPoint:
@@ -232,21 +189,6 @@ def _motionCenter(motion: MotionState3D) -> SphericalPoint:
 
 def _clampFov(value: float, geometry: GeometryConfig) -> float:
     return min(geometry.maxFovRad, max(geometry.minFovRad, value))
-
-
-def _planKey(spec: ViewSpec, role: str, epochId: int) -> tuple[int, int, int, int, int, int]:
-    return (
-        round(spec.bfov.center.yawRad * 1000),
-        round(spec.bfov.center.pitchRad * 1000),
-        round(spec.bfov.horizontalFovRad * 1000),
-        round(spec.bfov.verticalFovRad * 1000),
-        sum((index + 1) * ord(char) for index, char in enumerate(role)),
-        epochId,
-    )
-
-
-def _sphereCell(point: SphericalPoint) -> tuple[int, int]:
-    return round(point.yawRad * 8.0 / pi), round(point.pitchRad * 8.0 / pi)
 
 
 __all__ = ["PlannedView", "RecoveryPlanner"]
