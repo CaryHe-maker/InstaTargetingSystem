@@ -10,5 +10,5 @@
 
 `maxFovDeg` 由 schema 强制为 120。四角中心水平/垂直偏移 40 度和 cubemap 六个方向目前是 `controller/recovery_planner.py` 中的布局常量，不是 YAML 参数。
 
-提高局部分辨率会近似按像素数增加投影和模型成本；提高 boundarySamples 主要增加框回投成本。优化时应分别测试目标位于视图中心、边缘、极点和 ERP 经线附近的误差。
+提高局部分辨率会近似按像素数增加投影和模型成本；HiT 当前仍缩放到 256×256，因此只改 ViewSpec 尺寸不会自动增加网络有效分辨率。提高 boundarySamples 主要增加框回投成本。优化时应分别测试目标位于视图中心、边缘、极点和 ERP 经线附近的直接 bbox、BFoV 误差与 `envelopeInflation`。
 

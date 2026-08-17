@@ -30,6 +30,7 @@ class DriverSmokeTest(unittest.TestCase):
             output = Path(directory) / "result.txt"
             openSink(runtime.sink, str(output))
             timer = _BoundaryTimer()
+            resultRecorder = _CheckingResultRecorder(timer)
 
             resultCount = runTracking(
                 source=_CheckingSource(source, timer),
@@ -40,7 +41,7 @@ class DriverSmokeTest(unittest.TestCase):
                 sink=_CheckingSink(runtime.sink, timer),
                 depthProcessor=runtime.depthProcessor,
                 recorder=_CheckingRecorder(runtime.recorder, timer),
-                resultRecorder=_CheckingResultRecorder(timer),
+                resultRecorder=resultRecorder,
                 processingTimer=timer,
             )
             finalizeSink(runtime.sink, resultCount)
@@ -49,6 +50,9 @@ class DriverSmokeTest(unittest.TestCase):
             self.assertEqual(len(output.read_text(encoding="utf-8").splitlines()), 2)
             self.assertEqual(timer.starts, timer.stops)
             self.assertFalse(timer.active)
+            self.assertEqual(resultRecorder.roundCounts[0], 0)
+            self.assertIsNotNone(resultRecorder.roundCounts[1])
+            self.assertGreaterEqual(resultRecorder.roundCounts[1], 1)
 
 
 class _TestHiTSession:
@@ -145,10 +149,12 @@ class _CheckingRecorder:
 class _CheckingResultRecorder:
     def __init__(self, timer: _BoundaryTimer) -> None:
         self._timer = timer
+        self.roundCounts: list[int | None] = []
 
-    def record(self, *_args, **_kwargs) -> None:
+    def record(self, *_args, **kwargs) -> None:
         if self._timer.active:
             raise AssertionError("result visualization must not be timed")
+        self.roundCounts.append(kwargs.get("roundCount"))
 
 
 if __name__ == "__main__":

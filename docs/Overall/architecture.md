@@ -7,7 +7,8 @@
 1. `FramePacket` 保存 ERP 全景 RGB，以及可选深度和分割数据。
 2. Controller 产生若干 `ViewSpec`，每个 ViewSpec 描述球面中心、水平/垂直 FOV 和输出尺寸。
 3. Geometry 将 ViewSpec 裁成 `LocalView`，HiT 在局部透视平面中产生 `LocalObservation`。
-4. Geometry 把局部框投影回 ERP，形成 `ProjectedObservation`；Controller 只在统一的 ERP/球面语义中比较和融合候选。
+4. Geometry 将局部框边界一次投影到球面，同时拟合紧致 BFoV 和直接 ERP bbox；Runtime 再附加外观概率、运动概率、SingleScore 和投影质量，形成 `ProjectedObservation`。
+5. Controller 只在统一的 ERP/球面语义中比较候选，并且只使用 `singleScore` 排序和融合。
 
 最终的 `TrackResult` 同时携带 ERP `bbox` 和球面 `bfov`，使本地评估与比赛提交共用同一次跟踪结果。
 
@@ -22,7 +23,7 @@ Core 位于最底层。Geometry、Tracker、Controller、Data 依赖 Core，但�
 
 ## 两条主运行路线
 
-RGB-only 建立一个 HiT 会话，局部 RGB 直接得到模型框与分数。RGB-D 建立 RGB 和深度两个独立会话；深度先转为三通道伪彩色，再由 FusionHead 合并分数。两条路线从 `ProjectedObservation` 开始完全共用 Controller。
+RGB-only 建立一个 HiT 会话，局部 RGB 直接得到模型框与分数。RGB-D 建立 RGB 和深度两个独立会话；深度先转为三通道伪彩色，再由 FusionHead 合并分数。Tracker 把同一轮的 RGB 视图组成一个 tensor batch；RGB-D 随后把可用深度视图组成独立 depth batch。两条路线从 `ProjectedObservation` 开始完全共用 Controller。
 
 ## 关键实现路径
 
@@ -33,6 +34,7 @@ RGB-only 建立一个 HiT 会话，局部 RGB 直接得到模型框与分数。R
 - 状态所有权：`src/instatarget/controller/depth_aware_track_controller.py`
 - 局部推理：`src/instatarget/tracker/backend.py`
 - 球面投影：`src/instatarget/geometry/spherical_geometry.py`
+- 分数校准与合成：`src/instatarget/controller/fused_score.py`
 
 ## 修改架构时的约束
 

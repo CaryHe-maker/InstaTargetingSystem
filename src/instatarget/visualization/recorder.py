@@ -73,7 +73,10 @@ class VisualizationRecorder:
             annotatedRgb = drawBoxRgb(
                 view.rgb,
                 observation.bbox,
-                label=f"fuseScore={observation.fusedScore:.4f}",
+                label=(
+                    f"fuseScore={observation.fusedScore:.3f}/"
+                    f"{(observation.appearanceProbability or 0.0):.3f}"
+                ),
             )
             artifacts.append(
                 writeRgbPng(
@@ -99,7 +102,12 @@ class VisualizationRecorder:
                     frame.rgb,
                     observation.bbox,
                     wrapHorizontal=True,
-                    label=f"fuseScore={observation.fusedScore:.4f}",
+                    label=(
+                        f"score={_singleScore(observation):.3f}/"
+                        f"{observation.motionScore:.3f}/"
+                        f"{_appearanceProbability(observation):.3f}/"
+                        f"{observation.envelopeInflation:.2f}"
+                    ),
                 ),
             )
             for observation in observations
@@ -119,6 +127,22 @@ class VisualizationRecorder:
             / stage
             / f"view_{viewId:04d}.png"
         )
+
+
+def _singleScore(observation: ProjectedObservation) -> float:
+    return (
+        observation.fusedScore
+        if observation.singleScore is None
+        else observation.singleScore
+    )
+
+
+def _appearanceProbability(observation: ProjectedObservation) -> float:
+    return (
+        observation.appearanceScore
+        if observation.appearanceProbability is None
+        else observation.appearanceProbability
+    )
 
 
 def _indexViews(views: Sequence[LocalView]) -> dict[int, LocalView]:

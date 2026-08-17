@@ -10,11 +10,11 @@
 
 ## 标签
 
-标签可包含置信度、状态、valid 或 stateScore。绘制函数使用固定荧光绿、线宽和标签间距；这些是代码常量，不是算法超参数。
+标签固定包含提交后的状态、该帧实际执行轮数和 StateEvaluator 分数，格式为 `state=<状态>/rounds=<轮数>/stateScore=<分数>`。初始化帧没有搜索轮，显示 `rounds=0` 和 `stateScore=N/A`。绘制函数使用固定荧光绿、线宽和标签间距；这些是代码常量，不是算法超参数。
 
 ## 解读顺序
 
-最终图异常时，应按 geometry_box → backend_box → local_rgb 逆向检查。最终框正确但 valid=False 通常表示输出来自弱观测或运动预测，不是绘图错误。
+最终图异常时，应按 geometry_box 的 single/effectiveMotion/appearanceProbability/inflation → backend_box 的 raw/appearance → local_rgb 逆向检查。最终框正确但 valid=False 通常表示输出来自弱观测或运动预测，不是绘图错误。
 
 ## 性能边界
 

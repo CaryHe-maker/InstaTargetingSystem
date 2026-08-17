@@ -13,7 +13,7 @@ TimeCounter 用 `perf_counter_ns()` 记录每个处理区间起止，将差值�
 
 ## 计时边界
 
-计入帧读取、裁剪、推理、校准、投影和 Controller 计算；不计入任何可视化、sink、配置和清理。完整顺序见 `Overall/runtimeThread.md`。
+计入帧读取、裁剪、推理、外观/运动校准、一次边界投影、SingleScore 和 Controller 计算；不计入任何可视化、sink、配置和清理。完整顺序见 `Overall/runtimeThread.md`。
 
 ## 安全状态
 

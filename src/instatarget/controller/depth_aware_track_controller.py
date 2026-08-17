@@ -16,7 +16,6 @@ from instatarget.controller.state_model import (
     AttemptKind,
     AttemptRecord,
     FrameTransaction,
-    MeasurementEvidence,
     MotionPrediction,
     RecoveryMemory,
     StateInstance,
@@ -107,6 +106,7 @@ class DepthAwareTrackController(TrackController):
         self._geometryConfig = geometryConfig
         self._trackingConfig = trackingConfig
         self._recoveryConfig = recoveryConfig
+        self._motionMinSamples = motionConfig.minSamplesForVelocity
         self._motion: MotionEstimator = motionEstimator or SphericalMotionEstimator(
             windowLength=trackingConfig.windowLength,
             maxPredictionHorizon=trackingConfig.maxPredictionHorizon,
@@ -135,7 +135,6 @@ class DepthAwareTrackController(TrackController):
         self._modeAgeFrames = 0
         self._weakFrames = 0
         self._recoveryFrames = 0
-        self._recoveryConfirmFrames = 0
         self._stableFrames = 0
         self._reacquireCooldown = 0
         self._lastFrame: FramePacket | None = None
@@ -345,10 +344,15 @@ class DepthAwareTrackController(TrackController):
                 f"actual={plan.templateCommand.expectedRevision}"
             )
         self._backendRevision = plan.templateCommand.expectedRevision
-        priorObservations = tuple(
-            observation
-            for attempt in transaction.attempts
-            for observation in attempt.observations
+        priorObservations = (
+            tuple(
+                observation
+                for attempt in transaction.attempts
+                for observation in attempt.observations
+            )
+            if plan.attemptIndex > 0
+            and planned.state.mode in {TrackMode.TRACKING, TrackMode.UNCERTAIN}
+            else ()
         )
         evaluation = self._evaluator.evaluate(
             state=planned.state,
@@ -361,6 +365,13 @@ class DepthAwareTrackController(TrackController):
             frameWidthPx=planned.frame.rgb.shape[1],
             frameHeightPx=planned.frame.rgb.shape[0],
         )
+        thresholds = self._stateMachine.scoreGroup.thresholds()
+        if thresholds is not None:
+            evaluation = replace(
+                evaluation,
+                uncertainThreshold=thresholds[0],
+                lostThreshold=thresholds[1],
+            )
         transaction.attempts.append(
             AttemptRecord(
                 kind=AttemptKind.PRIMARY if plan.attemptIndex == 0 else AttemptKind.ESCALATION,
@@ -386,11 +397,11 @@ class DepthAwareTrackController(TrackController):
             return MoreViewsRequired(nextPlan)
         decision = self._stateMachine.transition(
             planned.state.mode,
-            evaluation,
-            self._weakFrames,
-            self._recoveryConfirmFrames,
+            evaluation.stateScore,
+            measurementAccepted=evaluation.measurementAccepted,
         )
         result = self._commit(planned, evaluation, decision)
+        self._stateMachine.recordScore(evaluation.stateScore)
         self._lastStateObservation = evaluation
         self._lastTransition = decision
         return FrameCommitted(result)
@@ -451,6 +462,7 @@ class DepthAwareTrackController(TrackController):
                 else self._recovery.epochId
             ),
             viewRoles=tuple(item.role for item in views),
+            appearanceOnlyScoring=False,
         )
         self._planned = _PlannedAttempt(
             frame=frame,
@@ -518,6 +530,22 @@ class DepthAwareTrackController(TrackController):
             source = (
                 ResultSource.OBSERVED_WEAK_BLEND if hasCandidate else ResultSource.MOTION_PREDICTED
             )
+            # Break the motion/acceptance bootstrap cycle without committing a weak box as the
+            # public target state.  A single bounded provisional observation supplies the second
+            # timestamped point required for velocity fitting; subsequent weak frames do not
+            # continue polluting the history.
+            if (
+                hasCandidate
+                and planned.prediction.sampleCount < self._motionMinSamples
+                and planned.state.mode in {TrackMode.TRACKING, TrackMode.UNCERTAIN}
+                and evaluation.measuredBfov is not None
+            ):
+                self._recordMeasurement(
+                    planned,
+                    evaluation.measuredBfov,
+                    evaluation.depthSummary,
+                    max(self._trackingConfig.candidateMinScore, evaluation.stateScore),
+                )
         oldMode = self._mode
         self._mode = decision.nextMode
         self._entryReason = decision.reason
@@ -530,22 +558,10 @@ class DepthAwareTrackController(TrackController):
             self._stableFrames = 0
             if self._mode is TrackMode.UNCERTAIN:
                 self._weakFrames = 1 if oldMode is TrackMode.TRACKING else self._weakFrames + 1
-            elif self._mode in {TrackMode.RECOVERING, TrackMode.LOST}:
+            elif self._mode is TrackMode.LOST:
                 self._recoveryFrames += 1
                 self._recovery.framesSpent += 1
-        if self._mode is TrackMode.RECOVERING:
-            if evaluation.evidence is MeasurementEvidence.RELIABLE_SINGLE:
-                self._recoveryConfirmFrames = (
-                    1 if oldMode is TrackMode.LOST else self._recoveryConfirmFrames + 1
-                )
-            else:
-                self._recoveryConfirmFrames = 0
-        else:
-            self._recoveryConfirmFrames = 0
-        if (
-            oldMode not in {TrackMode.RECOVERING, TrackMode.LOST}
-            and self._mode is TrackMode.RECOVERING
-        ):
+        if oldMode is not TrackMode.LOST and self._mode is TrackMode.LOST:
             self._recovery.reset(planned.frame.frameIndex)
         if decision.resetRecoveryEpoch:
             self._recovery = RecoveryMemory(epochId=self._recovery.epochId + 1)
@@ -622,6 +638,10 @@ class DepthAwareTrackController(TrackController):
             scaleUncertainty=0.10,
             rangeUncertainty=None,
             confidence=motion.confidence,
+            centerCovarianceRad2=motion.centerCovarianceRad2,
+            scaleCovarianceLog2=motion.scaleCovarianceLog2,
+            rangeVariance=motion.rangeVariance,
+            reliability=motion.reliability,
         )
 
     def _makeViewSpec(self, viewId: int, bfov: BFoV) -> ViewSpec:
@@ -653,8 +673,6 @@ def _motionCenter(motion: MotionState3D):
 def _publicStatus(mode: TrackMode) -> TrackStatus:
     if mode is TrackMode.UNCERTAIN:
         return TrackStatus.UNCERTAIN
-    if mode is TrackMode.RECOVERING:
-        return TrackStatus.RECOVERING
     if mode is TrackMode.LOST:
         return TrackStatus.LOST
     return TrackStatus.TRACKING

@@ -12,9 +12,9 @@ TimeCounter 是正式运行产物，记录整个 tracking_processing 区间的�
 
 ## 推荐分解
 
-优化时建议至少使用：frame_decode、view_crop、rgb_infer、depth_infer、score_calibration、projection、state_evaluation。每项同时按状态和 attemptIndex 分组，否则 Round 3 的六视图成本会被平均值掩盖。
+优化时建议至少使用：frame_decode、view_crop、rgb_infer、depth_infer、appearance_calibration、boundary_projection、motion_scoring、state_evaluation。每项同时按状态和 attemptIndex 分组，并记录 batch size 和模型 forward 数。当前 TRACKING 为 4+4、UNCERTAIN 为 6+4、LOST 为单轮 12，不存在 Round 3。GPU 报告还应包含 images/s、利用率与峰值显存，否则一次大 batch 和多次小 batch 的成本无法比较。
 
 ## GPU 同步
 
-如果测量 CUDA kernel，普通 Python perf_counter 可能只记录异步提交时间。需要在测量边界显式同步 GPU，或使用 CUDA event；但正式端到端 TimeCounter 通常会在取回模型输出时自然等待。文档和报告中应注明测量方式。
+如果测量 CUDA kernel，普通 Python perf_counter 可能只记录异步提交时间。需要在测量边界显式同步 GPU，或使用 CUDA event；批量 forward 尤其不能把异步 enqueue 时间当作完整推理时间。正式端到端 TimeCounter 通常会在取回 bbox/heatmap 输出时自然等待，但文档和报告仍应注明同步方式。
 

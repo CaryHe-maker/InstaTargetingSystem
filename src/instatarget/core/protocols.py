@@ -13,6 +13,7 @@ from instatarget.core.types import (
     DepthSummary,
     FramePacket,
     InitializationPlan,
+    LocalBoxProjection,
     LocalObservation,
     LocalView,
     MotionState3D,
@@ -61,6 +62,14 @@ class SphericalGeometry(Protocol):
         localBox: BBoxXYWH,
         spec: ViewSpec,
     ) -> BFoV: ...
+
+    def projectLocalBoxBoundary(
+        self,
+        localBox: BBoxXYWH,
+        spec: ViewSpec,
+        frameWidthPx: int,
+        frameHeightPx: int,
+    ) -> LocalBoxProjection: ...
 
     def bfovToBbox(
         self,

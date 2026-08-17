@@ -6,27 +6,25 @@
 
 | 参数 | 当前值 | 生产路径作用 |
 |---|---:|---|
-| `evaluator.successRate` | 0.90 | 可靠证据和非最终轮提前成功阈值 |
-| `evaluator.firstRoundFusionOverlap` | 0.30 | 非 LOST Round 1 生成融合候选的最低 OverlapRate |
-| `evaluator.overlapThreshold` | 0.70 | 后续轮融合阈值及可靠融合输出阈值 |
-| `evaluator.fusionSourceMinConfidence` | 0.80 | 两个融合来源各自最低置信度 |
-| `evaluator.supportWeight` | 0.25 | StateObservation 支持统计的兼容权重 |
-| `evaluator.agreementWeight` | 0.25 | StateObservation 一致性统计的兼容权重 |
-| `evaluator.minReacquireViews` | 2 | 旧重捕获支持数兼容参数 |
+| `evaluator.successRate` | 0.90 | 仅复制到 `StateObservation` 诊断字段 |
+| `evaluator.firstRoundFusionOverlap` | 0.30 | schema/配置兼容；当前生产评估不读取 |
+| `evaluator.overlapThreshold` | 0.70 | schema/配置兼容；生产 Fusor 使用代码常量 0.70 |
+| `evaluator.fusionSourceMinConfidence` | 0.80 | 融合候选被接受时两个来源各自的最低 SingleScore |
+| `evaluator.supportWeight` | 0.25 | schema/接口兼容；当前生产评估不读取 |
+| `evaluator.agreementWeight` | 0.25 | schema/接口兼容；当前生产评估不读取 |
+| `evaluator.minReacquireViews` | 2 | schema/旧重捕获兼容；当前生产评估不读取 |
 
-前四项直接影响当前输出。后三项仍受 schema 校验或兼容接口使用，但不改变当前一对一双框融合规则。
+当前只有 `fusionSourceMinConfidence` 直接影响测量接受。Fusor 对每一轮都使用固定的 0.70 overlap 常量枚举全部候选对；来源最低分不会阻止候选生成或排序，只会阻止低来源分的融合候选被接受为测量。
 
 ## 状态、事务和模板
 
 | 参数 | 当前值 | 作用 |
 |---|---:|---|
-| `tracking.uncertainPatience` | 2 | UNCERTAIN 中允许连续弱证据的帧数 |
 | `tracking.stableFramesBeforeUpdate` | 8 | 在线模板更新前的稳定帧数 |
-| `tracking.sameFrameEscalationEnabled` | true | 是否允许同帧进入下一轮 |
-| `tracking.maxAttemptsPerFrame` | 3 | 全局轮次上限；状态仍限制为 2/3/3/2 |
-| `tracking.maxViewsPerFrameTotal` | 14 | 单帧事务总视图预算 |
+| `tracking.sameFrameEscalationEnabled` | true | 允许 TRACKING/UNCERTAIN 在第一轮后进入第二轮 |
+| `tracking.maxAttemptsPerFrame` | 2 | 固定同帧最多两轮；LOST 使用一次 12 视图恢复计划 |
+| `tracking.maxViewsPerFrameTotal` | 12 | 单帧事务总视图预算 |
 | `tracking.reacquireCooldownFrames` | 2 | 重捕获后模板更新冷却 |
-| `tracking.recoverConfirmFrames` | 2 | 单框从 RECOVERING 回 TRACKING 的确认帧数 |
 | `tracking.maxPredictionHorizon` | 3 | Controller 请求的最大运动外推帧数 |
 
 ## 运动预测
@@ -43,25 +41,29 @@
 
 `SphericalMotionEstimator` 还提供构造参数 `alpha=0.70`、`beta=0.20`，供旧 alpha-beta 兼容接口保留；当前详细窗口拟合路径不使用它们更新位置。
 
+## 分数常量
+
+当前 SingleScore 权重 0.70/0.30、运动尺度权重 0.35、深度权重 0.15、最大 d2=25、中心测量标准差 0.025 rad 和 log 尺度测量标准差 0.08 位于 `controller/fused_score.py`。它们尚未进入严格 YAML schema；替换前必须完成独立校准并联动重标 `tracking.candidateMinScore` 与来源最低分。
+
 ## 回退包络和兼容参数
 
 | 参数 | 当前值 | 状态 |
 |---|---:|---|
 | `tracking.contextScale` | 2.0 | 扩展预测回退 BFoV |
 | `tracking.contextMarginRatio` | 0.15 | 回退 BFoV 额外边距 |
-| `tracking.acceptThreshold` | 0.70 | 旧标量状态接口 |
-| `tracking.uncertainThreshold` | 0.45 | 旧标量状态接口 |
-| `tracking.recoverAcceptThreshold` | 0.80 | 旧标量状态接口 |
-| `tracking.candidateMinScore` | 0.40 | 旧候选门限兼容字段 |
-| `tracking.maxRecoveryFrames` | 30 | 旧状态接口恢复期限 |
+| `tracking.candidateMinScore` | 0.40 | 所有最佳候选被接受为测量的最低 confidence |
 | `tracking.scaleClusterTolerance` | 0.50 | 旧尺度聚类容差 |
 | `tracking.guardYawStepDeg` | 120 | 旧 guard 视图步长 |
 | `tracking.minViewsForCommit` | 2 | 旧聚合最少视图数 |
 | `tracking.uncertainFovScale` | 1.25 | 当前固定 120 度搜索不使用 |
 
-RecoveryConfig 中的 `maxViewsPerFrame=12`、`globalSearchInterval=5`、`ringRadii=[1,1.75,2.5]`、`viewsPerRing=[4,8,12]`、`cubeMapOverlapRatio=0.10`、`maxCoveredCells=256` 保留恢复内存/旧环搜配置；当前实际全景轮固定六面 cubemap，不运行环搜。
+除 `candidateMinScore` 外，本节其余 tracking 字段为回退包络或旧聚合兼容项。RecoveryConfig 中的 `maxViewsPerFrame=12`、`globalSearchInterval=5`、`ringRadii=[1,1.75,2.5]`、`viewsPerRing=[4,8,12]`、`cubeMapOverlapRatio=0.10`、`maxCoveredCells=256` 保留恢复内存/旧环搜配置；当前实际 LOST 路径固定生成两个旋转 cubemap（12 张），不运行环搜。`decisionGate.*` 也只受 schema 校验，生产 StateEvaluator 会忽略整组配置。
+
+## ScoreGroup 阈值
+
+状态机只保存最近 10 个已提交 `StateScore`。历史少于 2 个时不计算阈值；第三个状态决策使用第二个分数与第一个分数比较。历史为 2 至 9 个时，`UT=0.5*max+0.5*min`、`LT=0.2*max+0.8*min`；达到 10 个后，降序第 5 大为 UT、第 8 大为 LT。阈值只用于下一帧状态选择，是否把当前候选写入运动历史仍由独立的 measurement acceptance gate 决定。
 
 ## 调参顺序
 
-先校准单框分数，再选择 successRate；随后选择 overlap 和来源最低分；最后调整状态耐心和视图预算。反过来同时调整多组参数，会无法判断改善来自分数还是更多搜索成本。
+先校准单框分数，再选择 `tracking.candidateMinScore` 和 `fusionSourceMinConfidence`；随后评估固定 0.70 overlap 常量是否需要代码级改动；最后调整状态和视图预算。`successRate`、`firstRoundFusionOverlap`、`overlapThreshold` 或 `decisionGate.*` 的 YAML 值当前不会改变生产决策，不能把修改这些值造成的实验波动解释为算法效果。
 

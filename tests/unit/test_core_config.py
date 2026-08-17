@@ -16,10 +16,9 @@ class CoreConfigTest(unittest.TestCase):
         self.assertEqual(config.geometry.boundarySamplesPerEdge, 65)
         self.assertEqual(config.tracking.windowLength, 5)
         self.assertTrue(config.tracking.sameFrameEscalationEnabled)
-        self.assertEqual(config.tracking.maxAttemptsPerFrame, 3)
-        self.assertEqual(config.tracking.maxViewsPerFrameTotal, 14)
+        self.assertEqual(config.tracking.maxAttemptsPerFrame, 2)
+        self.assertEqual(config.tracking.maxViewsPerFrameTotal, 12)
         self.assertEqual(config.tracking.reacquireCooldownFrames, 2)
-        self.assertEqual(config.tracking.recoverConfirmFrames, 2)
         self.assertAlmostEqual(config.evaluator.supportWeight, 0.25)
         self.assertEqual(config.evaluator.minReacquireViews, 2)
         self.assertAlmostEqual(config.evaluator.successRate, 0.90)
@@ -51,9 +50,12 @@ class CoreConfigTest(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 loadConfig(path)
 
-    def testLoadConfigRejectsInvertedThresholds(self) -> None:
+    def testLoadConfigRejectsRemovedFixedStateThresholds(self) -> None:
         source = (REPOSITORY_ROOT / "configs" / "RGBonly.yaml").read_text(encoding="utf-8")
-        source = source.replace("uncertainThreshold: 0.45", "uncertainThreshold: 0.80")
+        source = source.replace(
+            "  candidateMinScore: 0.40",
+            "  candidateMinScore: 0.40\n  uncertainThreshold: 0.45",
+        )
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "invalid.yaml"
@@ -63,7 +65,7 @@ class CoreConfigTest(unittest.TestCase):
 
     def testLoadConfigRejectsBudgetThatCannotFitCubeMap(self) -> None:
         source = (REPOSITORY_ROOT / "configs" / "RGBonly.yaml").read_text(encoding="utf-8")
-        source = source.replace("maxViewsPerFrameTotal: 14", "maxViewsPerFrameTotal: 5")
+        source = source.replace("maxViewsPerFrameTotal: 12", "maxViewsPerFrameTotal: 5")
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "invalid.yaml"

@@ -8,10 +8,10 @@
 
 - `local_rgb`：局部 RGB 输入。
 - `depth_rgb`：深度伪彩色输入；RGB-only 没有深度处理阶段，因此不会产生有效深度图。
-- `backend_box`：HiT 局部框及融合分数。
-- `geometry_box`：回投影到 ERP 的框及融合分数。
+- `backend_box`：HiT 局部框，标签为 backend 原始分/外观概率。
+- `geometry_box`：一次边界回投得到的直接 ERP 框，标签为 SingleScore/运动概率/包络膨胀比。
 
-`result\visualResult` 每帧写一张 ERP 图，绿色框表示已提交的结果，标签包含控制器状态分数。
+`result\visualResult` 每帧写一张 ERP 图，绿色框表示已提交的结果，标签包含提交后的控制器状态、该帧实际执行轮数和状态分数。初始化帧的轮数为 0。
 
 ## 影响范围
 

@@ -12,11 +12,11 @@
 
 ## backend_box
 
-在每个 LocalView 上绘制 HiT 局部框和分数。它展示投影前结果，可区分“模型框错”与“Geometry 回投错”。显示分数是 Beta Calibration 处理后的 LocalObservation 分数。
+在每个 LocalView 上绘制 HiT 局部框。标签 `fuseScore=raw/appearance` 依次显示 backend 原始融合分与 Beta Calibration 后的外观概率，可区分“模型框错”“外观校准错”和“Geometry 回投错”。
 
 ## geometry_box
 
-把 ProjectedObservation 绘制在 ERP 原帧上，验证局部框到球面/ERP 的转换和跨缝语义。
+把 ProjectedObservation 的直接 ERP bbox 绘制在原帧上，验证局部框到球面/ERP 的转换和跨缝语义。标签 `score=single/effectiveMotion/appearanceProbability/inflation` 依次显示最终 SingleScore、可靠性混合后的运动概率、Beta Calibration 后的外观概率和间接/直接 bbox 面积膨胀比。
 
 ## 多轮组织
 

@@ -20,6 +20,10 @@ StateEvaluator 的 OverlapRate 也使用交集，但分母是较小框面积，�
 
 采样数 `samplesYaw/samplesPitch` 越高越精确但更慢。它们是函数参数，不是运行 YAML 超参数。比较实验时必须固定采样密度。
 
+## 分数与回投诊断
+
+分数实验除最终 IoU 外必须报告 `appearanceProbability` 和运动概率的 Brier score/reliability diagram、候选排序 AUC，以及按状态和 prediction horizon 分组的结果。回投实验应同时报告中心角误差、BFoV 宽高相对误差、直接 ERP bbox IoU 和 `envelopeInflation`，并按纬度、局部归一化半径与 FOV 分组。
+
 ## 可见性和第 0 帧
 
 第 0 帧是给定初始化，不应重复当作模型预测计分。目标不可见帧必须按评测协议明确处理，不能因为真值缺失而让预测和真值序列错位。

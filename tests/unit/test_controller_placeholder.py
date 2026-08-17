@@ -94,19 +94,18 @@ class ControllerTest(unittest.TestCase):
         low = _observation(0, target, score=0.1)
         self.assertIsNone(gate.aggregate([low], self.geometry, 360, 180))
 
-    def testStateMachineEntersRecoveryAndReturnsToTrackingOnlyWithRecoveryThreshold(self) -> None:
+    def testStateMachineUsesScoreGroupThresholds(self) -> None:
         state = TrackStateMachine(self.config.tracking)
         state.initialize()
         first = state.update(0.5, True, True)
         second = state.update(0.5, True, True)
-        recovering = state.update(None, False, False)
-        recovered = state.update(0.85, True, True)
+        uncertain = state.update(0.4, True, True)
+        recovered = state.update(0.9, True, True)
 
-        self.assertEqual(first.status, TrackStatus.UNCERTAIN)
-        self.assertEqual(second.status, TrackStatus.RECOVERING)
-        self.assertEqual(recovering.status, TrackStatus.RECOVERING)
+        self.assertEqual(first.status, TrackStatus.TRACKING)
+        self.assertEqual(second.status, TrackStatus.TRACKING)
+        self.assertEqual(uncertain.status, TrackStatus.UNCERTAIN)
         self.assertTrue(recovered.accepted)
-        self.assertTrue(recovered.recovered)
         self.assertEqual(recovered.status, TrackStatus.TRACKING)
 
     def testControllerPlansGuardsAndCommitsOrderedUpdates(self) -> None:
@@ -171,7 +170,7 @@ class ControllerTest(unittest.TestCase):
         result = controller.update(plan, ())
 
         self.assertFalse(result.valid)
-        self.assertEqual(result.status, TrackStatus.UNCERTAIN)
+        self.assertEqual(result.status, TrackStatus.TRACKING)
         self.assertGreater(result.bbox.widthPx, 0.0)
 
 

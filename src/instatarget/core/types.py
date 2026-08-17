@@ -29,6 +29,19 @@ def _requireProbability(name: str, value: float) -> None:
         raise ProtocolError(f"{name} must be in [0, 1], actual={value}")
 
 
+def _requireCovariance2x2(
+    name: str,
+    value: tuple[tuple[float, float], tuple[float, float]],
+) -> None:
+    if len(value) != 2 or any(len(row) != 2 for row in value):
+        raise ProtocolError(f"{name} must be a 2x2 matrix")
+    a, b = value[0]
+    c, d = value[1]
+    _requireFinite(name, a, b, c, d)
+    if abs(b - c) > 1e-9 or a < 0.0 or d < 0.0 or a * d - b * c < -1e-12:
+        raise ProtocolError(f"{name} must be symmetric positive semidefinite")
+
+
 @dataclass(frozen=True, slots=True)
 class BBoxXYWH:
     """An ERP or local-view bounding box in continuous pixel coordinates."""
@@ -211,13 +224,28 @@ class DepthSummary:
 
 @dataclass(frozen=True, slots=True)
 class MotionState3D:
-    """Predicted spherical direction, velocity, range, and confidence."""
+    """Predicted spherical direction, extent, uncertainty, and confidence."""
 
     position: tuple[float, float, float]
     velocity: tuple[float, float, float]
     rangeDepth: float
     rangeVelocity: float
     confidence: float
+    horizontalSizeRad: float = 0.0
+    verticalSizeRad: float = 0.0
+    angularUncertaintyRad: float = 0.0
+    scaleUncertainty: float = 0.0
+    rangeUncertainty: float | None = None
+    reliability: float = 0.0
+    centerCovarianceRad2: tuple[tuple[float, float], tuple[float, float]] = (
+        (0.0025, 0.0),
+        (0.0, 0.0025),
+    )
+    scaleCovarianceLog2: tuple[tuple[float, float], tuple[float, float]] = (
+        (0.04, 0.0),
+        (0.0, 0.04),
+    )
+    rangeVariance: float | None = None
 
     def __post_init__(self) -> None:
         if len(self.position) != 3 or len(self.velocity) != 3:
@@ -229,16 +257,39 @@ class MotionState3D:
             self.rangeDepth,
             self.rangeVelocity,
             self.confidence,
+            self.horizontalSizeRad,
+            self.verticalSizeRad,
+            self.angularUncertaintyRad,
+            self.scaleUncertainty,
+            self.reliability,
         )
-        if self.rangeDepth < 0.0:
-            raise ProtocolError("rangeDepth must be non-negative")
+        if self.rangeUncertainty is not None:
+            _requireFinite("motion range uncertainty", self.rangeUncertainty)
+        _requireCovariance2x2("centerCovarianceRad2", self.centerCovarianceRad2)
+        _requireCovariance2x2("scaleCovarianceLog2", self.scaleCovarianceLog2)
+        if self.rangeVariance is not None:
+            _requireFinite("motion range variance", self.rangeVariance)
+        if min(
+            self.rangeDepth,
+            self.horizontalSizeRad,
+            self.verticalSizeRad,
+            self.angularUncertaintyRad,
+            self.scaleUncertainty,
+            self.rangeUncertainty or 0.0,
+            self.centerCovarianceRad2[0][0],
+            self.centerCovarianceRad2[1][1],
+            self.scaleCovarianceLog2[0][0],
+            self.scaleCovarianceLog2[1][1],
+            self.rangeVariance or 0.0,
+        ) < 0.0:
+            raise ProtocolError("motion sizes and uncertainties must be non-negative")
         _requireProbability("motion confidence", self.confidence)
+        _requireProbability("motion reliability", self.reliability)
 
 
 class TrackStatus(Enum):
     TRACKING = auto()
     UNCERTAIN = auto()
-    RECOVERING = auto()
     LOST = auto()
 
 
@@ -320,6 +371,7 @@ class LocalObservation:
     fusedScore: float
     depthSummary: DepthSummary | None
     latencyNs: int
+    appearanceProbability: float | None = None
 
     def __post_init__(self) -> None:
         if self.viewId < 0 or self.latencyNs < 0:
@@ -331,6 +383,33 @@ class LocalObservation:
             ("fusedScore", self.fusedScore),
         ):
             _requireProbability(name, value)
+        if self.appearanceProbability is not None:
+            _requireProbability("appearanceProbability", self.appearanceProbability)
+
+
+@dataclass(frozen=True, slots=True)
+class LocalBoxProjection:
+    """One boundary projection shared by BFoV fitting and direct ERP bbox fitting."""
+
+    bfov: BFoV
+    bbox: BBoxXYWH
+    sphericalBoundary: tuple[SphericalPoint, ...]
+    erpBoundary: tuple[tuple[float, float], ...]
+    indirectBbox: BBoxXYWH
+    envelopeInflation: float
+
+    def __post_init__(self) -> None:
+        if len(self.sphericalBoundary) < 8:
+            raise ProtocolError("projected local boundary requires at least eight samples")
+        if len(self.sphericalBoundary) != len(self.erpBoundary):
+            raise ProtocolError("spherical and ERP boundaries must have equal length")
+        for point in self.erpBoundary:
+            if len(point) != 2:
+                raise ProtocolError("each ERP boundary point must contain x and y")
+            _requireFinite("ERP boundary", *point)
+        _requireFinite("envelopeInflation", self.envelopeInflation)
+        if self.envelopeInflation <= 0.0:
+            raise ProtocolError("envelopeInflation must be positive")
 
 
 class TemplateCommandKind(Enum):
@@ -373,6 +452,7 @@ class SearchPlan:
     attemptIndex: int = 0
     recoveryEpochId: int = 0
     viewRoles: tuple[str, ...] = ()
+    appearanceOnlyScoring: bool = False
 
     def __post_init__(self) -> None:
         if not str(self.sequenceId) or int(self.frameIndex) < 0 or self.stateRevision < 0:
@@ -389,6 +469,8 @@ class SearchPlan:
             raise ProtocolError("search plan transaction identity must be non-negative")
         if self.viewRoles and len(self.viewRoles) != len(self.views):
             raise ProtocolError("search plan viewRoles must align with views")
+        if not isinstance(self.appearanceOnlyScoring, bool):
+            raise ProtocolError("appearanceOnlyScoring must be boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,6 +501,16 @@ class ProjectedObservation:
     fusedScore: float
     depthSummary: DepthSummary | None
     localBox: BBoxXYWH | None = None
+    backendFusedScore: float | None = None
+    appearanceProbability: float | None = None
+    rawMotionScore: float | None = None
+    motionProbability: float | None = None
+    motionReliability: float = 0.0
+    singleScore: float | None = None
+    erpBoundary: tuple[tuple[float, float], ...] = ()
+    envelopeInflation: float = 1.0
+    normalizedRadius: float = 0.0
+    edgeMargin: float = 0.0
 
     def __post_init__(self) -> None:
         if self.viewId < 0:
@@ -430,8 +522,28 @@ class ProjectedObservation:
             ("scaleScore", self.scaleScore),
             ("depthScore", self.depthScore),
             ("fusedScore", self.fusedScore),
+            ("motionReliability", self.motionReliability),
         ):
             _requireProbability(name, value)
+        for name, value in (
+            ("backendFusedScore", self.backendFusedScore),
+            ("appearanceProbability", self.appearanceProbability),
+            ("rawMotionScore", self.rawMotionScore),
+            ("motionProbability", self.motionProbability),
+            ("singleScore", self.singleScore),
+        ):
+            if value is not None:
+                _requireProbability(name, value)
+        _requireFinite(
+            "projection diagnostics",
+            self.envelopeInflation,
+            self.normalizedRadius,
+            self.edgeMargin,
+        )
+        if self.envelopeInflation <= 0.0:
+            raise ProtocolError("envelopeInflation must be positive")
+        if self.normalizedRadius < 0.0 or self.edgeMargin < 0.0:
+            raise ProtocolError("projection radius and edge margin must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)

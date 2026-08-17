@@ -14,11 +14,13 @@ Controller 不直接编码模板，而是产生 `TemplateCommand`：KEEP 保持�
 
 ## 帧事务
 
-`FrameTransaction` 保存起始状态、attempt 记录、剩余视图预算和 RecoveryMemory 副本。每个 AttemptRecord 保存该轮的局部图投影结果；后续 round 会读取此前所有记录，与本轮结果组成累计候选池重新评估。中间 round 仍然不更新 current target、运动历史或模板策略。最终 StateEvaluator 输出经过状态机后，Controller 一次性提交。
+`FrameTransaction` 保存起始状态、attempt 记录、剩余视图预算、第二轮搜索中心和 RecoveryMemory 副本。每个 AttemptRecord 保存该轮投影结果及 StateEvaluator 结果。TRACKING/UNCERTAIN 第一轮先由 Fusor 选出搜索中心；第二轮提交时读取第一轮记录，与第二轮观测组成事务候选池并再次统一调用 Fusor。中间 round 不更新 current target、运动历史或模板策略，最终 StateEvaluator 输出经过状态机后，Controller 一次性提交。
 
 ## 为什么模板命令只在 Round 1 应用
 
-同一帧的多个 round 必须使用同一模板状态，否则不同视图的分数不可比较。Controller 因此只在 attemptIndex=0 发送待处理模板命令，后续 round 强制 KEEP。模板更新的来源是上一帧已提交测量，不是当前尚未完成的候选。
+同一帧的多个 round 必须使用相同的模板特征内容，否则不同视图的分数不可比较。Controller 因此只在 attemptIndex=0 发送待处理模板命令，后续 round 强制 KEEP；模板更新来源是上一帧已提交测量，不是当前尚未完成的候选。
+
+revision 与特征内容不是同一概念。Tracker 每消费一个 attempt 都应用一次命令并将 backend/template revision 加一，所以 Round 1 与 Round 2 的 expectedRevision 不同且严格递增；Round 2 的 KEEP 不改变模板特征集合。
 
 ## 优化风险
 

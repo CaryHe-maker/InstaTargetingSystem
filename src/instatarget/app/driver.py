@@ -9,7 +9,13 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from instatarget.controller import DepthAwareTrackController, remapLocalObservationFusedScores
+from instatarget.controller import (
+    DepthAwareTrackController,
+    calibrateBackendFusedScore,
+    calibrateLocalAppearanceProbabilities,
+    composeSingleScore,
+    scoreViewCenterMotion,
+)
 from instatarget.core.config import AppConfig, ModelConfig
 from instatarget.core.errors import DecodeError
 from instatarget.core.protocols import FrameSource as FrameSourceProtocol
@@ -23,7 +29,7 @@ from instatarget.core.types import (
     MotionState3D,
     ProjectedObservation,
 )
-from instatarget.geometry import SphericalGeometryImpl, makeSphericalPoint
+from instatarget.geometry import SphericalGeometryImpl
 from instatarget.io.result_sink import FileResultSink
 from instatarget.tracker import (
     DepthEncoder,
@@ -120,7 +126,7 @@ def runTracking(
             _stopProcessing(processingTimer)
         sink.write(initialResult)
         if resultRecorder is not None:
-            resultRecorder.record(frame0, initialResult, stateScore=None)
+            resultRecorder.record(frame0, initialResult, stateScore=None, roundCount=0)
         resultCount = 1
         if recorder is not None:
             recorder.recordLocalRgb(frame0, [templateView])
@@ -145,7 +151,7 @@ def runTracking(
                     while True:
                         views = tuple(geometry.cropViews(frame, plan.views))
                         rawObservations = tuple(backend.infer(views, plan.templateCommand))
-                        observations = remapLocalObservationFusedScores(rawObservations)
+                        observations = calibrateLocalAppearanceProbabilities(rawObservations)
                         projected = tuple(
                             _projectObservation(
                                 frame=frame,
@@ -184,7 +190,18 @@ def runTracking(
                     and stateObservation.frameIndex == frame.frameIndex
                     else None
                 )
-                resultRecorder.record(frame, result, stateScore=stateScore)
+                roundCount = (
+                    stateObservation.attemptIndex + 1
+                    if stateObservation is not None
+                    and stateObservation.frameIndex == frame.frameIndex
+                    else None
+                )
+                resultRecorder.record(
+                    frame,
+                    result,
+                    stateScore=stateScore,
+                    roundCount=roundCount,
+                )
             resultCount += 1
         return resultCount
     except Exception:
@@ -216,43 +233,66 @@ def _projectObservation(
     predictedMotion: MotionState3D | None,
     geometry: SphericalGeometry,
 ) -> ProjectedObservation:
-    candidateBfov = geometry.localBoxToBfov(observation.bbox, view.spec)
-    bbox = geometry.bfovToBbox(candidateBfov, frame.rgb.shape[1], frame.rgb.shape[0])
-    motionScore = _motionScore(candidateBfov.center, predictedMotion)
+    projection = geometry.projectLocalBoxBoundary(
+        observation.bbox,
+        view.spec,
+        frame.rgb.shape[1],
+        frame.rgb.shape[0],
+    )
+    motion = scoreViewCenterMotion(view.spec.bfov.center, predictedMotion)
+    appearanceProbability = (
+        observation.appearanceProbability
+        if observation.appearanceProbability is not None
+        else calibrateBackendFusedScore(observation.fusedScore)
+    )
+    singleScore = composeSingleScore(appearanceProbability, motion.effectiveProbability)
     scaleScore = _scaleScore(observation.bbox, view)
+    normalizedRadius, edgeMargin = _projectionQuality(observation.bbox, view)
     return ProjectedObservation(
         viewId=view.spec.viewId,
-        bfov=candidateBfov,
-        bbox=bbox,
+        bfov=projection.bfov,
+        bbox=projection.bbox,
         modelScore=observation.modelScore,
         appearanceScore=observation.appearanceScore,
-        motionScore=motionScore,
+        motionScore=motion.effectiveProbability,
         scaleScore=scaleScore,
         depthScore=observation.depthScore,
-        fusedScore=observation.fusedScore,
+        fusedScore=singleScore,
         depthSummary=observation.depthSummary,
         localBox=observation.bbox,
+        backendFusedScore=observation.fusedScore,
+        appearanceProbability=appearanceProbability,
+        rawMotionScore=motion.rawScore,
+        motionProbability=motion.probability,
+        motionReliability=motion.reliability,
+        singleScore=singleScore,
+        erpBoundary=projection.erpBoundary,
+        envelopeInflation=projection.envelopeInflation,
+        normalizedRadius=normalizedRadius,
+        edgeMargin=edgeMargin,
     )
-
-
-def _motionScore(center, motion: MotionState3D | None) -> float:
-    if motion is None:
-        return 1.0
-    motionPoint = makeSphericalPoint(
-        math.atan2(motion.position[0], motion.position[2]),
-        math.asin(max(-1.0, min(1.0, motion.position[1]))),
-    )
-    dot = max(
-        -1.0,
-        min(1.0, center.x * motionPoint.x + center.y * motionPoint.y + center.z * motionPoint.z),
-    )
-    return float(np.clip((dot + 1.0) / 2.0 * motion.confidence, 0.0, 1.0))
 
 
 def _scaleScore(box: BBoxXYWH, view: LocalView) -> float:
     viewArea = max(float(view.spec.outputWidthPx * view.spec.outputHeightPx), 1.0)
     boxArea = max(float(box.widthPx * box.heightPx), 1e-6)
     return float(np.clip(1.0 - abs(math.log(boxArea / viewArea)) / 4.0, 0.0, 1.0))
+
+
+def _projectionQuality(box: BBoxXYWH, view: LocalView) -> tuple[float, float]:
+    width = float(view.spec.outputWidthPx)
+    height = float(view.spec.outputHeightPx)
+    centerX = box.xPx + box.widthPx / 2.0
+    centerY = box.yPx + box.heightPx / 2.0
+    halfDiagonal = max(math.hypot(width / 2.0, height / 2.0), 1e-9)
+    normalizedRadius = math.hypot(centerX - width / 2.0, centerY - height / 2.0) / halfDiagonal
+    edgeMargin = min(
+        box.xPx,
+        box.yPx,
+        width - (box.xPx + box.widthPx),
+        height - (box.yPx + box.heightPx),
+    ) / max(width, height, 1.0)
+    return max(0.0, normalizedRadius), max(0.0, edgeMargin)
 
 
 def _requireFrame(frame: FramePacket | None) -> FramePacket:

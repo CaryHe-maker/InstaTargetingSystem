@@ -176,14 +176,9 @@ class MotionConfig:
 
 @dataclass(frozen=True, slots=True)
 class TrackingConfig:
-    acceptThreshold: float
-    uncertainThreshold: float
+    candidateMinScore: float
     stableFramesBeforeUpdate: int
     windowLength: int
-    recoverAcceptThreshold: float = 0.80
-    candidateMinScore: float = 0.40
-    uncertainPatience: int = 2
-    maxRecoveryFrames: int = 30
     contextScale: float = 2.0
     contextMarginRatio: float = 0.15
     scaleClusterTolerance: float = 0.50
@@ -191,27 +186,17 @@ class TrackingConfig:
     guardYawStepRad: float = 2.0 * pi / 3.0
     minViewsForCommit: int = 2
     sameFrameEscalationEnabled: bool = True
-    maxAttemptsPerFrame: int = 3
-    maxViewsPerFrameTotal: int = 14
+    maxAttemptsPerFrame: int = 2
+    maxViewsPerFrameTotal: int = 12
     uncertainFovScale: float = 1.25
     reacquireCooldownFrames: int = 2
-    recoverConfirmFrames: int = 2
 
     def __post_init__(self) -> None:
-        _requireProbability("tracking.acceptThreshold", self.acceptThreshold)
-        _requireProbability("tracking.uncertainThreshold", self.uncertainThreshold)
-        if self.uncertainThreshold >= self.acceptThreshold:
-            raise ConfigError("tracking thresholds must satisfy uncertain < accept")
-        _requireProbability("tracking.recoverAcceptThreshold", self.recoverAcceptThreshold)
-        if self.recoverAcceptThreshold < self.acceptThreshold:
-            raise ConfigError("tracking.recoverAcceptThreshold must be at least acceptThreshold")
         _requireProbability("tracking.candidateMinScore", self.candidateMinScore)
         if self.stableFramesBeforeUpdate <= 0:
             raise ConfigError("tracking.stableFramesBeforeUpdate must be positive")
         if self.windowLength < 2:
             raise ConfigError("tracking.windowLength must be at least 2")
-        if self.uncertainPatience <= 0 or self.maxRecoveryFrames <= 0:
-            raise ConfigError("tracking patience and recovery frame limits must be positive")
         if not isfinite(self.contextScale) or self.contextScale < 2.0:
             raise ConfigError("tracking.contextScale must be at least 2")
         if not isfinite(self.contextMarginRatio) or self.contextMarginRatio < 0.0:
@@ -224,9 +209,9 @@ class TrackingConfig:
             raise ConfigError("tracking.guardYawStepRad must be in (0, pi)")
         if self.minViewsForCommit <= 0:
             raise ConfigError("tracking.minViewsForCommit must be positive")
-        if self.maxAttemptsPerFrame not in {1, 2, 3}:
-            raise ConfigError("tracking.maxAttemptsPerFrame must be 1, 2 or 3")
-        minimumBudget = 14 if self.maxAttemptsPerFrame == 3 else 6
+        if self.maxAttemptsPerFrame != 2:
+            raise ConfigError("tracking.maxAttemptsPerFrame must be 2 for the two-round controller")
+        minimumBudget = 12
         if self.maxViewsPerFrameTotal < max(minimumBudget, self.minViewsForCommit):
             raise ConfigError(
                 "tracking.maxViewsPerFrameTotal must cover the configured state routes "
@@ -236,8 +221,6 @@ class TrackingConfig:
             raise ConfigError("tracking.uncertainFovScale must be at least 1")
         if self.reacquireCooldownFrames < 0:
             raise ConfigError("tracking.reacquireCooldownFrames must be non-negative")
-        if self.recoverConfirmFrames <= 0:
-            raise ConfigError("tracking.recoverConfirmFrames must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,12 +401,7 @@ def loadConfig(path: str | Path) -> AppConfig:
         root,
         "tracking",
         {
-            "acceptThreshold",
-            "uncertainThreshold",
-            "recoverAcceptThreshold",
             "candidateMinScore",
-            "uncertainPatience",
-            "maxRecoveryFrames",
             "stableFramesBeforeUpdate",
             "windowLength",
             "contextScale",
@@ -437,7 +415,6 @@ def loadConfig(path: str | Path) -> AppConfig:
             "maxViewsPerFrameTotal",
             "uncertainFovScale",
             "reacquireCooldownFrames",
-            "recoverConfirmFrames",
         },
     )
     recoveryRaw = _section(
@@ -583,23 +560,8 @@ def loadConfig(path: str | Path) -> AppConfig:
             ),
         ),
         tracking=TrackingConfig(
-            acceptThreshold=_requireFloat(
-                "tracking.acceptThreshold", trackingRaw["acceptThreshold"]
-            ),
-            uncertainThreshold=_requireFloat(
-                "tracking.uncertainThreshold", trackingRaw["uncertainThreshold"]
-            ),
-            recoverAcceptThreshold=_requireFloat(
-                "tracking.recoverAcceptThreshold", trackingRaw["recoverAcceptThreshold"]
-            ),
             candidateMinScore=_requireFloat(
                 "tracking.candidateMinScore", trackingRaw["candidateMinScore"]
-            ),
-            uncertainPatience=_requireInt(
-                "tracking.uncertainPatience", trackingRaw["uncertainPatience"]
-            ),
-            maxRecoveryFrames=_requireInt(
-                "tracking.maxRecoveryFrames", trackingRaw["maxRecoveryFrames"]
             ),
             stableFramesBeforeUpdate=_requireInt(
                 "tracking.stableFramesBeforeUpdate", trackingRaw["stableFramesBeforeUpdate"]
@@ -637,9 +599,6 @@ def loadConfig(path: str | Path) -> AppConfig:
             ),
             reacquireCooldownFrames=_requireInt(
                 "tracking.reacquireCooldownFrames", trackingRaw["reacquireCooldownFrames"]
-            ),
-            recoverConfirmFrames=_requireInt(
-                "tracking.recoverConfirmFrames", trackingRaw["recoverConfirmFrames"]
             ),
         ),
         recovery=RecoveryConfig(

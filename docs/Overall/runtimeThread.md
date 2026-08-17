@@ -29,13 +29,14 @@
 1. Source 读取一帧。若为 EOF，本轮不产生结果并结束循环。
 2. `controller.beginFrame()` 根据可靠历史预测中心，建立 `FrameTransaction` 和 Round 1 `SearchPlan`。
 3. Geometry 按计划一次裁剪本轮所有视图。
-4. Tracker 执行批量局部推理并返回 LocalObservation。
-5. Beta Calibration 校准局部分数。
-6. Geometry 把每个局部框投影成 ProjectedObservation，同时补充运动、尺度和深度证据。
-7. `controller.consume()` 调用 StateEvaluator。如果返回 `MoreViewsRequired`，同一帧回到步骤 3；如果返回 `FrameCommitted`，结束本帧处理。
-8. 处理区间关闭后，Runtime 才写中间可视化、sink 和最终结果可视化。
+4. Tracker 按本轮 view 顺序执行批量局部推理并返回 LocalObservation。PyTorch HiT 每轮做一次 RGB tensor forward；RGB-D 再对有深度的视图做一次 depth tensor forward。
+5. Beta Calibration 生成 `appearanceProbability`，保留 backend 原始融合分。
+6. Geometry 将每个局部框边界一次回投，直接拟合 ERP bbox 和紧致 BFoV，并保留边界/膨胀诊断。
+7. Runtime 按局部 ViewSpec 中心与运动预测中心的大圆夹角生成当前生产运动概率，并按 70/30 合成 SingleScore；协方差归一化候选残差保留为离线诊断路径。
+8. `controller.consume()` 调用 StateEvaluator。TRACKING/UNCERTAIN 第一轮用 Fusor 最佳候选中心生成第二轮 VStype1 四角计划，没有候选则回退到预测中心；第二轮完成后把两轮投影观测统一交给 Fusor。返回 `FrameCommitted` 后结束本帧处理。
+9. 处理区间关闭后，Runtime 才写中间可视化、sink 和最终结果可视化。
 
-所以同一输入帧只读取一次，但可能执行两轮或三轮局部推理。所有轮次属于同一个 FrameTransaction，只有最后一次 consume 能提交持久状态。
+所以同一输入帧只读取一次。TRACKING 使用 4+4、UNCERTAIN 使用 6+4，均执行两轮批量局部推理；LOST 单轮批量处理 12 张。轮次不能合并，因为第二轮中心依赖第一轮 Fusor 结果。所有轮次属于同一个 FrameTransaction，只有最后一次 consume 能提交持久状态。
 
 ## 结束和异常
 
@@ -43,5 +44,5 @@
 
 ## 线程与队列说明
 
-当前主路径是单进程顺序线程，不会按 `runtime.*QueueCapacity` 创建真正的异步队列。配置中的队列容量是未来流水线并行化的预留字段。优化并行度时必须保持三条顺序约束：模板 revision 有序、同帧轮次有序、FrameTransaction 只能提交一次。
+当前主路径是单进程顺序线程，不会按 `runtime.*QueueCapacity` 创建真正的异步队列；批量 HiT 只并行化同一轮的 GPU 张量计算。配置中的队列容量是未来流水线并行化的预留字段。优化并行度时必须保持三条顺序约束：模板 revision 有序、同帧轮次有序、FrameTransaction 只能提交一次。
 

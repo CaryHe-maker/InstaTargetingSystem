@@ -1,11 +1,11 @@
 # InstaTargetingSystem 文档索引
 
 当前实现文档按模块组织。每个 `structure.md` 只说明边界和阅读路线，算法细节放在同目录专题文档中。
-`docs/User/` 与 `docs/Prepare/` 保持原内容；Prepare 是历史设计材料，不作为当前实现规范。
+除 `docs/Prepare/` 外，本文档树按当前代码维护；Prepare 是历史设计材料，不作为当前实现规范。
 
 | 模块 | 结构入口 | 主要专题 |
 |---|---|---|
-| Overall | [structure.md](structure.md) | [架构](architecture.md)、[完整运行线程](runtimeThread.md)、[优化入口](optimizationMap.md) |
+| Overall | [structure.md](structure.md) | [架构](architecture.md)、[完整运行线程](runtimeThread.md)、[运动评分与边界回投](motionProjectionUpgrade.md)、[优化入口](optimizationMap.md) |
 | Core | [../Core/structure.md](../Core/structure.md) | 数据类型、事务协议、严格配置 |
 | Runtime | [../Runtime/structure.md](../Runtime/structure.md) | 组件装配、逐帧循环、计时生命周期 |
 | Controller | [../Controller/structure.md](../Controller/structure.md) | 状态机、运动预测、视图规划、StateEvaluator、校准、模板事务 |

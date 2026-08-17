@@ -21,6 +21,7 @@ class FakeHiTSession:
         self.supportsOnlineTemplates = supportsOnlineTemplates
         self.encoded: list[tuple[int, BBoxXYWH]] = []
         self.inferred: list[tuple[int, tuple[object, ...]]] = []
+        self.batchInferred: list[tuple[int, ...]] = []
         self.closeCount = 0
         self.returnInvalidBox = False
 
@@ -41,6 +42,14 @@ class FakeHiTSession:
             modelScore=0.8,
             appearanceScore=0.7,
         )
+
+    def inferBatch(
+        self,
+        rgbs: tuple[np.ndarray, ...],
+        templateFeatures: tuple[object, ...],
+    ) -> tuple[HiTPrediction, ...]:
+        self.batchInferred.append(tuple(int(rgb[0, 0, 0]) for rgb in rgbs))
+        return tuple(self.infer(rgb, templateFeatures) for rgb in rgbs)
 
     def close(self) -> None:
         self.closeCount += 1
@@ -106,6 +115,22 @@ class TrackerBackendTest(unittest.TestCase):
         self.assertEqual(observations[0].fusedScore, observations[0].appearanceScore)
         self.assertEqual(session.inferred[0][1], ("template-0",))
 
+    def testSameRoundViewsUseOneBatchCall(self) -> None:
+        session = FakeHiTSession()
+        backend = TrackerBackendImpl(HiTBackend(session))
+        backend.initialize(
+            _view(0, 10),
+            BBoxXYWH(xPx=0.0, yPx=0.0, widthPx=2.0, heightPx=2.0),
+        )
+
+        observations = backend.infer(
+            [_view(1, 20), _view(2, 30), _view(3, 40), _view(4, 50)],
+            _command(TemplateCommandKind.KEEP, 1, 1),
+        )
+
+        self.assertEqual(session.batchInferred, [(20, 30, 40, 50)])
+        self.assertEqual([item.viewId for item in observations], [1, 2, 3, 4])
+
     def testTemplateCommandsUsePreviousViewsAndRevisionIsAtomic(self) -> None:
         session = FakeHiTSession()
         backend = TrackerBackendImpl(HiTBackend(session))
@@ -125,6 +150,30 @@ class TrackerBackendTest(unittest.TestCase):
 
         backend.infer([], _command(TemplateCommandKind.RESET_TO_ANCHOR, 3, 3))
         self.assertEqual(backend.templateRevision, 3)
+
+    def testTemplateUpdateCanUseFirstRoundViewAfterSecondRound(self) -> None:
+        session = FakeHiTSession()
+        backend = TrackerBackendImpl(HiTBackend(session))
+        backend.initialize(
+            _view(0, 10),
+            BBoxXYWH(xPx=0.0, yPx=0.0, widthPx=2.0, heightPx=2.0),
+        )
+        backend.infer(
+            [_view(1, 20)],
+            _command(TemplateCommandKind.KEEP, 1, 1),
+        )
+        backend.infer(
+            [_view(4, 40)],
+            _command(TemplateCommandKind.KEEP, 1, 2),
+        )
+
+        backend.infer(
+            [],
+            _command(TemplateCommandKind.UPDATE_RECENT, 2, 3, viewId=1),
+        )
+
+        self.assertEqual(backend.templateRevision, 3)
+        self.assertEqual(session.encoded[-1][0], 20)
 
     def testUnsupportedOnlineTemplatesRejectUpdates(self) -> None:
         session = FakeHiTSession(supportsOnlineTemplates=False)

@@ -1,40 +1,39 @@
-# StateEvaluator 候选算法
+# StateEvaluator 与 Fusor
 
-实现位于 `controller/state_evaluator.py`。每次输入包含本轮多个 ProjectedObservation，以及同一帧此前所有轮次保存的 ProjectedObservation。StateEvaluator 把截至当前轮的全部局部视图结果放入同一个累计候选池，输出完整 `StateObservation`，供加轮、状态机、结果和诊断共同使用。旧轮次不会重新执行 backend 推理，而是复用其已经得到的局部框和分数。
+## 事务候选评估
 
-## 候选构造
+实现位于 `controller/state_evaluator.py`。TRACKING/UNCERTAIN 第一轮只把本轮 `ProjectedObservation` 交给 Fusor，最佳候选中心作为第二轮搜索中心；没有候选时回退到运动预测中心。第二轮结束时，第一轮和第二轮的全部观测合成同一事务候选池，再统一交给 Fusor。LOST 只有一轮，直接使用该轮 12 张视图。
 
-累计候选池中的每个投影观测先形成一个单框候选。随后在所有不同 viewId 之间计算 OverlapRate，因此 Round 2 可以产生 Round 1 × Round 2 跨轮融合，Round 3 可以产生 Round 1 × Round 2、Round 1 × Round 3 和 Round 2 × Round 3 跨轮融合：
+Runtime 先完成局部框回投和 SingleScore，再把投影结果交给 StateEvaluator。StateEvaluator 调用 Fusor 得到当前提交点的唯一最佳候选，输出 StateObservation、StateScore、测量接受资格和诊断字段。
 
-```text
-OverlapRate = ERP交集面积 / min(框A面积, 框B面积)
-```
+## Fusor
 
-横向交集使用循环 ERP 区间，能识别跨左右边界的同一目标。
-
-## 一对一融合
-
-累计候选池中所有达到当前轮融合阈值的边按 OverlapRate 降序，再按来源分数和 viewId 稳定排序。贪心选边时，一个来源框一旦使用就不能再次融合。因此融合框永远只有两个来源；一个框同时匹配多个框时只选择重合率最高的一个。这里累计的是可供选择和配对的全部局部框，不会把三框直接合成一个多来源融合框。
-
-融合几何取两个 ERP 框的交叉区域，不取最小外包框。若循环交集在经线处被拆成两段，算法先合并首尾相邻段；无法表达多个断开区域时保留最大连通交集。
-
-## 融合分数
-
-设两来源置信度为 a、b，OverlapRate 为 y：
+实现位于 `controller/fusor.py`。Fusor 使用现有 seam-aware ERP 算法：
 
 ```text
-fuseScore = 1 - ((2 - a - b) * (1 - y) / 2)
+OverlapRate = ERP 交集面积 / min(框 A 面积, 框 B 面积)
 ```
 
-此外记录 `minSourceConfidence=min(a,b)`。融合分数高并不自动可靠：两个来源都必须达到 `fusionSourceMinConfidence`。
+Fusor 先把每个观测加入单框候选，再枚举全部无序观测对。当 OverlapRate >= 固定常量 0.70 时尝试两框融合，融合几何仍为 ERP 交集，最多使用两个来源。融合分数为：
 
-## 分轮阈值
+```text
+fusionScore = 1 - ((2 - a - b) * (1 - overlap) / 2)
+```
 
-非 LOST 的 Round 1 使用 `firstRoundFusionOverlap=0.30` 生成融合候选，但只有 y 大于 `overlapThreshold=0.70` 的融合框才能成为可靠输出。Round 2、Round 3 和 LOST Round 1 从一开始只融合 y 大于 0.70 的候选。进入新一轮时，会对截至该轮的累计局部框按该轮阈值重新构造融合候选，而不是沿用前一轮已经生成的融合框。
+Fusor 将所有单框和可行融合框统一排序，只返回一个最佳结果。先比较 confidence，同分时优先融合候选，再选择 representative viewId 较小者。`evaluator.fusionSourceMinConfidence` 不阻止生成融合候选，只决定该融合候选能否作为测量被接受；最终测量还必须达到 `tracking.candidateMinScore`。Fusor 不会返回候选列表，也不会融合三个或更多来源。
 
-## 选择与加轮
+## 保留的 Classifier
 
-截至当前轮的全部单框与重新生成的融合候选统一按置信度排序，同分时融合候选优先，再按 representative viewId 稳定选择。Round 1 只有可靠融合可以提前提交；UNCERTAIN/RECOVERING Round 2 的累计最高候选超过 `successRate` 可提交；各状态最终轮总是从累计候选池选择最高候选，不再因分数不足增加轮次。
+`controller/classifier.py` 仍保留确定性的加权球面聚类实现，供实验和兼容测试使用，但当前生产 Controller 不调用它，第二轮也不依赖 classify 结果。
 
-`searchSeedCenter` 永远取截至当前轮的累计最佳候选中心；没有候选时回退到预测中心。`StateObservation` 同时保存阈值、来源 viewId、是否融合、OverlapRate、分数分解和拒绝原因，用于定位阈值问题。
+若单独使用该工具，输入必须是投影后的观测，聚类坐标为 `ProjectedObservation.bfov.center` 的单位球面向量。每个类中心由 SingleScore 加权，所有成员到中心的大圆距离不超过 30°；结果按成员数量、类内平均 SingleScore 和 viewId 稳定排序，最多返回 3 个中心。
 
+## 分状态路由
+
+`TRACKING`：第一轮在预测中心周围取 VStype1 四角 4 张；第一轮 Fusor 最佳中心周围再取 VStype1 四角 4 张。
+
+`UNCERTAIN`：第一轮以预测中心为 front 取旋转 cubemap 6 张；第一轮 Fusor 最佳中心周围再取 VStype1 四角 4 张。
+
+`LOST`：第一轮一次性读取两个确定方向的旋转 cubemap，共 12 张，统一交给 Fusor；不再追加第二轮。
+
+TRACKING/UNCERTAIN 当前固定执行两轮，最终 StateScore 取两轮候选统一经过 Fusor 后的最佳分数；LOST 取单轮 12 张视图的 Fusor 最佳分数。没有候选时为 0，并输出预测框但不接受测量。`evaluator.successRate` 只写入诊断字段，不参与当前升级、排序或提交决策。

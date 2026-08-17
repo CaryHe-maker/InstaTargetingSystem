@@ -19,11 +19,13 @@
 ## 关键交叉约束
 
 - `geometry.maxFovDeg` 必须为 120，保证固定最大搜索视域。
-- `firstRoundFusionOverlap < overlapThreshold`。
-- `uncertainThreshold < acceptThreshold <= recoverAcceptThreshold`。
-- 三轮配置的 `maxViewsPerFrameTotal` 至少容纳 4+4+6=14 个视图。
+- schema 仍要求 `firstRoundFusionOverlap < overlapThreshold`，但两项当前只为配置兼容；生产 Fusor 使用固定 0.70 常量。
+- 状态阈值不再来自 YAML 标量；状态机根据最近 10 个 `StateScore` 动态计算 UT/LT。
+- `tracking.maxAttemptsPerFrame` 固定为 2，`tracking.maxViewsPerFrameTotal` 至少容纳 12 张视图（LOST 的两个旋转 cubemap）。
 - `fusionHead` 权重非负且至少一个为正。
-- DecisionGate 三项权重总和不超过 1。
+- DecisionGate 三项权重总和不超过 1；生产 StateEvaluator 当前忽略整组 DecisionGate。
+
+外观 Beta 参数、运动残差组合权重和 70/30 SingleScore 当前是 `controller/fused_score.py` 中的冻结代码常量，不属于 YAML。`decisionGate.*Weight` 只服务旧兼容聚合，不控制生产路径的 SingleScore。
 
 ## 修改流程
 

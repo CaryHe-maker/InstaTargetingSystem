@@ -78,19 +78,40 @@ class HiTBackend:
             raise ModelError(f"HiT template encoding failed: {error}") from error
 
     def infer(self, rgb: NDArray[np.uint8], templateFeatures: Sequence[object]) -> HiTPrediction:
+        return self.inferBatch((rgb,), templateFeatures)[0]
+
+    def inferBatch(
+        self,
+        rgbs: Sequence[NDArray[np.uint8]],
+        templateFeatures: Sequence[object],
+    ) -> tuple[HiTPrediction, ...]:
         self._requireOpen()
-        _requireRgb(rgb)
+        images = tuple(rgbs)
+        for rgb in images:
+            _requireRgb(rgb)
+        if not images:
+            return ()
         if not templateFeatures:
             raise ProtocolError("HiT inference requires at least one template feature")
         try:
-            prediction = self._session.infer(rgb, templateFeatures)
+            batchInfer = getattr(self._session, "inferBatch", None)
+            predictions = (
+                tuple(batchInfer(images, templateFeatures))
+                if callable(batchInfer)
+                else tuple(self._session.infer(rgb, templateFeatures) for rgb in images)
+            )
         except (ModelError, ProtocolError):
             raise
         except Exception as error:
-            raise ModelError(f"HiT inference failed: {error}") from error
-        if not isinstance(prediction, HiTPrediction):
+            raise ModelError(f"HiT batch inference failed: {error}") from error
+        if len(predictions) != len(images):
+            raise ModelError(
+                "HiT session returned an invalid batch size: "
+                f"expected={len(images)}, actual={len(predictions)}"
+            )
+        if any(not isinstance(prediction, HiTPrediction) for prediction in predictions):
             raise ModelError("HiT session returned an invalid prediction object")
-        return prediction
+        return predictions
 
     def close(self) -> None:
         if self._closed:

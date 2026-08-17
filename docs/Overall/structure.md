@@ -21,6 +21,7 @@
 
 - [architecture.md](architecture.md)：端到端数据流和依赖方向。
 - [runtimeThread.md](runtimeThread.md)：从 CLI 到每帧提交的完整运行线程。
+- [motionProjectionUpgrade.md](motionProjectionUpgrade.md)：运动评分、SingleScore 和直接边界回投的现行方案。
 - [optimizationMap.md](optimizationMap.md)：常见优化目标应该修改哪里、观察什么指标。
 
 公共入口为 `track.py`、`src/instatarget/app/commands.py` 和 `src/instatarget/app/driver.py`。

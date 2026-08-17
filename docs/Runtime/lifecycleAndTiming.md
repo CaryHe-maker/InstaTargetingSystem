@@ -6,7 +6,7 @@
 
 ## 计入范围
 
-帧读取/解码、初始化模板、Controller 计划、视图裁剪、HiT 推理、Beta Calibration、回投影、StateEvaluator、状态转移和 TrackResult 构造都计入。
+帧读取/解码、初始化模板、Controller 计划、视图裁剪、HiT 推理、外观与运动校准、一次边界回投、SingleScore 合成、StateEvaluator、状态转移和 TrackResult 构造都计入。
 
 ## 排除范围
 

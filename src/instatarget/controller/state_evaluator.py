@@ -1,12 +1,10 @@
-"""Evaluate one bounded search round with deterministic two-box fusion."""
+"""Evaluate a search attempt and its transaction-scoped candidate pool."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from math import pi
 
-import numpy as np
-
+from instatarget.controller.fusor import FUSION_OVERLAP_RATE, Fusor
 from instatarget.controller.state_model import (
     EvaluatedCandidate,
     EvaluationReason,
@@ -19,19 +17,15 @@ from instatarget.controller.state_model import (
 from instatarget.core.config import DecisionGateConfig, EvaluatorConfig, TrackingConfig
 from instatarget.core.errors import ProtocolError
 from instatarget.core.protocols import SphericalGeometry
-from instatarget.core.types import (
-    BBoxXYWH,
-    BFoV,
-    DepthSummary,
-    ProjectedObservation,
-    ResultSource,
-    SearchPlan,
-)
-from instatarget.geometry.projection_math import erpPixelToSphericalPoint
+from instatarget.core.types import BFoV, ProjectedObservation, ResultSource, SearchPlan
 
 
 class StateEvaluator:
-    """Pure cumulative same-frame fusion, ranking, escalation and evidence evaluation."""
+    """Select one best candidate from all observations eligible at this attempt.
+
+    The evaluator owns candidate geometry and measurement eligibility.  The state machine
+    receives only the resulting StateScore for next-state selection.
+    """
 
     def __init__(
         self,
@@ -39,7 +33,7 @@ class StateEvaluator:
         trackingConfig: TrackingConfig,
         evaluatorConfig: EvaluatorConfig | None = None,
     ) -> None:
-        self._gateConfig = gateConfig
+        del gateConfig
         self._tracking = trackingConfig
         self._config = evaluatorConfig or EvaluatorConfig()
 
@@ -57,78 +51,44 @@ class StateEvaluator:
         frameHeightPx: int,
     ) -> StateObservation:
         self._validate(plan, observations)
-        cumulativeObservations = (*priorObservations, *observations)
-        viewIds = tuple(item.viewId for item in cumulativeObservations)
-        if len(viewIds) != len(set(viewIds)):
-            raise ProtocolError("cumulative projected observations must have unique viewIds")
-        fusionThreshold = self._fusionThreshold(state.mode, plan.attemptIndex)
-        localCandidates = tuple(_localCandidate(item) for item in cumulativeObservations)
-        fusedCandidates = _fuseCandidates(
-            cumulativeObservations,
-            fusionThreshold,
-            self._config.fusionSourceMinConfidence,
+        if priorObservations and plan.attemptIndex == 0:
+            raise ProtocolError("first attempt cannot contain prior observations")
+        candidatePool = _combineObservations(priorObservations, observations)
+        best = Fusor(
             geometry,
-            frameWidthPx,
-            frameHeightPx,
+            overlapRate=FUSION_OVERLAP_RATE,
+            sourceMinConfidence=self._config.fusionSourceMinConfidence,
+        ).fuse(
+            candidatePool,
+            frameWidthPx=frameWidthPx,
+            frameHeightPx=frameHeightPx,
         )
-        candidates = (*localCandidates, *fusedCandidates)
-        best = max(candidates, key=_candidateRank) if candidates else None
-        isFinalAttempt = _isFinalAttempt(state.mode, plan.attemptIndex)
-        evidence = self.classifyFinal(best)
-        outputEligible = self._outputEligible(
-            state.mode,
-            plan.attemptIndex,
-            isFinalAttempt,
-            best,
+        isFinalAttempt = not (
+            state.mode in {TrackMode.TRACKING, TrackMode.UNCERTAIN}
+            and plan.attemptIndex == 0
         )
-        escalation = not outputEligible and not isFinalAttempt
-
-        if best is None:
-            outputBfov = predictedBfov
-            outputBbox = geometry.bfovToBbox(predictedBfov, frameWidthPx, frameHeightPx)
-            proposedSource = ResultSource.MOTION_PREDICTED
-            searchSeed = prediction.center
-            representative = None
-        else:
-            outputBfov = best.bfov
-            outputBbox = best.bbox
-            proposedSource = (
-                ResultSource.OBSERVED_CONFIRMED
-                if evidence in {
-                    MeasurementEvidence.RELIABLE_FUSED,
-                    MeasurementEvidence.RELIABLE_SINGLE,
-                }
-                else ResultSource.OBSERVED_WEAK_BLEND
-            )
-            searchSeed = best.bfov.center
-            representative = next(
-                (
-                    item
-                    for item in cumulativeObservations
-                    if item.viewId == best.representativeViewId
-                ),
-                None,
-            )
-
+        accepted = _measurementAccepted(best, self._tracking.candidateMinScore)
+        evidence = _evidence(best, accepted)
+        outputBfov = best.bfov if best is not None else predictedBfov
+        outputBbox = (
+            best.bbox
+            if best is not None
+            else geometry.bfovToBbox(predictedBfov, frameWidthPx, frameHeightPx)
+        )
+        representative = next(
+            (
+                item
+                for item in candidatePool
+                if best is not None and item.viewId == best.representativeViewId
+            ),
+            None,
+        )
+        stateScore = best.confidence if best is not None else 0.0
         reasons: list[EvaluationReason] = []
         if best is None:
             reasons.append(EvaluationReason.NO_ELIGIBLE_CLUSTER)
-        elif (
-            best.fused
-            and best.confidence > self._config.successRate
-            and not best.sourceConfidencePassed
-        ):
-            reasons.append(EvaluationReason.SOURCE_CONFIDENCE_BELOW_THRESHOLD)
-        elif evidence is MeasurementEvidence.WEAK:
+        elif not accepted:
             reasons.append(EvaluationReason.BELOW_UNCERTAIN_THRESHOLD)
-
-        supportCount = len(best.sourceViewIds) if best is not None else 0
-        supportScore = min(1.0, supportCount / 2.0)
-        agreementScore = (
-            best.overlapRate
-            if best is not None and best.overlapRate is not None
-            else (1.0 if best is not None else 0.0)
-        )
         return StateObservation(
             sequenceId=plan.sequenceId,
             frameIndex=plan.frameIndex,
@@ -138,104 +98,94 @@ class StateEvaluator:
             attemptIndex=plan.attemptIndex,
             evaluatedMode=state.mode,
             isFinalAttempt=isFinalAttempt,
+            appearanceOnlyScoring=False,
             successRate=self._config.successRate,
-            fusionThreshold=fusionThreshold,
-            overlapThreshold=self._config.overlapThreshold,
+            fusionThreshold=FUSION_OVERLAP_RATE,
+            overlapThreshold=FUSION_OVERLAP_RATE,
             fusionSourceMinConfidence=self._config.fusionSourceMinConfidence,
             bestCandidate=best,
             predictedCenter=prediction.center,
-            searchSeedCenter=searchSeed,
+            searchSeedCenter=best.bfov.center if best is not None else prediction.center,
             measuredBfov=best.bfov if best is not None else None,
             measuredBbox=best.bbox if best is not None else None,
             measuredCenter=best.bfov.center if best is not None else None,
             proposedOutputBfov=outputBfov,
             proposedOutputBbox=outputBbox,
-            proposedResultSource=proposedSource,
-            candidateCount=len(cumulativeObservations),
-            eligibleCandidateCount=len(candidates),
-            clusterCount=len(fusedCandidates),
-            sourceViewIds=best.sourceViewIds if best is not None else (),
-            representativeViewId=(best.representativeViewId if best is not None else None),
-            representativeLocalBox=(
-                best.representativeLocalBox if best is not None else None
+            proposedResultSource=(
+                ResultSource.OBSERVED_CONFIRMED
+                if accepted
+                else ResultSource.OBSERVED_WEAK_BLEND
+                if best is not None
+                else ResultSource.MOTION_PREDICTED
             ),
+            candidateCount=len(candidatePool),
+            eligibleCandidateCount=1 if best is not None else 0,
+            clusterCount=1 if best is not None and best.fused else 0,
+            sourceViewIds=best.sourceViewIds if best is not None else (),
+            representativeViewId=best.representativeViewId if best is not None else None,
+            representativeLocalBox=best.representativeLocalBox if best is not None else None,
             selectedIsFused=best.fused if best is not None else False,
             selectedOverlapRate=best.overlapRate if best is not None else None,
-            selectedMinSourceConfidence=(
-                best.minSourceConfidence if best is not None else None
-            ),
+            selectedMinSourceConfidence=best.minSourceConfidence if best is not None else None,
             selectedSourceConfidencePassed=(
                 best.sourceConfidencePassed if best is not None else False
             ),
-            fusedCandidateCount=len(fusedCandidates),
-            outputEligible=outputEligible,
-            supportViewCount=supportCount,
-            backendScore=representative.fusedScore if representative is not None else 0.0,
+            fusedCandidateCount=1 if best is not None and best.fused else 0,
+            outputEligible=best is not None,
+            supportViewCount=len(best.sourceViewIds) if best is not None else 0,
+            backendScore=_backendScore(representative),
             motionScore=representative.motionScore if representative is not None else 0.0,
             scaleScore=representative.scaleScore if representative is not None else 0.0,
-            depthConsistencyScore=(
-                representative.depthScore
-                if representative is not None and representative.depthSummary is not None
-                else None
+            depthConsistencyScore=representative.depthScore if representative is not None else None,
+            supportScore=min(1.0, len(best.sourceViewIds) / 2.0) if best is not None else 0.0,
+            agreementScore=(
+                best.overlapRate
+                if best is not None and best.overlapRate is not None
+                else 0.0
             ),
-            supportScore=supportScore,
-            agreementScore=float(agreementScore),
-            stateScore=best.confidence if best is not None else 0.0,
+            stateScore=stateScore,
             evidence=evidence,
-            hardGatePassed=best is not None,
+            hardGatePassed=accepted,
             supported=best.fused if best is not None else False,
-            escalationRecommended=escalation,
-            reacquired=(
-                state.mode in {TrackMode.LOST, TrackMode.RECOVERING}
-                and evidence is MeasurementEvidence.RELIABLE_FUSED
+            escalationRecommended=(
+                state.mode in {TrackMode.TRACKING, TrackMode.UNCERTAIN}
+                and plan.attemptIndex == 0
             ),
+            reacquired=state.mode is TrackMode.LOST and accepted,
             depthSummary=best.depthSummary if best is not None else None,
             rejectionReasons=tuple(reasons),
+            rawMotionScore=representative.rawMotionScore if representative is not None else None,
+            motionProbability=(
+                representative.motionProbability if representative is not None else None
+            ),
+            motionReliability=(
+                representative.motionReliability
+                if representative is not None
+                else prediction.reliability
+            ),
+            motionSampleCount=prediction.sampleCount,
+            motionDegradedReasons=prediction.degradedReasons,
+            measurementAccepted=accepted,
         )
 
     def classifyFinal(
         self,
         candidate: EvaluatedCandidate | None,
+        successRate: float | None = None,
+        overlapThreshold: float | None = None,
     ) -> MeasurementEvidence:
+        del successRate, overlapThreshold
         if candidate is None:
             return MeasurementEvidence.MISSING
-        if (
-            candidate.fused
-            and candidate.overlapRate is not None
-            and candidate.overlapRate > self._config.overlapThreshold
-            and candidate.confidence > self._config.successRate
-            and candidate.sourceConfidencePassed
-        ):
-            return MeasurementEvidence.RELIABLE_FUSED
-        if not candidate.fused and candidate.confidence > self._config.successRate:
-            return MeasurementEvidence.RELIABLE_SINGLE
-        return MeasurementEvidence.WEAK
+        if candidate.fused:
+            return (
+                MeasurementEvidence.RELIABLE_FUSED
+                if candidate.sourceConfidencePassed
+                else MeasurementEvidence.WEAK
+            )
+        return MeasurementEvidence.RELIABLE_SINGLE
 
-    def _fusionThreshold(self, mode: TrackMode, attemptIndex: int) -> float:
-        if attemptIndex == 0 and mode is not TrackMode.LOST:
-            return self._config.firstRoundFusionOverlap
-        return self._config.overlapThreshold
-
-    def _outputEligible(
-        self,
-        mode: TrackMode,
-        attemptIndex: int,
-        isFinalAttempt: bool,
-        best: EvaluatedCandidate | None,
-    ) -> bool:
-        if isFinalAttempt:
-            return True
-        if attemptIndex == 0:
-            return self.classifyFinal(best) is MeasurementEvidence.RELIABLE_FUSED
-        if mode in {TrackMode.UNCERTAIN, TrackMode.RECOVERING} and attemptIndex == 1:
-            return best is not None and best.confidence > self._config.successRate
-        return False
-
-    def _validate(
-        self,
-        plan: SearchPlan,
-        observations: Sequence[ProjectedObservation],
-    ) -> None:
+    def _validate(self, plan: SearchPlan, observations: Sequence[ProjectedObservation]) -> None:
         expected = tuple(view.viewId for view in plan.views)
         actual = tuple(item.viewId for item in observations)
         if len(actual) != len(set(actual)):
@@ -246,233 +196,42 @@ class StateEvaluator:
             raise ProtocolError("projected observations must preserve requested view order")
 
 
-def _isFinalAttempt(mode: TrackMode, attemptIndex: int) -> bool:
-    if mode in {TrackMode.TRACKING, TrackMode.LOST}:
-        return attemptIndex >= 1
-    if mode in {TrackMode.UNCERTAIN, TrackMode.RECOVERING}:
-        return attemptIndex >= 2
-    return True
+def _measurementAccepted(candidate: EvaluatedCandidate | None, minimumScore: float) -> bool:
+    if candidate is None or candidate.confidence < minimumScore:
+        return False
+    return not candidate.fused or candidate.sourceConfidencePassed
 
 
-def _localCandidate(observation: ProjectedObservation) -> EvaluatedCandidate:
-    return EvaluatedCandidate(
-        bfov=observation.bfov,
-        bbox=observation.bbox,
-        confidence=float(np.clip(observation.fusedScore, 0.0, 1.0)),
-        sourceViewIds=(observation.viewId,),
-        fused=False,
-        overlapRate=None,
-        minSourceConfidence=None,
-        sourceConfidencePassed=True,
-        representativeViewId=observation.viewId,
-        representativeLocalBox=observation.localBox,
-        depthSummary=observation.depthSummary,
-    )
-
-
-def _fuseCandidates(
+def _combineObservations(
+    priorObservations: Sequence[ProjectedObservation],
     observations: Sequence[ProjectedObservation],
-    threshold: float,
-    sourceMinConfidence: float,
-    geometry: SphericalGeometry,
-    frameWidthPx: int,
-    frameHeightPx: int,
-) -> tuple[EvaluatedCandidate, ...]:
-    edges: list[tuple[float, float, int, int, ProjectedObservation, ProjectedObservation]] = []
-    for firstIndex, first in enumerate(observations):
-        for second in observations[firstIndex + 1 :]:
-            if first.viewId == second.viewId:
-                continue
-            overlap = _overlapRate(first.bbox, second.bbox, frameWidthPx)
-            if overlap <= threshold:
-                continue
-            edges.append(
-                (
-                    overlap,
-                    max(first.fusedScore, second.fusedScore),
-                    min(first.viewId, second.viewId),
-                    max(first.viewId, second.viewId),
-                    first,
-                    second,
-                )
-            )
-    edges.sort(key=lambda item: (-item[0], -item[1], item[2], item[3]))
-
-    used: set[int] = set()
-    fused: list[EvaluatedCandidate] = []
-    for overlap, _, _, _, first, second in edges:
-        if first.viewId in used or second.viewId in used:
-            continue
-        used.update((first.viewId, second.viewId))
-        bbox = _intersectionBox(first.bbox, second.bbox, frameWidthPx, frameHeightPx)
-        if bbox is None:
-            continue
-        bfov = _intersectionBfov(bbox, geometry, frameWidthPx, frameHeightPx)
-        confidence = 1.0 - (
-            (2.0 - second.fusedScore - first.fusedScore) * (1.0 - overlap) / 2.0
-        )
-        confidence = float(np.clip(confidence, 0.0, 1.0))
-        representative = max(
-            (first, second),
-            key=lambda item: (item.fusedScore, -item.viewId),
-        )
-        minSource = min(first.fusedScore, second.fusedScore)
-        fused.append(
-            EvaluatedCandidate(
-                bfov=bfov,
-                bbox=bbox,
-                confidence=confidence,
-                sourceViewIds=tuple(sorted((first.viewId, second.viewId))),
-                fused=True,
-                overlapRate=overlap,
-                minSourceConfidence=minSource,
-                sourceConfidencePassed=minSource >= sourceMinConfidence,
-                representativeViewId=representative.viewId,
-                representativeLocalBox=representative.localBox,
-                depthSummary=_mergeDepth(first, second),
-            )
-        )
-    return tuple(fused)
+) -> tuple[ProjectedObservation, ...]:
+    combined = tuple(priorObservations) + tuple(observations)
+    viewIds = tuple(item.viewId for item in combined)
+    if len(viewIds) != len(set(viewIds)):
+        raise ProtocolError("cross-round candidate pool must have unique viewIds")
+    return combined
 
 
-def _intersectionBfov(
-    bbox: BBoxXYWH,
-    geometry: SphericalGeometry,
-    frameWidthPx: int,
-    frameHeightPx: int,
-) -> BFoV:
-    horizontalSpan = 2.0 * pi * min(bbox.widthPx, frameWidthPx) / frameWidthPx
-    if horizontalSpan < pi:
-        return geometry.bboxToBfov(bbox, frameWidthPx, frameHeightPx)
-
-    # A perspective BFoV cannot span 180 degrees. Keep the exact ERP intersection bbox
-    # and attach an equirectangular envelope for this unusual wide intersection.
-    center = erpPixelToSphericalPoint(
-        (bbox.xPx + bbox.widthPx / 2.0) % frameWidthPx,
-        min(float(frameHeightPx), max(0.0, bbox.yPx + bbox.heightPx / 2.0)),
-        frameWidthPx,
-        frameHeightPx,
-    )
-    return BFoV(
-        center=center,
-        horizontalFovRad=min(horizontalSpan, float(np.nextafter(2.0 * pi, 0.0))),
-        verticalFovRad=min(
-            pi * min(bbox.heightPx, frameHeightPx) / frameHeightPx,
-            float(np.nextafter(pi, 0.0)),
-        ),
+def _evidence(candidate: EvaluatedCandidate | None, accepted: bool) -> MeasurementEvidence:
+    if candidate is None:
+        return MeasurementEvidence.MISSING
+    if not accepted:
+        return MeasurementEvidence.WEAK
+    return (
+        MeasurementEvidence.RELIABLE_FUSED
+        if candidate.fused
+        else MeasurementEvidence.RELIABLE_SINGLE
     )
 
 
-def _candidateRank(candidate: EvaluatedCandidate) -> tuple[float, bool, int]:
-    return candidate.confidence, candidate.fused, -candidate.representativeViewId
-
-
-def _overlapRate(first: BBoxXYWH, second: BBoxXYWH, frameWidthPx: int) -> float:
-    yStart = max(first.yPx, second.yPx)
-    yEnd = min(first.yPx + first.heightPx, second.yPx + second.heightPx)
-    if yEnd <= yStart:
+def _backendScore(observation: ProjectedObservation | None) -> float:
+    if observation is None:
         return 0.0
-    horizontal = 0.0
-    for firstStart, firstEnd in _xSegments(first, frameWidthPx):
-        for secondStart, secondEnd in _xSegments(second, frameWidthPx):
-            horizontal += max(0.0, min(firstEnd, secondEnd) - max(firstStart, secondStart))
-    intersection = horizontal * (yEnd - yStart)
-    smallerArea = min(first.widthPx * first.heightPx, second.widthPx * second.heightPx)
-    if smallerArea <= 0.0:
-        return 0.0
-    return float(np.clip(intersection / smallerArea, 0.0, 1.0))
-
-
-def _xSegments(box: BBoxXYWH, frameWidthPx: int) -> tuple[tuple[float, float], ...]:
-    width = min(float(frameWidthPx), box.widthPx)
-    start = box.xPx % frameWidthPx
-    end = start + width
-    if end <= frameWidthPx:
-        return ((start, end),)
-    return ((start, float(frameWidthPx)), (0.0, end - frameWidthPx))
-
-
-def _intersectionBox(
-    first: BBoxXYWH,
-    second: BBoxXYWH,
-    frameWidthPx: int,
-    frameHeightPx: int,
-) -> BBoxXYWH | None:
-    intersections = sorted(
-        (
-            max(firstStart, secondStart),
-            min(firstEnd, secondEnd),
-        )
-        for firstStart, firstEnd in _xSegments(first, frameWidthPx)
-        for secondStart, secondEnd in _xSegments(second, frameWidthPx)
-        if min(firstEnd, secondEnd) > max(firstStart, secondStart)
-    )
-    if not intersections:
-        return None
-
-    # A circular intersection can be split at the ERP seam. Merge only seam-adjacent
-    # pieces; if two large arcs intersect in disconnected pieces, retain the largest
-    # connected component because BBoxXYWH can represent one region only.
-    merged: list[list[float]] = []
-    for start, end in intersections:
-        if merged and start <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], end)
-        else:
-            merged.append([start, end])
-    if len(merged) > 1 and merged[0][0] == 0.0 and merged[-1][1] == frameWidthPx:
-        seamStart = merged[-1][0]
-        seamWidth = merged[0][1] + frameWidthPx - seamStart
-        horizontalStart, horizontalWidth = seamStart, seamWidth
-    else:
-        component = max(merged, key=lambda item: item[1] - item[0])
-        horizontalStart = component[0]
-        horizontalWidth = component[1] - component[0]
-    yStart = max(0.0, first.yPx, second.yPx)
-    yEnd = min(float(frameHeightPx), first.yPx + first.heightPx, second.yPx + second.heightPx)
-    if yEnd <= yStart or horizontalWidth <= 0.0:
-        return None
-    return BBoxXYWH(
-        xPx=horizontalStart,
-        yPx=yStart,
-        widthPx=horizontalWidth,
-        heightPx=yEnd - yStart,
-    )
-
-
-def _mergeDepth(
-    first: ProjectedObservation,
-    second: ProjectedObservation,
-) -> DepthSummary | None:
-    if first.depthSummary is None:
-        return second.depthSummary
-    if second.depthSummary is None:
-        return first.depthSummary
-    firstWeight = max(first.fusedScore, 1e-6)
-    secondWeight = max(second.fusedScore, 1e-6)
-    total = firstWeight + secondWeight
-    return DepthSummary(
-        medianDepth=(
-            first.depthSummary.medianDepth * firstWeight
-            + second.depthSummary.medianDepth * secondWeight
-        )
-        / total,
-        meanDepth=(
-            first.depthSummary.meanDepth * firstWeight
-            + second.depthSummary.meanDepth * secondWeight
-        )
-        / total,
-        validRatio=(
-            first.depthSummary.validRatio * firstWeight
-            + second.depthSummary.validRatio * secondWeight
-        )
-        / total,
-        minDepth=min(first.depthSummary.minDepth, second.depthSummary.minDepth),
-        maxDepth=max(first.depthSummary.maxDepth, second.depthSummary.maxDepth),
-        confidence=(
-            first.depthSummary.confidence * firstWeight
-            + second.depthSummary.confidence * secondWeight
-        )
-        / total,
+    return float(
+        observation.backendFusedScore
+        if observation.backendFusedScore is not None
+        else observation.fusedScore
     )
 
 

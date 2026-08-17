@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from math import asin, atan2, cos, pi, sin, sqrt, tan
 
@@ -16,7 +17,11 @@ from instatarget.core.types import (
     TrackStatus,
     ViewSpec,
 )
-from instatarget.geometry.projection_math import makeSphericalPoint, unitVectorToYawPitch
+from instatarget.geometry.projection_math import (
+    cameraBasis,
+    makeSphericalPoint,
+    unitVectorToYawPitch,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,8 +59,9 @@ class RecoveryPlanner:
         viewIdStart: int = 0,
         viewBudget: int | None = None,
         recoveryMemory: RecoveryMemory | None = None,
+        targetCenters: Sequence[SphericalPoint] | None = None,
     ) -> tuple[PlannedView, ...]:
-        del frameIndex, anchorBox, currentBox, recoveryMemory
+        del frameIndex, anchorBox, currentBox, recoveryMemory, targetCenters
         if frameWidthPx <= 0 or frameHeightPx <= 0:
             raise ProtocolError("frame dimensions must be positive")
         if attemptIndex < 0 or attemptIndex >= self._tracking.maxAttemptsPerFrame:
@@ -64,22 +70,43 @@ class RecoveryPlanner:
         center = searchSeedCenter or (
             _motionCenter(predictedMotion) if predictedMotion is not None else fallbackBfov.center
         )
-        useCubeMap = (
-            status is TrackStatus.LOST and attemptIndex == 0
-        ) or (
-            status in {TrackStatus.UNCERTAIN, TrackStatus.RECOVERING} and attemptIndex == 2
-        )
-        if status in {TrackStatus.TRACKING, TrackStatus.LOST} and attemptIndex >= 2:
-            raise ProtocolError(f"{status.name} does not support a third search round")
+        if status is TrackStatus.LOST:
+            if attemptIndex != 0:
+                raise ProtocolError("LOST uses one combined 12-view recovery attempt")
+            firstDirections = _cubeDirections(center)
+            expansionCenter = firstDirections[1][1]
+            requiredViews = 12
+            budget = viewBudget if viewBudget is not None else self._tracking.maxViewsPerFrameTotal
+            if budget < requiredViews:
+                raise ProtocolError(
+                    "view budget cannot fit LOST recovery: "
+                    f"required={requiredViews}, available={budget}"
+                )
+            return (
+                self._cubeMap(center, viewIdStart, attemptIndex, rolePrefix="cubemap")
+                + self._cubeMap(
+                    expansionCenter,
+                    viewIdStart + 6,
+                    attemptIndex,
+                    rolePrefix="recovery_cubemap",
+                )
+            )
 
-        requiredViews = 6 if useCubeMap else 4
+        if attemptIndex == 1:
+            requiredViews = 4
+        elif attemptIndex == 0:
+            requiredViews = 6 if status is TrackStatus.UNCERTAIN else 4
+        else:
+            raise ProtocolError(f"unsupported {status.name} attemptIndex: {attemptIndex}")
         budget = viewBudget if viewBudget is not None else self._tracking.maxViewsPerFrameTotal
         if budget < requiredViews:
             raise ProtocolError(
                 f"view budget cannot fit attempt: required={requiredViews}, available={budget}"
             )
-        if useCubeMap:
-            return self._cubeMap(viewIdStart, attemptIndex)
+        if attemptIndex == 1:
+            return self._fourCorners(center, viewIdStart, attemptIndex)
+        if status is TrackStatus.UNCERTAIN:
+            return self._cubeMap(center, viewIdStart, attemptIndex, rolePrefix="cubemap")
         return self._fourCorners(center, viewIdStart, attemptIndex)
 
     def contextBfov(
@@ -128,21 +155,20 @@ class RecoveryPlanner:
             for index, (role, yawOffset, pitchOffset) in enumerate(roles)
         )
 
-    def _cubeMap(self, viewIdStart: int, attemptIndex: int) -> tuple[PlannedView, ...]:
-        directions = (
-            ("front", 0.0, 0.0),
-            ("right", pi / 2.0, 0.0),
-            ("back", -pi, 0.0),
-            ("left", -pi / 2.0, 0.0),
-            ("up", 0.0, pi / 2.0),
-            ("down", 0.0, -pi / 2.0),
-        )
+    def _cubeMap(
+        self,
+        center: SphericalPoint,
+        viewIdStart: int,
+        attemptIndex: int,
+        *,
+        rolePrefix: str,
+    ) -> tuple[PlannedView, ...]:
         return tuple(
             PlannedView(
-                spec=self._viewSpec(viewIdStart + index, makeSphericalPoint(yaw, pitch)),
-                role=f"round{attemptIndex + 1}_cubemap_{role}",
+                spec=self._viewSpec(viewIdStart + index, target),
+                role=f"round{attemptIndex + 1}_{rolePrefix}_{role}",
             )
-            for index, (role, yaw, pitch) in enumerate(directions)
+            for index, (role, target) in enumerate(_cubeDirections(center),)
         )
 
     def _viewSpec(self, viewId: int, center: SphericalPoint) -> ViewSpec:
@@ -189,6 +215,31 @@ def _motionCenter(motion: MotionState3D) -> SphericalPoint:
 
 def _clampFov(value: float, geometry: GeometryConfig) -> float:
     return min(geometry.maxFovRad, max(geometry.minFovRad, value))
+
+
+def _cubeDirections(center: SphericalPoint) -> tuple[tuple[str, SphericalPoint], ...]:
+    """Build six 120-degree faces in a frame whose front points at ``center``."""
+    forward, right, up = cameraBasis(
+        BFoV(center=center, horizontalFovRad=pi * 2.0 / 3.0, verticalFovRad=pi * 2.0 / 3.0)
+    )
+    vectors = (
+        ("front", forward),
+        ("right", right),
+        ("back", -forward),
+        ("left", -right),
+        ("up", up),
+        ("down", -up),
+    )
+    return tuple(
+        (
+            role,
+            makeSphericalPoint(
+                float(atan2(vector[0], vector[2])),
+                float(asin(max(-1.0, min(1.0, float(vector[1]))))),
+            ),
+        )
+        for role, vector in vectors
+    )
 
 
 __all__ = ["PlannedView", "RecoveryPlanner"]

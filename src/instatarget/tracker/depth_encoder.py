@@ -107,6 +107,31 @@ class DepthEncoder:
             score = float(np.clip(np.mean(current), 0.0, 1.0))
         return DepthPrediction(depthScore=score, modelScore=score)
 
+    def inferBatch(
+        self,
+        depthRgbs: Sequence[NDArray[np.uint8]],
+        templateFeatures: Sequence[object] = (),
+    ) -> tuple[DepthPrediction, ...]:
+        self._requireOpen()
+        images = tuple(depthRgbs)
+        for image in images:
+            _requireDepthRgb(image)
+        if not images:
+            return ()
+        batchInfer = getattr(self._session, "inferBatch", None)
+        if callable(batchInfer):
+            try:
+                rawPredictions = tuple(batchInfer(images, templateFeatures))
+            except Exception as error:
+                raise ModelError(f"depth HiT batch inference failed: {error}") from error
+            if len(rawPredictions) != len(images):
+                raise ModelError(
+                    "depth HiT returned an invalid batch size: "
+                    f"expected={len(images)}, actual={len(rawPredictions)}"
+                )
+            return tuple(_coercePrediction(value) for value in rawPredictions)
+        return tuple(self.infer(image, templateFeatures) for image in images)
+
     def close(self) -> None:
         if self._closed:
             return

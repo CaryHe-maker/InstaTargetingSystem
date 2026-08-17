@@ -20,7 +20,7 @@
 
 ## 深度编码器
 
-DepthEncoder 把 depthRgb 交给独立会话，并把返回值适配成统一 DepthFeatures/DepthPrediction。模板与搜索必须使用相同的伪彩色配置，否则特征分布不一致。
+DepthEncoder 把 depthRgb 交给独立会话，并把返回值适配成统一 DepthFeatures/DepthPrediction。生产路径通过 `inferBatch()` 将本轮所有带深度的 depthRgb 按原 view 顺序组成一个 batch；底层 session 不支持 batch 时才逐图回退。模板与搜索必须使用相同的伪彩色配置，否则特征分布不一致。
 
 ## 优化观测
 

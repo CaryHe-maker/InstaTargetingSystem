@@ -128,7 +128,7 @@ class VisualizationRecorderTest(unittest.TestCase):
             draw.assert_called_once_with(
                 view.rgb,
                 observation.bbox,
-                label="fuseScore=0.8500",
+                label="fuseScore=0.850/0.000",
             )
 
     def testWritesWrappedGeometryBoxOverOriginalErpRgb(self) -> None:
@@ -151,7 +151,7 @@ class VisualizationRecorderTest(unittest.TestCase):
                 frame.rgb,
                 observation.bbox,
                 wrapHorizontal=True,
-                label="fuseScore=0.8500",
+                label="score=0.850/0.700/0.800/1.00",
             )
 
     def testWritesStateEvaluatorScoreBelowFinalResultBox(self) -> None:
@@ -168,7 +168,7 @@ class VisualizationRecorderTest(unittest.TestCase):
             with patch(
                 "instatarget.visualization.result.drawBoxRgb", wraps=drawBoxRgb
             ) as draw:
-                path = recorder.record(frame, result, stateScore=0.625)
+                path = recorder.record(frame, result, stateScore=0.625, roundCount=2)
 
             annotated = _readRgbPng(path)
             self.assertTrue(np.any(np.all(annotated[32:, :] == FLUORESCENT_GREEN_RGB, axis=2)))
@@ -176,8 +176,20 @@ class VisualizationRecorderTest(unittest.TestCase):
                 frame.rgb,
                 result.bbox,
                 wrapHorizontal=True,
-                label="stateScore=0.6250",
+                label="state=TRACKING/rounds=2/stateScore=0.6250",
             )
+
+    def testFinalResultLabelSupportsEveryControllerState(self) -> None:
+        rgb = np.zeros((64, 320, 3), dtype=np.uint8)
+        bbox = BBoxXYWH(10.0, 10.0, 30.0, 20.0)
+
+        for statusName in ("TRACKING", "UNCERTAIN", "LOST"):
+            annotated = drawBoxRgb(
+                rgb,
+                bbox,
+                label=f"state={statusName}/rounds=3/stateScore=0.6250",
+            )
+            self.assertTrue(np.any(np.all(annotated == FLUORESCENT_GREEN_RGB, axis=2)))
 
     def testInstanceIdDocumentOnlyUsesFrameZero(self) -> None:
         frame0 = _segmentationFrame(

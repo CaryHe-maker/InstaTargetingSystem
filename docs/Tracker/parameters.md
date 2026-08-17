@@ -7,7 +7,7 @@
 | `model.backend` | `pytorch` | 会话后端；ONNX/TensorRT 尚不是完整生产路径 |
 | `model.variant` | `hit_small` | HiT 结构变体 |
 | `model.weights` | `../models/hit_small.pth` | checkpoint 路径 |
-| `model.precision` | `fp32` | fp32 或 fp16 |
+| `model.precision` | RGB `fp32` / RGB-D `fp16` | PyTorch HiT 推理精度；fp16 非有限时整批以 fp32 重算 |
 
 ## 深度
 
@@ -35,5 +35,5 @@
 | `decisionGate.scaleScoreWeight` | 0.15 | 旧聚合兼容权重 |
 | `decisionGate.depthConsistencyWeight` | 0.10 | 旧聚合兼容权重 |
 
-深度缺失时无论权重如何都应回退 RGB 分数。调整融合权重后必须重新检查 Beta Calibration，因为原始 fusedScore 分布已经变化。
+深度缺失时无论权重如何都应回退 RGB 分数。调整融合权重后必须重新检查外观 Beta Calibration，因为 backend 原始 fusedScore 分布已经变化；生产候选最终再与有效运动概率按 70/30 合成 SingleScore。
 

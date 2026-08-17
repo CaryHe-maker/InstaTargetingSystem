@@ -168,6 +168,40 @@ class GeometryTest(unittest.TestCase):
             self.assertGreaterEqual(float(yPx), bbox.yPx - 1e-6)
             self.assertLessEqual(float(yPx), bbox.yPx + bbox.heightPx + 1e-6)
 
+    def testDirectLocalBoundaryProjectionAvoidsSecondEnvelope(self) -> None:
+        frameWidthPx = 360
+        frameHeightPx = 180
+        spec = ViewSpec(
+            viewId=3,
+            bfov=BFoV(
+                center=erpPixelToSphericalPoint(300.0, 45.0, frameWidthPx, frameHeightPx),
+                horizontalFovRad=1.8,
+                verticalFovRad=1.4,
+            ),
+            outputWidthPx=256,
+            outputHeightPx=256,
+        )
+        projection = self.geometry.projectLocalBoxBoundary(
+            BBoxXYWH(170.0, 20.0, 70.0, 150.0),
+            spec,
+            frameWidthPx,
+            frameHeightPx,
+        )
+
+        self.assertEqual(
+            len(projection.erpBoundary),
+            4 * self.geometry.boundarySamplesPerEdge,
+        )
+        self.assertLessEqual(
+            projection.bbox.widthPx * projection.bbox.heightPx,
+            projection.indirectBbox.widthPx * projection.indirectBbox.heightPx + 1e-6,
+        )
+        self.assertGreaterEqual(projection.envelopeInflation, 1.0 - 1e-9)
+        for xPx, yPx in projection.erpBoundary:
+            self.assertTrue(containsCircularX(xPx, projection.bbox, frameWidthPx))
+            self.assertGreaterEqual(yPx, projection.bbox.yPx - 1e-6)
+            self.assertLessEqual(yPx, projection.bbox.yPx + projection.bbox.heightPx + 1e-6)
+
     def testGeometryRejectsInvalidInputs(self) -> None:
         with self.assertRaises(GeometryError):
             SphericalGeometryImpl(boundarySamplesPerEdge=1)

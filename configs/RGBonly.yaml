@@ -47,12 +47,7 @@ motion:
   maxAngularSpeedRadPerSec: 2.0
   maxLogScaleRatePerSec: 1.0
 tracking:
-  acceptThreshold: 0.70
-  uncertainThreshold: 0.45
-  recoverAcceptThreshold: 0.80
   candidateMinScore: 0.40
-  uncertainPatience: 2
-  maxRecoveryFrames: 30
   stableFramesBeforeUpdate: 8
   windowLength: 5
   contextScale: 2.0
@@ -62,11 +57,10 @@ tracking:
   guardYawStepDeg: 120.0
   minViewsForCommit: 2
   sameFrameEscalationEnabled: true
-  maxAttemptsPerFrame: 3
-  maxViewsPerFrameTotal: 14
+  maxAttemptsPerFrame: 2
+  maxViewsPerFrameTotal: 12
   uncertainFovScale: 1.25
   reacquireCooldownFrames: 2
-  recoverConfirmFrames: 2
 recovery:
   maxViewsPerFrame: 12
   globalSearchInterval: 5

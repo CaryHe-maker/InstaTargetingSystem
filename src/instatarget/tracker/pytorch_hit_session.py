@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+from collections.abc import Sequence
 from contextlib import nullcontext
 from pathlib import Path
 from types import ModuleType
@@ -66,27 +67,61 @@ class PyTorchHiTSession:
         rgb: NDArray[np.uint8],
         templateFeatures: list[object] | tuple[object, ...],
     ) -> HiTPrediction:
+        return self.inferBatch((rgb,), templateFeatures)[0]
+
+    def inferBatch(
+        self,
+        rgbs: Sequence[NDArray[np.uint8]],
+        templateFeatures: Sequence[object],
+    ) -> tuple[HiTPrediction, ...]:
         self._requireOpen()
-        _requireRgb(rgb)
+        images = tuple(rgbs)
+        for rgb in images:
+            _requireRgb(rgb)
+        if not images:
+            return ()
         if not templateFeatures:
             raise ProtocolError("HiT inference requires at least one template")
         template = templateFeatures[-1]
         if not self._torch.is_tensor(template):
             raise ProtocolError("HiT template feature must be a torch tensor")
+        if template.ndim != 4 or template.shape[0] != 1:
+            raise ProtocolError(
+                "HiT template feature must have shape [1, C, H, W], "
+                f"actual={tuple(template.shape)}"
+            )
 
-        search = self._preprocess(_resizeRgb(rgb, _SEARCH_SIZE))
+        batchSize = len(images)
+        resized = np.stack([_resizeRgb(rgb, _SEARCH_SIZE) for rgb in images])
+        search = self._preprocessBatch(resized)
+        batchTemplate = template.expand(batchSize, -1, -1, -1)
         self._heatmaps.clear()
-        boxes = self._forward(search, template, useFp16=self._precision == "fp16")
+        boxes = self._forward(search, batchTemplate, useFp16=self._precision == "fp16")
         fp16Invalid = not bool(self._torch.isfinite(boxes).all()) or not _heatmapsAreFinite(
             self._heatmaps, self._torch
         )
         if self._precision == "fp16" and fp16Invalid:
             self._heatmaps.clear()
-            boxes = self._forward(search, template, useFp16=False)
-        cx, cy, width, height = boxes.reshape(-1, 4).float().mean(dim=0).tolist()
-        bbox = _normalizedBoxToPixels(cx, cy, width, height, rgb.shape[1], rgb.shape[0])
-        certainty = _heatmapCertainty(self._heatmaps, self._torch)
-        return HiTPrediction(bbox=bbox, modelScore=certainty, appearanceScore=certainty)
+            boxes = self._forward(search, batchTemplate, useFp16=False)
+        if boxes.numel() == 0 or boxes.shape[0] != batchSize:
+            raise ModelError(
+                "HiT returned an invalid prediction batch: "
+                f"expected={batchSize}, actual={tuple(boxes.shape)}"
+            )
+        boxRows = boxes.reshape(batchSize, -1, 4).float().mean(dim=1).tolist()
+        certainties = _heatmapCertainties(self._heatmaps, self._torch, batchSize)
+        return tuple(
+            HiTPrediction(
+                bbox=_normalizedBoxToPixels(
+                    *boxRow,
+                    imageWidth=rgb.shape[1],
+                    imageHeight=rgb.shape[0],
+                ),
+                modelScore=certainty,
+                appearanceScore=certainty,
+            )
+            for rgb, boxRow, certainty in zip(images, boxRows, certainties, strict=True)
+        )
 
     def close(self) -> None:
         if self._closed:
@@ -141,10 +176,13 @@ class PyTorchHiTSession:
         return model, heatmaps
 
     def _preprocess(self, rgb: NDArray[np.uint8]) -> Any:
-        tensor = self._torch.from_numpy(np.ascontiguousarray(rgb)).to(
+        return self._preprocessBatch(np.ascontiguousarray(rgb)[None, ...])
+
+    def _preprocessBatch(self, rgbs: NDArray[np.uint8]) -> Any:
+        tensor = self._torch.from_numpy(np.ascontiguousarray(rgbs)).to(
             device=self._device, dtype=self._torch.float32
         )
-        tensor = tensor.permute(2, 0, 1).unsqueeze(0).div_(255.0)
+        tensor = tensor.permute(0, 3, 1, 2).div_(255.0)
         return (tensor - self._mean) / self._std
 
     def _forward(self, search: Any, template: Any, *, useFp16: bool) -> Any:
@@ -252,20 +290,28 @@ def _normalizedBoxToPixels(
     return BBoxXYWH(xPx=x, yPx=y, widthPx=widthPx, heightPx=heightPx)
 
 
-def _heatmapCertainty(heatmaps: list[Any], torch: ModuleType) -> float:
+def _heatmapCertainties(
+    heatmaps: list[Any], torch: ModuleType, batchSize: int
+) -> tuple[float, ...]:
     if len(heatmaps) != 2:
         raise ModelError("HiT corner head did not expose both confidence heatmaps")
     if not _heatmapsAreFinite(heatmaps, torch):
         raise ModelError("HiT corner head returned a non-finite confidence heatmap")
-    certainties = []
+    concentrations = []
     for heatmap in heatmaps:
-        logits = heatmap.float().reshape(-1)
-        probabilities = torch.softmax(logits, dim=0)
-        entropy = -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
-        normalized = 1.0 - float(entropy.item()) / math.log(max(2, probabilities.numel()))
-        certainties.append(float(np.clip(normalized, 0.0, 1.0)))
-    concentration = float(np.mean(certainties))
-    return float(np.clip(1.0 - math.exp(-5.0 * concentration), 0.0, 1.0))
+        if heatmap.ndim == 0 or heatmap.shape[0] != batchSize:
+            raise ModelError(
+                "HiT corner head returned an invalid heatmap batch: "
+                f"expected={batchSize}, actual={tuple(heatmap.shape)}"
+            )
+        logits = heatmap.float().reshape(batchSize, -1)
+        probabilities = torch.softmax(logits, dim=1)
+        entropy = -(probabilities * probabilities.clamp_min(1e-12).log()).sum(dim=1)
+        normalized = 1.0 - entropy / math.log(max(2, probabilities.shape[1]))
+        concentrations.append(normalized.clamp(0.0, 1.0))
+    meanConcentration = torch.stack(concentrations).mean(dim=0)
+    certainties = (1.0 - torch.exp(-5.0 * meanConcentration)).clamp(0.0, 1.0)
+    return tuple(float(value) for value in certainties.tolist())
 
 
 def _heatmapsAreFinite(heatmaps: list[Any], torch: ModuleType) -> bool:

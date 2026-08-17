@@ -18,7 +18,11 @@ f = imageExtent / (2 * tan(FOV/2))
 
 ## 局部框到 BFoV
 
-局部框的边界点通过相机射线映射到球面。Geometry 对每条边采样 `boundarySamplesPerEdge` 个点，而不是只看四角；这是因为透视矩形边投影到 ERP 后通常是曲线。所有边界方向的最小球面/循环覆盖形成目标 BFoV 和 ERP bbox。
+`projectLocalBoxBoundary()` 对局部框每条边采样 `boundarySamplesPerEdge` 个点，并只执行一次相机射线到球面的映射。它保留球面/ERP boundary，并由同一组点分别拟合目标 BFoV 和 ERP bbox。
+
+无旋转 BFoV 从边界向量均值中心开始，在局部相机坐标中取水平/垂直角区间；用两个区间中点修正中心，最多迭代四次，最终 FOV 使用 `max-min`，不再使用旧的 `2*max(abs(angle))` 对称扩张。
+
+ERP bbox 不再调用 `bfovToBbox(localBoxToBfov(...))`。x 直接对原始 ERP boundary 使用 `minimalCircularInterval()`，y 直接取 min/max，从而消除 BFoV 包络后的第二次外接损失。旧间接 bbox 仍作为诊断保存，并计算 `envelopeInflation=indirectArea/directArea`。
 
 ## ERP bbox 到 BFoV
 

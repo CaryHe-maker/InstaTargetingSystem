@@ -20,6 +20,8 @@ LocalView 是 BFoV 对应的透视平面采样结果，包含 RGB、可选深度
 
 二者都使用 BBoxXYWH，但语义由上下文决定。ERP bbox 允许 x+width 超过图宽表示跨缝；局部 bbox 不循环，必须被裁剪到 LocalView 边界。文档和新接口应明确写出所在空间，避免直接混用。
 
+`LocalBoxProjection` 是二者之间的显式转换结果：BFoV 和直接 ERP bbox 来自同一组原始边界点，`erpBoundary` 保留曲边投影，`indirectBbox/envelopeInflation` 只用于诊断旧双包络损失。
+
 ## 搜索视域组合
 
 四角视域围绕预测中心形成局部覆盖，六面 cubemap 覆盖整球。具体中心布局和状态路线见 `Controller/viewPlanning.md`。

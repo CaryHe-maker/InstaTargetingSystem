@@ -41,6 +41,7 @@ class TrackerBackendImpl(TrackerBackendProtocol):
         self._hitBackend = hitBackend
         self._templates = TemplateCache()
         self._previousViews: dict[int, LocalView] = {}
+        self._previousViewsFrameIndex: int | None = None
         self._depthProcessor = depthProcessor
         self._depthEncoder = depthEncoder if depthEncoder is not None else depthBackend
         self._fusionHead = fusionHead or FusionHead(depthScoreWeight=depthScoreWeight)
@@ -67,6 +68,7 @@ class TrackerBackendImpl(TrackerBackendProtocol):
             self._depthTemplates = [self._encodeDepthTemplate(template, templateBox)]
         self._initialized = True
         self._previousViews = {template.spec.viewId: _copyView(template)}
+        self._previousViewsFrameIndex = 0
 
     def infer(
         self,
@@ -82,13 +84,24 @@ class TrackerBackendImpl(TrackerBackendProtocol):
         self._templates.apply(self._hitBackend, command, self._previousViews)
         self._commitDepthCommand(command, pendingDepthFeature)
         snapshot = self._templates.snapshot()
+        inferenceStartedNs = perf_counter_ns()
+        predictions = self._hitBackend.inferBatch(
+            tuple(view.rgb for view in views), snapshot.features
+        )
+        depthScores = self._inferDepthScores(views, tuple(self._depthTemplates))
+        sharedInferenceNs = (
+            (perf_counter_ns() - inferenceStartedNs) // len(views) if views else 0
+        )
         observations: list[LocalObservation] = []
-        for view in views:
-            startedNs = perf_counter_ns()
-            prediction = self._hitBackend.infer(view.rgb, snapshot.features)
+        for index, (view, prediction) in enumerate(zip(views, predictions, strict=True)):
+            postprocessStartedNs = perf_counter_ns()
             if not self._depthEnabled or view.depth is None:
                 observations.append(
-                    buildRgbObservation(view, prediction, perf_counter_ns() - startedNs)
+                    buildRgbObservation(
+                        view,
+                        prediction,
+                        sharedInferenceNs + perf_counter_ns() - postprocessStartedNs,
+                    )
                 )
                 continue
             depthSummary = (
@@ -96,7 +109,7 @@ class TrackerBackendImpl(TrackerBackendProtocol):
                 if self._depthProcessor is not None
                 else None
             )
-            depthScore = self._inferDepthScore(view, tuple(self._depthTemplates))
+            depthScore = depthScores.get(index, 0.0)
             if depthSummary is None:
                 depthScore = 0.0
             elif self._depthProcessor is not None and self._depthEncoder is None:
@@ -116,10 +129,18 @@ class TrackerBackendImpl(TrackerBackendProtocol):
                     depthScore=depthScore,
                     fusedScore=fusedScore,
                     depthSummary=depthSummary,
-                    latencyNs=perf_counter_ns() - startedNs,
+                    latencyNs=(
+                        sharedInferenceNs + perf_counter_ns() - postprocessStartedNs
+                    ),
                 )
             )
-        self._previousViews = {view.spec.viewId: _copyView(view) for view in views}
+        currentViews = {view.spec.viewId: _copyView(view) for view in views}
+        currentFrameIndex = int(command.frameIndex)
+        if self._previousViewsFrameIndex == currentFrameIndex:
+            self._previousViews.update(currentViews)
+        else:
+            self._previousViews = currentViews
+        self._previousViewsFrameIndex = currentFrameIndex
         return observations
 
     def close(self) -> None:
@@ -130,6 +151,7 @@ class TrackerBackendImpl(TrackerBackendProtocol):
             self._depthEncoder.close()
         self._templates.clear()
         self._previousViews.clear()
+        self._previousViewsFrameIndex = None
         self._depthTemplates.clear()
         self._closed = True
 
@@ -147,26 +169,43 @@ class TrackerBackendImpl(TrackerBackendProtocol):
             return encoder.encode(image)
         raise ProtocolError("depth encoder must implement encode or encodeTemplate")
 
-    def _inferDepthScore(self, view: LocalView, templateFeatures: tuple[object, ...]) -> float:
-        if self._depthProcessor is None or self._depthEncoder is None or view.depth is None:
-            return 0.0
-        image = self._depthProcessor.colorize(view.depth)
+    def _inferDepthScores(
+        self,
+        views: Sequence[LocalView],
+        templateFeatures: tuple[object, ...],
+    ) -> dict[int, float]:
+        if self._depthProcessor is None or self._depthEncoder is None:
+            return {}
+        indexedImages = tuple(
+            (index, self._depthProcessor.colorize(view.depth))
+            for index, view in enumerate(views)
+            if view.depth is not None
+        )
+        if not indexedImages:
+            return {}
         try:
-            result = self._depthEncoder.infer(image, templateFeatures)
+            results = self._depthEncoder.inferBatch(
+                tuple(image for _, image in indexedImages), templateFeatures
+            )
         except (ProtocolError, ModelError):
             raise
         except Exception as error:
             raise ModelError(f"depth branch inference failed: {error}") from error
-        if isinstance(result, DepthPrediction):
-            return result.depthScore
-        score = getattr(result, "depthScore", getattr(result, "appearanceScore", result))
-        try:
-            score = float(score)
-        except (TypeError, ValueError) as error:
-            raise ModelError("depth branch returned an invalid score") from error
-        if not np.isfinite(score) or not 0.0 <= score <= 1.0:
-            raise ModelError("depth branch score must be in [0, 1]")
-        return score
+        scores: dict[int, float] = {}
+        for (index, _), result in zip(indexedImages, results, strict=True):
+            score = (
+                result.depthScore
+                if isinstance(result, DepthPrediction)
+                else getattr(result, "depthScore", getattr(result, "appearanceScore", result))
+            )
+            try:
+                numericScore = float(score)
+            except (TypeError, ValueError) as error:
+                raise ModelError("depth branch returned an invalid score") from error
+            if not np.isfinite(numericScore) or not 0.0 <= numericScore <= 1.0:
+                raise ModelError("depth branch score must be in [0, 1]")
+            scores[index] = numericScore
+        return scores
 
     def _prepareDepthCommand(self, command: TemplateCommand) -> object | None:
         if not self._depthEnabled or self._depthEncoder is None:

@@ -24,7 +24,6 @@ class TrackMode(Enum):
     INIT = auto()
     TRACKING = auto()
     UNCERTAIN = auto()
-    RECOVERING = auto()
     LOST = auto()
     TERMINATED = auto()
 
@@ -97,7 +96,12 @@ class MotionPrediction:
     scaleUncertainty: float
     rangeUncertainty: float | None
     confidence: float
+    centerCovarianceRad2: tuple[tuple[float, float], tuple[float, float]]
+    scaleCovarianceLog2: tuple[tuple[float, float], tuple[float, float]]
+    rangeVariance: float | None
+    reliability: float
     degradedReasons: tuple[str, ...] = ()
+    sampleCount: int = 0
 
     @property
     def motionState(self) -> MotionState3D:
@@ -112,6 +116,15 @@ class MotionPrediction:
             rangeDepth=self.rangeDepth or 0.0,
             rangeVelocity=self.rangeVelocityPerSec or 0.0,
             confidence=self.confidence,
+            horizontalSizeRad=self.horizontalSizeRad,
+            verticalSizeRad=self.verticalSizeRad,
+            angularUncertaintyRad=self.angularUncertaintyRad,
+            scaleUncertainty=self.scaleUncertainty,
+            rangeUncertainty=self.rangeUncertainty,
+            reliability=self.reliability,
+            centerCovarianceRad2=self.centerCovarianceRad2,
+            scaleCovarianceLog2=self.scaleCovarianceLog2,
+            rangeVariance=self.rangeVariance,
         )
 
 
@@ -143,8 +156,6 @@ class StateInstance:
 
     @property
     def publicStatus(self) -> TrackStatus:
-        if self.mode is TrackMode.RECOVERING:
-            return TrackStatus.RECOVERING
         if self.mode is TrackMode.LOST:
             return TrackStatus.LOST
         if self.mode is TrackMode.UNCERTAIN:
@@ -177,6 +188,7 @@ class StateObservation:
     attemptIndex: int
     evaluatedMode: TrackMode
     isFinalAttempt: bool
+    appearanceOnlyScoring: bool
     successRate: float
     fusionThreshold: float
     overlapThreshold: float
@@ -217,6 +229,14 @@ class StateObservation:
     reacquired: bool
     depthSummary: DepthSummary | None
     rejectionReasons: tuple[EvaluationReason, ...] = ()
+    rawMotionScore: float | None = None
+    motionProbability: float | None = None
+    motionReliability: float = 0.0
+    motionSampleCount: int = 0
+    motionDegradedReasons: tuple[str, ...] = ()
+    uncertainThreshold: float = 0.0
+    lostThreshold: float = 0.0
+    measurementAccepted: bool = False
 
     @property
     def resultSource(self) -> ResultSource:
@@ -270,6 +290,32 @@ class FrameTransaction:
     remainingViews: int = 0
     attempts: list[AttemptRecord] = field(default_factory=list)
     recoveryMemory: RecoveryMemory | None = None
+    refinementCenters: tuple[SphericalPoint, ...] = ()
+
+
+@dataclass(slots=True)
+class ScoreGroup:
+    """The bounded score history used to derive the next-frame state thresholds."""
+
+    capacity: int = 10
+    values: deque[float] = field(default_factory=lambda: deque(maxlen=10))
+
+    def append(self, score: float) -> None:
+        value = float(score)
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("StateScore must be in [0, 1]")
+        self.values.append(value)
+
+    def thresholds(self) -> tuple[float, float] | None:
+        """Return ``(UT, LT)`` from the scores already committed."""
+        if len(self.values) < 2:
+            return None
+        ordered = sorted(self.values, reverse=True)
+        if len(ordered) < self.capacity:
+            highest = ordered[0]
+            lowest = ordered[-1]
+            return (0.5 * highest + 0.5 * lowest, 0.2 * highest + 0.8 * lowest)
+        return (ordered[4], ordered[7])
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +344,7 @@ __all__ = [
     "MotionPrediction",
     "MotionSample",
     "RecoveryMemory",
+    "ScoreGroup",
     "StateInstance",
     "StateObservation",
     "TrackMode",

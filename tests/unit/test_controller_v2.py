@@ -9,6 +9,7 @@ from instatarget.controller import (
     DepthAwareTrackController,
     RecoveryPlanner,
     SphericalMotionEstimator,
+    scoreMotionConsistency,
 )
 from instatarget.core.config import DecisionGateConfig, loadConfig
 from instatarget.core.protocols import FrameCommitted, MoreViewsRequired
@@ -66,6 +67,32 @@ def _boxedCandidate(
     )
 
 
+def _scoredCandidate(
+    viewId: int,
+    xPx: float,
+    yawRad: float,
+    *,
+    appearanceProbability: float,
+    singleScore: float,
+) -> ProjectedObservation:
+    return ProjectedObservation(
+        viewId=viewId,
+        bfov=BFoV(makeSphericalPoint(yawRad, 0.0), 0.20, 0.15),
+        bbox=BBoxXYWH(xPx, 50.0, 40.0, 40.0),
+        modelScore=appearanceProbability,
+        appearanceScore=appearanceProbability,
+        motionScore=singleScore,
+        scaleScore=1.0,
+        depthScore=0.0,
+        fusedScore=singleScore,
+        depthSummary=None,
+        localBox=BBoxXYWH(50.0, 50.0, 40.0, 40.0),
+        backendFusedScore=appearanceProbability,
+        appearanceProbability=appearanceProbability,
+        singleScore=singleScore,
+    )
+
+
 class ControllerV2Test(unittest.TestCase):
     def setUp(self) -> None:
         self.config = loadConfig(ROOT / "configs" / "RGBonly.yaml")
@@ -116,9 +143,9 @@ class ControllerV2Test(unittest.TestCase):
         assert isinstance(secondStep, FrameCommitted)
         self.assertEqual(secondStep.result.frameIndex, FrameIndex(1))
         self.assertFalse(secondStep.result.valid)
-        self.assertEqual(secondStep.result.status, TrackStatus.UNCERTAIN)
+        self.assertEqual(secondStep.result.status, TrackStatus.TRACKING)
 
-    def testSecondRoundFusesFirstAndSecondRoundObservations(self) -> None:
+    def testSecondRoundFusesCandidatesFromBothRounds(self) -> None:
         frame0 = FramePacket(
             SequenceId("cumulative-round2"),
             FrameIndex(0),
@@ -136,21 +163,49 @@ class ControllerV2Test(unittest.TestCase):
         )
 
         firstPlan = controller.beginFrame(frame1)
-        secondStep = controller.consume(firstPlan, (_boxedCandidate(0, 20.0, 0.85),))
-        assert isinstance(secondStep, MoreViewsRequired)
-        final = controller.consume(
-            secondStep.plan,
-            (_boxedCandidate(4, 20.0, 0.85),),
+        firstObservation = _scoredCandidate(
+            0,
+            20.0,
+            0.6,
+            appearanceProbability=0.85,
+            singleScore=0.85,
         )
+        secondStep = controller.consume(firstPlan, (firstObservation,))
+        assert isinstance(secondStep, MoreViewsRequired)
+        self.assertEqual(len(secondStep.plan.views), 4)
+        direction = np.sum(
+            np.asarray(
+                [
+                    (view.bfov.center.x, view.bfov.center.y, view.bfov.center.z)
+                    for view in secondStep.plan.views
+                ]
+            ),
+            axis=0,
+        )
+        direction /= np.linalg.norm(direction)
+        np.testing.assert_allclose(
+            direction,
+            np.asarray(
+                (
+                    firstObservation.bfov.center.x,
+                    firstObservation.bfov.center.y,
+                    firstObservation.bfov.center.z,
+                )
+            ),
+            atol=1e-10,
+        )
+        refinedViewId = secondStep.plan.views[0].viewId
+        final = controller.consume(secondStep.plan, (_boxedCandidate(refinedViewId, 20.0, 0.85),))
 
         assert isinstance(final, FrameCommitted)
         self.assertTrue(final.result.valid)
         assert controller.lastStateObservation is not None
         self.assertTrue(controller.lastStateObservation.selectedIsFused)
-        self.assertEqual(controller.lastStateObservation.sourceViewIds, (0, 4))
+        self.assertEqual(controller.lastStateObservation.sourceViewIds, (0, refinedViewId))
         self.assertEqual(controller.lastStateObservation.candidateCount, 2)
+        self.assertEqual(controller.lastStateObservation.overlapThreshold, 0.70)
 
-    def testThirdRoundConsidersObservationsFromBothPriorRounds(self) -> None:
+    def testControllerUsesExactlyTwoRounds(self) -> None:
         frame0 = FramePacket(
             SequenceId("cumulative-round3"),
             FrameIndex(0),
@@ -172,27 +227,62 @@ class ControllerV2Test(unittest.TestCase):
         assert isinstance(step, MoreViewsRequired)
         committed = controller.consume(step.plan, ())
         assert isinstance(committed, FrameCommitted)
-        self.assertEqual(committed.result.status, TrackStatus.UNCERTAIN)
+        self.assertEqual(committed.result.status, TrackStatus.TRACKING)
+        self.assertEqual(committed.result.valid, False)
 
-        frame2 = FramePacket(
-            SequenceId("cumulative-round3"),
-            FrameIndex(2),
-            2_000_000_000,
+    def testSecondRoundKeepsSingleScoreSemantics(self) -> None:
+        frame0 = FramePacket(
+            SequenceId("appearance-round3"),
+            FrameIndex(0),
+            0,
+            np.zeros((180, 360, 3), dtype=np.uint8),
+        )
+        controller = DepthAwareTrackController(self.geometry, self.config)
+        init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
+        controller.commitInitialization(init, None)
+
+        frame1 = FramePacket(
+            SequenceId("appearance-round3"),
+            FrameIndex(1),
+            1_000_000_000,
             frame0.rgb,
         )
+        first = controller.beginFrame(frame1)
+        second = controller.consume(first, ())
+        assert isinstance(second, MoreViewsRequired)
+        committed = controller.consume(second.plan, ())
+        assert isinstance(committed, FrameCommitted)
+        self.assertEqual(committed.result.status, TrackStatus.TRACKING)
+
+        frame2 = FramePacket(
+            SequenceId("appearance-round3"), FrameIndex(2), 2_000_000_000, frame0.rgb
+        )
         round1 = controller.beginFrame(frame2)
-        round2 = controller.consume(round1, (_boxedCandidate(0, 20.0, 0.85),))
+        self.assertFalse(round1.appearanceOnlyScoring)
+        round2 = controller.consume(
+            round1,
+            (_scoredCandidate(0, 10.0, -1.0, appearanceProbability=0.10, singleScore=0.89),),
+        )
         assert isinstance(round2, MoreViewsRequired)
-        round3 = controller.consume(round2.plan, (_boxedCandidate(4, 180.0, 0.85),))
-        assert isinstance(round3, MoreViewsRequired)
-        final = controller.consume(round3.plan, (_boxedCandidate(8, 20.0, 0.85),))
+        self.assertFalse(round2.plan.appearanceOnlyScoring)
+        final = controller.consume(
+            round2.plan,
+            (
+                _scoredCandidate(
+                    round2.plan.views[0].viewId,
+                    250.0,
+                    1.0,
+                    appearanceProbability=0.85,
+                    singleScore=0.10,
+                ),
+            ),
+        )
 
         assert isinstance(final, FrameCommitted)
-        self.assertTrue(final.result.valid)
         assert controller.lastStateObservation is not None
-        self.assertEqual(controller.lastStateObservation.candidateCount, 3)
-        self.assertTrue(controller.lastStateObservation.selectedIsFused)
-        self.assertEqual(controller.lastStateObservation.sourceViewIds, (0, 8))
+        self.assertFalse(controller.lastStateObservation.appearanceOnlyScoring)
+        self.assertEqual(controller.lastStateObservation.representativeViewId, 0)
+        self.assertAlmostEqual(controller.lastStateObservation.stateScore, 0.89)
 
     def testMotionHistoryContainsMeasurementsNotPredictions(self) -> None:
         estimator = SphericalMotionEstimator(windowLength=3)
@@ -224,6 +314,110 @@ class ControllerV2Test(unittest.TestCase):
         self.assertTrue(math.isfinite(prediction.center.pitchRad))
         self.assertLess(prediction.center.pitchRad, math.pi / 2.0)
 
+    def testMotionPredictionExtrapolatesScaleInLogSpace(self) -> None:
+        estimator = SphericalMotionEstimator(windowLength=3)
+        estimator.resetFromMeasurement(
+            makeSphericalPoint(0.0, 0.0),
+            None,
+            0,
+            0,
+            1.0,
+            horizontalSizeRad=0.10,
+            verticalSizeRad=0.20,
+        )
+        estimator.recordMeasurement(
+            frameIndex=1,
+            timestampNs=1_000_000_000,
+            point=makeSphericalPoint(0.0, 0.0),
+            depth=None,
+            confidence=1.0,
+            horizontalSizeRad=0.20,
+            verticalSizeRad=0.40,
+        )
+
+        prediction = estimator.predictDetailed(2_000_000_000)
+
+        self.assertAlmostEqual(prediction.horizontalSizeRad, 0.40, places=6)
+        self.assertAlmostEqual(prediction.verticalSizeRad, 0.80, places=6)
+
+    def testSingleAnchorProvidesReducedNonNeutralMotionReliability(self) -> None:
+        estimator = SphericalMotionEstimator(windowLength=3, minSamplesForVelocity=2)
+        estimator.resetFromMeasurement(
+            makeSphericalPoint(0.0, 0.0),
+            None,
+            0,
+            0,
+            1.0,
+            horizontalSizeRad=0.40,
+            verticalSizeRad=0.30,
+        )
+
+        prediction = estimator.predictDetailed(1_000_000_000)
+        motionScore = scoreMotionConsistency(
+            BFoV(makeSphericalPoint(0.0, 0.0), 0.40, 0.30),
+            None,
+            prediction.motionState,
+        )
+
+        self.assertEqual(prediction.sampleCount, 1)
+        self.assertIn("insufficient_motion_samples", prediction.degradedReasons)
+        self.assertGreater(prediction.reliability, 0.0)
+        self.assertLess(prediction.reliability, prediction.confidence)
+        self.assertGreater(motionScore.effectiveProbability, 0.5)
+
+    def testWeakFirstObservationBootstrapsVelocityBeforeThirdFrame(self) -> None:
+        estimator = SphericalMotionEstimator(windowLength=3, minSamplesForVelocity=2)
+        frame0 = FramePacket(
+            SequenceId("motion-bootstrap"),
+            FrameIndex(0),
+            0,
+            np.zeros((180, 360, 3), dtype=np.uint8),
+        )
+        controller = DepthAwareTrackController(
+            self.geometry,
+            self.config,
+            motionEstimator=estimator,
+        )
+        init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
+        controller.commitInitialization(init, None)
+
+        frame1 = FramePacket(
+            SequenceId("motion-bootstrap"),
+            FrameIndex(1),
+            1_000_000_000,
+            frame0.rgb,
+        )
+        firstPlan = controller.beginFrame(frame1)
+        secondStep = controller.consume(firstPlan, ())
+        assert isinstance(secondStep, MoreViewsRequired)
+        bootstrapViewId = secondStep.plan.views[0].viewId
+        committed = controller.consume(
+            secondStep.plan,
+            (_boxedCandidate(bootstrapViewId, 20.0, 0.10),),
+        )
+        assert isinstance(committed, FrameCommitted)
+        self.assertFalse(committed.result.valid)
+        self.assertEqual(len(estimator.samples), 2)
+
+        frame2 = FramePacket(
+            SequenceId("motion-bootstrap"),
+            FrameIndex(2),
+            2_000_000_000,
+            frame0.rgb,
+        )
+        controller.beginFrame(frame2)
+        prediction = estimator.predictDetailed(frame2.timestampNs)
+        motionScore = scoreMotionConsistency(
+            BFoV(estimator.samples[-1].center, 0.35, 0.25),
+            None,
+            prediction.motionState,
+        )
+
+        self.assertEqual(prediction.sampleCount, 2)
+        self.assertNotIn("insufficient_motion_samples", prediction.degradedReasons)
+        self.assertGreater(prediction.reliability, 0.0)
+        self.assertNotAlmostEqual(motionScore.effectiveProbability, 0.5)
+
     def testLostGlobalPlanContainsEquatorAndPolarCubeFaces(self) -> None:
         planner = RecoveryPlanner(
             self.config.geometry,
@@ -242,8 +436,8 @@ class ControllerV2Test(unittest.TestCase):
             None,
             TrackStatus.LOST,
         )
-        self.assertEqual(len(views), 6)
-        self.assertEqual(sum("cubemap" in item.role for item in views), 6)
+        self.assertEqual(len(views), 12)
+        self.assertEqual(sum("cubemap" in item.role for item in views), 12)
         self.assertEqual(
             {item.role for item in views},
             {
@@ -253,6 +447,12 @@ class ControllerV2Test(unittest.TestCase):
                 "round1_cubemap_left",
                 "round1_cubemap_up",
                 "round1_cubemap_down",
+                "round1_recovery_cubemap_front",
+                "round1_recovery_cubemap_right",
+                "round1_recovery_cubemap_back",
+                "round1_recovery_cubemap_left",
+                "round1_recovery_cubemap_up",
+                "round1_recovery_cubemap_down",
             },
         )
         self.assertTrue(
@@ -263,7 +463,7 @@ class ControllerV2Test(unittest.TestCase):
             )
         )
 
-    def testRecoveringUsesFourCornersThenCubeMap(self) -> None:
+    def testRefinementUsesClusterCentersAndLostUsesOneCombinedAttempt(self) -> None:
         planner = RecoveryPlanner(
             self.config.geometry,
             self.config.tracking,
@@ -279,7 +479,7 @@ class ControllerV2Test(unittest.TestCase):
             box,
             fallback,
             None,
-            TrackStatus.RECOVERING,
+            TrackStatus.TRACKING,
             attemptIndex=0,
         )
         second = planner.buildViews(
@@ -290,11 +490,12 @@ class ControllerV2Test(unittest.TestCase):
             box,
             fallback,
             None,
-            TrackStatus.RECOVERING,
+            TrackStatus.TRACKING,
             attemptIndex=1,
             viewIdStart=4,
+            searchSeedCenter=makeSphericalPoint(0.0, 0.0),
         )
-        third = planner.buildViews(
+        lost = planner.buildViews(
             1,
             360,
             180,
@@ -302,17 +503,16 @@ class ControllerV2Test(unittest.TestCase):
             box,
             fallback,
             None,
-            TrackStatus.RECOVERING,
-            attemptIndex=2,
-            viewIdStart=8,
+            TrackStatus.LOST,
+            attemptIndex=0,
         )
 
-        self.assertEqual((len(first), len(second), len(third)), (4, 4, 6))
+        self.assertEqual((len(first), len(second), len(lost)), (4, 4, 12))
         self.assertEqual(
-            tuple(item.spec.viewId for item in (*first, *second, *third)),
-            tuple(range(14)),
+            tuple(item.spec.viewId for item in (*first, *second)),
+            tuple(range(8)),
         )
-        self.assertTrue(all(item.role.startswith("round3_cubemap_") for item in third))
+        self.assertTrue(all(item.role.startswith("round1_") for item in lost))
 
     def testSourceConfidenceFloorBlocksFirstRoundReliableFusion(self) -> None:
         frame0 = FramePacket(
@@ -334,12 +534,12 @@ class ControllerV2Test(unittest.TestCase):
         self.assertEqual(step.plan.attemptIndex, 1)
         final = controller.consume(
             step.plan,
-            (_boxedCandidate(4, 0.0, 0.79), _boxedCandidate(5, 0.0, 0.79)),
+            tuple(_boxedCandidate(view.viewId, 0.0, 0.79) for view in step.plan.views),
         )
         self.assertIsInstance(final, FrameCommitted)
         assert isinstance(final, FrameCommitted)
         self.assertFalse(final.result.valid)
-        self.assertEqual(final.result.status, TrackStatus.UNCERTAIN)
+        self.assertEqual(final.result.status, TrackStatus.TRACKING)
         assert controller.lastStateObservation is not None
         self.assertTrue(controller.lastStateObservation.selectedIsFused)
         self.assertFalse(controller.lastStateObservation.selectedSourceConfidencePassed)
@@ -359,11 +559,69 @@ class ControllerV2Test(unittest.TestCase):
         pair = (_boxedCandidate(0, 0.0, 0.85), _boxedCandidate(1, 29.0, 0.85))
         result = controller.consume(first, pair)
 
-        self.assertIsInstance(result, FrameCommitted)
-        assert isinstance(result, FrameCommitted)
-        self.assertTrue(result.result.valid)
+        self.assertIsInstance(result, MoreViewsRequired)
+        assert isinstance(result, MoreViewsRequired)
+        final = controller.consume(
+            result.plan,
+            (_boxedCandidate(result.plan.views[0].viewId, 0.0, 0.85),),
+        )
+        self.assertIsInstance(final, FrameCommitted)
+        assert isinstance(final, FrameCommitted)
+        self.assertTrue(final.result.valid)
         assert controller.lastStateObservation is not None
-        self.assertGreater(controller.lastStateObservation.selectedOverlapRate or 0.0, 0.70)
+        self.assertTrue(controller.lastStateObservation.selectedIsFused)
+        self.assertEqual(controller.lastStateObservation.selectedOverlapRate, 1.0)
+
+    def testUncertainSecondRoundFusesCandidatesFromBothRounds(self) -> None:
+        frame0 = FramePacket(
+            SequenceId("uncertain-cumulative"),
+            FrameIndex(0),
+            0,
+            np.zeros((180, 360, 3), dtype=np.uint8),
+        )
+        controller = DepthAwareTrackController(self.geometry, self.config)
+        init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
+        controller.commitInitialization(init, None)
+
+        for frameIndex in range(1, 4):
+            frame = FramePacket(
+                SequenceId("uncertain-cumulative"),
+                FrameIndex(frameIndex),
+                frameIndex * 1_000_000_000,
+                frame0.rgb,
+            )
+            first = controller.beginFrame(frame)
+            second = controller.consume(first, ())
+            assert isinstance(second, MoreViewsRequired)
+            committed = controller.consume(second.plan, ())
+            assert isinstance(committed, FrameCommitted)
+        self.assertEqual(controller.status, TrackStatus.UNCERTAIN)
+
+        frame4 = FramePacket(
+            SequenceId("uncertain-cumulative"),
+            FrameIndex(4),
+            4_000_000_000,
+            frame0.rgb,
+        )
+        first = controller.beginFrame(frame4)
+        self.assertEqual(len(first.views), 6)
+        second = controller.consume(first, (_boxedCandidate(first.views[0].viewId, 20.0, 0.85),))
+        assert isinstance(second, MoreViewsRequired)
+        refinedViewId = second.plan.views[0].viewId
+        final = controller.consume(
+            second.plan,
+            (_boxedCandidate(refinedViewId, 20.0, 0.85),),
+        )
+
+        assert isinstance(final, FrameCommitted)
+        self.assertTrue(final.result.valid)
+        assert controller.lastStateObservation is not None
+        self.assertTrue(controller.lastStateObservation.selectedIsFused)
+        self.assertEqual(
+            controller.lastStateObservation.sourceViewIds,
+            (first.views[0].viewId, refinedViewId),
+        )
+        self.assertEqual(controller.lastStateObservation.candidateCount, 2)
 
     def testFirstRoundFusionUsesErpIntersectionBox(self) -> None:
         frame0 = FramePacket(
@@ -388,10 +646,10 @@ class ControllerV2Test(unittest.TestCase):
             ),
         )
 
-        self.assertAlmostEqual(result.bbox.xPx, 80.0)
-        self.assertAlmostEqual(result.bbox.widthPx, 40.0)
+        self.assertAlmostEqual(result.bbox.xPx, 0.0)
+        self.assertAlmostEqual(result.bbox.widthPx, 120.0)
         self.assertLess(result.bfov.horizontalFovRad, math.pi)
-        self.assertFalse(result.valid)
+        self.assertTrue(result.valid)
 
     def testFusedResultUsesIntersectionAcrossErpSeam(self) -> None:
         frame0 = FramePacket(
@@ -423,7 +681,7 @@ class ControllerV2Test(unittest.TestCase):
         self.assertAlmostEqual(result.bbox.widthPx, 30.0)
         self.assertTrue(result.valid)
 
-    def testUncertainUsesThirdRoundAndLostUsesCubemapThenLocalRound(self) -> None:
+    def testUncertainUsesCubemapThenFourCornersAndLostUsesCombinedCubemaps(self) -> None:
         frame0 = FramePacket(
             SequenceId("routes"),
             FrameIndex(0),
@@ -440,30 +698,44 @@ class ControllerV2Test(unittest.TestCase):
         assert isinstance(second, MoreViewsRequired)
         uncertainResult = controller.consume(second.plan, ())
         assert isinstance(uncertainResult, FrameCommitted)
-        self.assertEqual(uncertainResult.result.status, TrackStatus.UNCERTAIN)
+        self.assertEqual(uncertainResult.result.status, TrackStatus.TRACKING)
 
         frame2 = FramePacket(SequenceId("routes"), FrameIndex(2), 2_000_000_000, frame0.rgb)
-        uncertainFirst = controller.beginFrame(frame2)
-        uncertainSecond = controller.consume(uncertainFirst, ())
-        assert isinstance(uncertainSecond, MoreViewsRequired)
-        uncertainThird = controller.consume(uncertainSecond.plan, ())
-        assert isinstance(uncertainThird, MoreViewsRequired)
-        self.assertEqual(len(uncertainThird.plan.views), 6)
-        lostResult = controller.consume(uncertainThird.plan, ())
-        assert isinstance(lostResult, FrameCommitted)
-        self.assertEqual(lostResult.result.status, TrackStatus.LOST)
+        secondTrackingFirst = controller.beginFrame(frame2)
+        self.assertEqual(len(secondTrackingFirst.views), 4)
+        secondTrackingSecond = controller.consume(secondTrackingFirst, ())
+        assert isinstance(secondTrackingSecond, MoreViewsRequired)
+        secondTrackingResult = controller.consume(secondTrackingSecond.plan, ())
+        assert isinstance(secondTrackingResult, FrameCommitted)
+        self.assertEqual(secondTrackingResult.result.status, TrackStatus.TRACKING)
 
         frame3 = FramePacket(SequenceId("routes"), FrameIndex(3), 3_000_000_000, frame0.rgb)
-        lostFirst = controller.beginFrame(frame3)
-        self.assertEqual(len(lostFirst.views), 6)
-        lostSecond = controller.consume(lostFirst, ())
+        uncertainFirst = controller.beginFrame(frame3)
+        self.assertEqual(len(uncertainFirst.views), 4)
+        uncertainSecond = controller.consume(uncertainFirst, ())
+        assert isinstance(uncertainSecond, MoreViewsRequired)
+        lostResult = controller.consume(uncertainSecond.plan, ())
+        assert isinstance(lostResult, FrameCommitted)
+        self.assertEqual(lostResult.result.status, TrackStatus.UNCERTAIN)
+
+        frame4 = FramePacket(SequenceId("routes"), FrameIndex(4), 4_000_000_000, frame0.rgb)
+        uncertainFirst = controller.beginFrame(frame4)
+        self.assertEqual(len(uncertainFirst.views), 6)
+        lostSecond = controller.consume(uncertainFirst, ())
         assert isinstance(lostSecond, MoreViewsRequired)
         self.assertEqual(len(lostSecond.plan.views), 4)
         lostFinal = controller.consume(lostSecond.plan, ())
         assert isinstance(lostFinal, FrameCommitted)
         self.assertEqual(lostFinal.result.status, TrackStatus.LOST)
 
-    def testLostSingleCandidateRequiresRecoveringConfirmation(self) -> None:
+        frame5 = FramePacket(SequenceId("routes"), FrameIndex(5), 5_000_000_000, frame0.rgb)
+        lostFirst = controller.beginFrame(frame5)
+        self.assertEqual(len(lostFirst.views), 12)
+        lostFinal = controller.consume(lostFirst, ())
+        assert isinstance(lostFinal, FrameCommitted)
+        self.assertEqual(lostFinal.result.status, TrackStatus.LOST)
+
+    def testLostFusionCandidateReacquiresWithoutRecoveryState(self) -> None:
         frame0 = FramePacket(
             SequenceId("recover"),
             FrameIndex(0),
@@ -474,7 +746,7 @@ class ControllerV2Test(unittest.TestCase):
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
         controller.commitInitialization(init, None)
 
-        for index in (1, 2):
+        for index in (1, 2, 3, 4):
             frame = FramePacket(
                 SequenceId("recover"), FrameIndex(index), index * 1_000_000_000, frame0.rgb
             )
@@ -487,27 +759,15 @@ class ControllerV2Test(unittest.TestCase):
                 break
         self.assertEqual(step.result.status, TrackStatus.LOST)
 
-        frame3 = FramePacket(SequenceId("recover"), FrameIndex(3), 3_000_000_000, frame0.rgb)
-        lostFirst = controller.beginFrame(frame3)
-        lostSecond = controller.consume(lostFirst, ())
-        assert isinstance(lostSecond, MoreViewsRequired)
-        pending = controller.consume(lostSecond.plan, (_boxedCandidate(6, 0.0, 0.95),))
+        frame5 = FramePacket(SequenceId("recover"), FrameIndex(5), 5_000_000_000, frame0.rgb)
+        lostFirst = controller.beginFrame(frame5)
+        pending = controller.consume(
+            lostFirst,
+            tuple(_boxedCandidate(view.viewId, 0.0, 0.95) for view in lostFirst.views),
+        )
         assert isinstance(pending, FrameCommitted)
-        self.assertEqual(pending.result.status, TrackStatus.RECOVERING)
-        self.assertFalse(pending.result.valid)
-
-        frame4 = FramePacket(SequenceId("recover"), FrameIndex(4), 4_000_000_000, frame0.rgb)
-        recoveringFirst = controller.beginFrame(frame4)
-        recoveringSecond = controller.consume(
-            recoveringFirst, (_boxedCandidate(0, 0.0, 0.95),)
-        )
-        assert isinstance(recoveringSecond, MoreViewsRequired)
-        recovered = controller.consume(
-            recoveringSecond.plan, (_boxedCandidate(4, 0.0, 0.95),)
-        )
-        assert isinstance(recovered, FrameCommitted)
-        self.assertEqual(recovered.result.status, TrackStatus.TRACKING)
-        self.assertTrue(recovered.result.valid)
+        self.assertEqual(pending.result.status, TrackStatus.TRACKING)
+        self.assertTrue(pending.result.valid)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,14 @@ from numpy.typing import NDArray
 
 from instatarget.core.errors import GeometryError
 from instatarget.core.protocols import SphericalGeometry as SphericalGeometryProtocol
-from instatarget.core.types import BBoxXYWH, BFoV, FramePacket, LocalView, ViewSpec
+from instatarget.core.types import (
+    BBoxXYWH,
+    BFoV,
+    FramePacket,
+    LocalBoxProjection,
+    LocalView,
+    ViewSpec,
+)
 from instatarget.geometry.bfov_projector import BfovProjector
 from instatarget.geometry.projection_math import (
     cameraBasis,
@@ -69,6 +76,64 @@ class SphericalGeometryImpl(SphericalGeometryProtocol):
         )
         return _fitBfovFromVectors(vectors)
 
+    def projectLocalBoxBoundary(
+        self,
+        localBox: BBoxXYWH,
+        spec: ViewSpec,
+        frameWidthPx: int,
+        frameHeightPx: int,
+    ) -> LocalBoxProjection:
+        """Project a local boundary once and fit both output envelopes from it."""
+        _requireViewSpec(spec)
+        _requireLocalBox(localBox, spec.outputWidthPx, spec.outputHeightPx)
+        _requireFrameDimensions(frameWidthPx, frameHeightPx)
+        sampleX, sampleY = _sampleErpBoxBoundary(
+            localBox.xPx,
+            localBox.yPx,
+            localBox.widthPx,
+            localBox.heightPx,
+            self.boundarySamplesPerEdge,
+        )
+        vectors = localPixelsToUnitVectors(
+            sampleX,
+            sampleY,
+            spec.bfov,
+            spec.outputWidthPx,
+            spec.outputHeightPx,
+        )
+        bfov = _fitBfovFromVectors(vectors)
+        erpX, erpY = unitVectorsToErpPixels(vectors, frameWidthPx, frameHeightPx)
+        xPx, widthPx = minimalCircularInterval(erpX, frameWidthPx)
+        yMin = float(np.min(erpY))
+        yMax = float(np.max(erpY))
+        bbox = BBoxXYWH(
+            xPx=xPx,
+            yPx=yMin,
+            widthPx=widthPx,
+            heightPx=max(yMax - yMin, float(np.finfo(np.float64).eps)),
+        )
+        indirectBbox = self.bfovToBbox(bfov, frameWidthPx, frameHeightPx)
+        directArea = bbox.widthPx * bbox.heightPx
+        indirectArea = indirectBbox.widthPx * indirectBbox.heightPx
+        sphericalBoundary = tuple(
+            makeSphericalPoint(
+                float(np.arctan2(vector[0], vector[2])),
+                float(np.arcsin(np.clip(vector[1], -1.0, 1.0))),
+            )
+            for vector in vectors
+        )
+        return LocalBoxProjection(
+            bfov=bfov,
+            bbox=bbox,
+            sphericalBoundary=sphericalBoundary,
+            erpBoundary=tuple(
+                (float(xValue), float(yValue))
+                for xValue, yValue in zip(erpX, erpY, strict=True)
+            ),
+            indirectBbox=indirectBbox,
+            envelopeInflation=float(indirectArea / max(directArea, 1e-12)),
+        )
+
     def bfovToBbox(self, bfov: BFoV, frameWidthPx: int, frameHeightPx: int) -> BBoxXYWH:
         _requireFrameDimensions(frameWidthPx, frameHeightPx)
         sampleX, sampleY = _sampleCanonicalRectBoundary(self.boundarySamplesPerEdge)
@@ -92,16 +157,38 @@ def _fitBfovFromVectors(vectors: NDArray[np.float64]) -> BFoV:
         meanNorm = float(np.linalg.norm(meanVector))
     if meanNorm == 0.0:
         raise GeometryError("boundary samples must contain at least one non-zero vector")
-    centerYawRad, centerPitchRad = unitVectorToYawPitch(tuple(meanVector))
-    center = makeSphericalPoint(centerYawRad, centerPitchRad)
-    forward, right, up = cameraBasis(BFoV(center=center, horizontalFovRad=1.0, verticalFovRad=1.0))
+    center = makeSphericalPoint(*unitVectorToYawPitch(tuple(meanVector)))
+    horizontalAngles = np.empty(0, dtype=np.float64)
+    verticalAngles = np.empty(0, dtype=np.float64)
+    for _ in range(4):
+        forward, right, up = cameraBasis(
+            BFoV(center=center, horizontalFovRad=1.0, verticalFovRad=1.0)
+        )
+        forwardDots = vectors @ forward
+        horizontalAngles = np.arctan2(vectors @ right, forwardDots)
+        verticalAngles = np.arctan2(vectors @ up, forwardDots)
+        horizontalOffset = float(
+            (np.min(horizontalAngles) + np.max(horizontalAngles)) / 2.0
+        )
+        verticalOffset = float((np.min(verticalAngles) + np.max(verticalAngles)) / 2.0)
+        if max(abs(horizontalOffset), abs(verticalOffset)) < 1e-10:
+            break
+        shifted = (
+            forward
+            + np.tan(horizontalOffset) * right
+            + np.tan(verticalOffset) * up
+        )
+        shifted /= np.linalg.norm(shifted)
+        center = makeSphericalPoint(*unitVectorToYawPitch(tuple(shifted)))
+
+    forward, right, up = cameraBasis(
+        BFoV(center=center, horizontalFovRad=1.0, verticalFovRad=1.0)
+    )
     forwardDots = vectors @ forward
-    rightDots = vectors @ right
-    upDots = vectors @ up
-    horizontalAngles = np.arctan2(rightDots, forwardDots)
-    verticalAngles = np.arctan2(upDots, forwardDots)
-    horizontalFovRad = float(2.0 * np.max(np.abs(horizontalAngles)))
-    verticalFovRad = float(2.0 * np.max(np.abs(verticalAngles)))
+    horizontalAngles = np.arctan2(vectors @ right, forwardDots)
+    verticalAngles = np.arctan2(vectors @ up, forwardDots)
+    horizontalFovRad = float(np.max(horizontalAngles) - np.min(horizontalAngles))
+    verticalFovRad = float(np.max(verticalAngles) - np.min(verticalAngles))
     if not 0.0 < horizontalFovRad < np.pi:
         raise GeometryError(f"horizontal BFoV span is invalid: {horizontalFovRad}")
     if not 0.0 < verticalFovRad < np.pi:
