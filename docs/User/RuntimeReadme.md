@@ -14,7 +14,9 @@
 
 ## 线路选择
 
-`configs/RGBonly.yaml` 关闭深度并创建一个 HiT 会话。`configs/RGBD.yaml` 启用深度并创建两个独立 HiT 会话，第二个会话处理深度伪彩色图。FP16 非有限输出会在同一模型上自动执行 FP32 重算。
+`configs/RGBonly.yaml` 关闭深度、使用 fp32 并创建一个 HiT 会话。`configs/RGBD.yaml` 启用深度、使用 fp16 并创建两个独立 HiT 会话，第二个会话处理深度伪彩色图。FP16 batch 出现非有限 bbox 或 heatmap 时，会在同一模型上以 FP32 重算整个 batch。
+
+同一轮视图会作为一个 tensor batch 推理：TRACKING 为 4+4 两轮，UNCERTAIN 为 6+4 两轮，LOST 为单轮 12 张。RGB-D 每轮先执行 RGB batch，再执行 depth batch；第二轮依赖第一轮 Fusor 中心，因此不能与第一轮合并。
 
 ## Docker
 

@@ -10,7 +10,7 @@ run -RGBD /data/airsim360/nyc_sample /artifacts/easy_user/nyc_sample/RGBD 142113
 getInstanceID /data/airsim360/nyc_sample /artifacts/easy_user/nyc_sample/InstanceID.txt
 ```
 
-`run` 写入逐帧跟踪结果和可视化；本页下方的 `tools/run_airsim360_dataset.py` 命令还会生成 IoU 与运行清单。
+`run` 写入逐帧跟踪结果和可视化；可追加 `--no-mid-visual` 或 `--no-result-visual` 关闭对应图像产物。本页下方的 `tools/run_airsim360_dataset.py` 命令还会生成 IoU 与运行清单，并始终启用中间和最终可视化。
 
 ## RGB-only 一行命令
 
