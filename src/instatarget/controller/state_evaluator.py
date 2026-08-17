@@ -31,7 +31,7 @@ from instatarget.geometry.projection_math import erpPixelToSphericalPoint
 
 
 class StateEvaluator:
-    """Pure per-attempt fusion, ranking, escalation and evidence evaluation."""
+    """Pure cumulative same-frame fusion, ranking, escalation and evidence evaluation."""
 
     def __init__(
         self,
@@ -49,6 +49,7 @@ class StateEvaluator:
         state: StateInstance,
         plan: SearchPlan,
         observations: Sequence[ProjectedObservation],
+        priorObservations: Sequence[ProjectedObservation] = (),
         prediction: MotionPrediction,
         predictedBfov: BFoV,
         geometry: SphericalGeometry,
@@ -56,10 +57,14 @@ class StateEvaluator:
         frameHeightPx: int,
     ) -> StateObservation:
         self._validate(plan, observations)
+        cumulativeObservations = (*priorObservations, *observations)
+        viewIds = tuple(item.viewId for item in cumulativeObservations)
+        if len(viewIds) != len(set(viewIds)):
+            raise ProtocolError("cumulative projected observations must have unique viewIds")
         fusionThreshold = self._fusionThreshold(state.mode, plan.attemptIndex)
-        localCandidates = tuple(_localCandidate(item) for item in observations)
+        localCandidates = tuple(_localCandidate(item) for item in cumulativeObservations)
         fusedCandidates = _fuseCandidates(
-            observations,
+            cumulativeObservations,
             fusionThreshold,
             self._config.fusionSourceMinConfidence,
             geometry,
@@ -99,7 +104,7 @@ class StateEvaluator:
             representative = next(
                 (
                     item
-                    for item in observations
+                    for item in cumulativeObservations
                     if item.viewId == best.representativeViewId
                 ),
                 None,
@@ -146,7 +151,7 @@ class StateEvaluator:
             proposedOutputBfov=outputBfov,
             proposedOutputBbox=outputBbox,
             proposedResultSource=proposedSource,
-            candidateCount=len(observations),
+            candidateCount=len(cumulativeObservations),
             eligibleCandidateCount=len(candidates),
             clusterCount=len(fusedCandidates),
             sourceViewIds=best.sourceViewIds if best is not None else (),

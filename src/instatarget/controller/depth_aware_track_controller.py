@@ -345,10 +345,16 @@ class DepthAwareTrackController(TrackController):
                 f"actual={plan.templateCommand.expectedRevision}"
             )
         self._backendRevision = plan.templateCommand.expectedRevision
+        priorObservations = tuple(
+            observation
+            for attempt in transaction.attempts
+            for observation in attempt.observations
+        )
         evaluation = self._evaluator.evaluate(
             state=planned.state,
             plan=plan,
             observations=observations,
+            priorObservations=priorObservations,
             prediction=planned.prediction,
             predictedBfov=planned.predictedBfov,
             geometry=self._geometry,

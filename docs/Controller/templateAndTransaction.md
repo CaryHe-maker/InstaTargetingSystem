@@ -14,7 +14,7 @@ Controller 不直接编码模板，而是产生 `TemplateCommand`：KEEP 保持�
 
 ## 帧事务
 
-`FrameTransaction` 保存起始状态、attempt 记录、剩余视图预算和 RecoveryMemory 副本。中间 round 只追加 AttemptRecord，不更新 current target、运动历史或模板策略。最终 StateEvaluator 输出经过状态机后，Controller 一次性提交。
+`FrameTransaction` 保存起始状态、attempt 记录、剩余视图预算和 RecoveryMemory 副本。每个 AttemptRecord 保存该轮的局部图投影结果；后续 round 会读取此前所有记录，与本轮结果组成累计候选池重新评估。中间 round 仍然不更新 current target、运动历史或模板策略。最终 StateEvaluator 输出经过状态机后，Controller 一次性提交。
 
 ## 为什么模板命令只在 Round 1 应用
 

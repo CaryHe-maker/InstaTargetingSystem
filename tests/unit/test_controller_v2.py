@@ -118,6 +118,82 @@ class ControllerV2Test(unittest.TestCase):
         self.assertFalse(secondStep.result.valid)
         self.assertEqual(secondStep.result.status, TrackStatus.UNCERTAIN)
 
+    def testSecondRoundFusesFirstAndSecondRoundObservations(self) -> None:
+        frame0 = FramePacket(
+            SequenceId("cumulative-round2"),
+            FrameIndex(0),
+            0,
+            np.zeros((180, 360, 3), dtype=np.uint8),
+        )
+        controller = DepthAwareTrackController(self.geometry, self.config)
+        init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
+        controller.commitInitialization(init, None)
+        frame1 = FramePacket(
+            SequenceId("cumulative-round2"),
+            FrameIndex(1),
+            1_000_000_000,
+            frame0.rgb,
+        )
+
+        firstPlan = controller.beginFrame(frame1)
+        secondStep = controller.consume(firstPlan, (_boxedCandidate(0, 20.0, 0.85),))
+        assert isinstance(secondStep, MoreViewsRequired)
+        final = controller.consume(
+            secondStep.plan,
+            (_boxedCandidate(4, 20.0, 0.85),),
+        )
+
+        assert isinstance(final, FrameCommitted)
+        self.assertTrue(final.result.valid)
+        assert controller.lastStateObservation is not None
+        self.assertTrue(controller.lastStateObservation.selectedIsFused)
+        self.assertEqual(controller.lastStateObservation.sourceViewIds, (0, 4))
+        self.assertEqual(controller.lastStateObservation.candidateCount, 2)
+
+    def testThirdRoundConsidersObservationsFromBothPriorRounds(self) -> None:
+        frame0 = FramePacket(
+            SequenceId("cumulative-round3"),
+            FrameIndex(0),
+            0,
+            np.zeros((180, 360, 3), dtype=np.uint8),
+        )
+        controller = DepthAwareTrackController(self.geometry, self.config)
+        init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
+        controller.commitInitialization(init, None)
+
+        frame1 = FramePacket(
+            SequenceId("cumulative-round3"),
+            FrameIndex(1),
+            1_000_000_000,
+            frame0.rgb,
+        )
+        plan = controller.beginFrame(frame1)
+        step = controller.consume(plan, ())
+        assert isinstance(step, MoreViewsRequired)
+        committed = controller.consume(step.plan, ())
+        assert isinstance(committed, FrameCommitted)
+        self.assertEqual(committed.result.status, TrackStatus.UNCERTAIN)
+
+        frame2 = FramePacket(
+            SequenceId("cumulative-round3"),
+            FrameIndex(2),
+            2_000_000_000,
+            frame0.rgb,
+        )
+        round1 = controller.beginFrame(frame2)
+        round2 = controller.consume(round1, (_boxedCandidate(0, 20.0, 0.85),))
+        assert isinstance(round2, MoreViewsRequired)
+        round3 = controller.consume(round2.plan, (_boxedCandidate(4, 180.0, 0.85),))
+        assert isinstance(round3, MoreViewsRequired)
+        final = controller.consume(round3.plan, (_boxedCandidate(8, 20.0, 0.85),))
+
+        assert isinstance(final, FrameCommitted)
+        self.assertTrue(final.result.valid)
+        assert controller.lastStateObservation is not None
+        self.assertEqual(controller.lastStateObservation.candidateCount, 3)
+        self.assertTrue(controller.lastStateObservation.selectedIsFused)
+        self.assertEqual(controller.lastStateObservation.sourceViewIds, (0, 8))
+
     def testMotionHistoryContainsMeasurementsNotPredictions(self) -> None:
         estimator = SphericalMotionEstimator(windowLength=3)
         estimator.initialize(makeSphericalPoint(math.pi - 0.05, 0.0), None, 0)

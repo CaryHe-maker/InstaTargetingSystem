@@ -9,8 +9,9 @@
 1. `beginFrame(frame)` 创建 transactionId，并返回 attemptIndex=0 的 SearchPlan。
 2. Runtime 必须按计划中的视图顺序返回 ProjectedObservation。
 3. `consume(plan, observations)` 校验 sequenceId、frameIndex、transactionId、attemptIndex、stateRevision 和模板 expectedRevision。
-4. 若证据不足，返回新的 SearchPlan；旧 plan 不能再次消费。
-5. 最终轮调用状态机并一次性提交 Controller 内存，返回 FrameCommitted。
+4. 若证据不足，保存本轮 ProjectedObservation 并返回新的 SearchPlan；旧 plan 不能再次消费。
+5. 后续轮把此前各轮和本轮的 ProjectedObservation 合成累计候选池，重新执行单框排序与两框融合。
+6. 最终轮从累计候选池选择结果，调用状态机并一次性提交 Controller 内存，返回 FrameCommitted。
 
 ## 防止的错误
 

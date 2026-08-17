@@ -13,9 +13,9 @@
 3. `backend.infer()` 按同一模板 revision 推理整批视图。
 4. `remapLocalObservationFusedScores()` 执行 Beta Calibration。
 5. 每个局部框通过 `_projectObservation()` 回投，并计算运动中心相似度与尺度分数。
-6. `controller.consume()` 决定继续或提交。
+6. `controller.consume()` 将本轮投影观测与同帧此前轮次的观测组成累计候选池，统一融合和排序，然后决定继续或提交。
 
-中间轮的视图、局部观测和投影观测暂存在 `visualizationBatches`，但只在处理区间结束后写图。
+中间轮的视图、局部观测和投影观测暂存在 `visualizationBatches`，但只在处理区间结束后写图。Controller 另外在 FrameTransaction 中保存各轮投影观测，供后续轮累计评估；旧局部图不会重复执行 backend 推理。
 
 ## 输出顺序
 
