@@ -16,7 +16,7 @@
 
 `configs/RGBonly.yaml` 关闭深度、使用 fp32 并创建一个 HiT 会话。`configs/RGBD.yaml` 启用深度、使用 fp16 并创建两个独立 HiT 会话，第二个会话处理深度伪彩色图。FP16 batch 出现非有限 bbox 或 heatmap 时，会在同一模型上以 FP32 重算整个 batch。
 
-同一轮视图会作为一个 tensor batch 推理：TRACKING 为 4+4 两轮，UNCERTAIN 为 4+4 两轮，LOST 为单轮 10 张。RGB-D 每轮先执行 RGB batch，再执行 depth batch；第二轮依赖第一轮 Fusor 中心，因此不能与第一轮合并。
+同一轮视图会作为一个 tensor batch 推理。当前正常线程只在 TRACKING/UNCERTAIN 间转移，二者均为 4+4 两轮；低于 LT 或全零缺失保持 UNCERTAIN，不自动进入 LOST。保留的显式 LOST 组件仍为单轮 10 张。RGB-D 每轮先执行 RGB batch，再执行 depth batch；第二轮依赖第一轮 Fusor 中心，因此不能与第一轮合并。
 
 三种状态使用同一个 Fuse 输出规则：以上一可信框面积为参考，在最大交叉框和最小合并框之间自适应裁剪；参考面积不小于合并框时直接输出合并框，不进行额外放大。
 

@@ -89,22 +89,18 @@ class TrackStateMachine:
             assert thresholds is not None
             uncertainThreshold, lostThreshold = thresholds
             if stateScore <= 0.0 and uncertainThreshold == 0.0 and lostThreshold == 0.0:
-                # A missing candidate is encoded as zero.  Treat the degenerate all-zero
-                # warm-up window as LOST instead of allowing ``score >= UT`` to loop forever.
-                nextMode = TrackMode.LOST
+                # Keep the hard-miss diagnostic, but run the UNCERTAIN path for this experiment.
+                nextMode = TrackMode.UNCERTAIN
+                reason = TransitionReason.HARD_MISS
             elif stateScore >= uncertainThreshold:
                 nextMode = TrackMode.TRACKING
+                reason = TransitionReason.RELIABLE_MEASUREMENT
             elif stateScore >= lostThreshold:
                 nextMode = TrackMode.UNCERTAIN
+                reason = TransitionReason.WEAK_MEASUREMENT
             else:
-                nextMode = TrackMode.LOST
-            reason = (
-                TransitionReason.RELIABLE_MEASUREMENT
-                if nextMode is TrackMode.TRACKING
-                else TransitionReason.WEAK_MEASUREMENT
-                if nextMode is TrackMode.UNCERTAIN
-                else TransitionReason.HARD_MISS
-            )
+                nextMode = TrackMode.UNCERTAIN
+                reason = TransitionReason.HARD_MISS
         reset = mode is TrackMode.LOST and measurementAccepted
         return TransitionDecision(
             "COMMIT",

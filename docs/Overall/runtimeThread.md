@@ -36,7 +36,7 @@
 8. `controller.consume()` 调用 StateEvaluator。TRACKING/UNCERTAIN 第一轮用 Fusor 最佳候选中心生成第二轮 VStype1 四角计划，没有候选则回退到预测中心；第二轮完成后把两轮投影观测统一交给 Fusor。返回 `FrameCommitted` 后结束本帧处理。
 9. 处理区间关闭后，Runtime 才写中间可视化、sink 和最终结果可视化。
 
-所以同一输入帧只读取一次。TRACKING 使用 4+4、UNCERTAIN 使用 4+4，均执行两轮批量局部推理；LOST 单轮批量处理 10 张。轮次不能合并，因为第二轮中心依赖第一轮 Fusor 结果。所有轮次属于同一个 FrameTransaction，只有最后一次 consume 能提交持久状态。
+所以同一输入帧只读取一次。当前正常线程只执行 TRACKING/UNCERTAIN，二者都使用 4+4 两轮批量局部推理；低于 LT 或全零缺失仍进入 UNCERTAIN。保留的显式 LOST 组件可单轮批量处理 10 张，但不会由正常状态转移触发。轮次不能合并，因为第二轮中心依赖第一轮 Fusor 结果。所有轮次属于同一个 FrameTransaction，只有最后一次 consume 能提交持久状态。
 
 ## 结束和异常
 

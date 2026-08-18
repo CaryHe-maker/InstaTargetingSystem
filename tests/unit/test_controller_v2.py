@@ -11,6 +11,7 @@ from instatarget.controller import (
     SphericalMotionEstimator,
     scoreMotionConsistency,
 )
+from instatarget.controller.state_model import TrackMode
 from instatarget.core.config import DecisionGateConfig, loadConfig
 from instatarget.core.protocols import FrameCommitted, MoreViewsRequired
 from instatarget.core.types import (
@@ -19,6 +20,7 @@ from instatarget.core.types import (
     FrameIndex,
     FramePacket,
     ProjectedObservation,
+    ResultSource,
     SequenceId,
     TrackStatus,
 )
@@ -683,7 +685,7 @@ class ControllerV2Test(unittest.TestCase):
         self.assertAlmostEqual(result.bbox.widthPx, 30.0)
         self.assertTrue(result.valid)
 
-    def testUncertainUsesTwoType1RoundsAndLostUsesCombinedCubemaps(self) -> None:
+    def testRuntimeStaysUncertainAndUsesTwoType1Rounds(self) -> None:
         frame0 = FramePacket(
             SequenceId("routes"),
             FrameIndex(0),
@@ -716,9 +718,9 @@ class ControllerV2Test(unittest.TestCase):
         self.assertEqual(len(uncertainFirst.views), 4)
         uncertainSecond = controller.consume(uncertainFirst, ())
         assert isinstance(uncertainSecond, MoreViewsRequired)
-        lostResult = controller.consume(uncertainSecond.plan, ())
-        assert isinstance(lostResult, FrameCommitted)
-        self.assertEqual(lostResult.result.status, TrackStatus.UNCERTAIN)
+        uncertainResult = controller.consume(uncertainSecond.plan, ())
+        assert isinstance(uncertainResult, FrameCommitted)
+        self.assertEqual(uncertainResult.result.status, TrackStatus.UNCERTAIN)
 
         frame4 = FramePacket(SequenceId("routes"), FrameIndex(4), 4_000_000_000, frame0.rgb)
         uncertainFirst = controller.beginFrame(frame4)
@@ -730,28 +732,31 @@ class ControllerV2Test(unittest.TestCase):
                 for view in uncertainFirst.views
             )
         )
-        lostSecond = controller.consume(uncertainFirst, ())
-        assert isinstance(lostSecond, MoreViewsRequired)
-        self.assertEqual(len(lostSecond.plan.views), 4)
+        uncertainSecond = controller.consume(uncertainFirst, ())
+        assert isinstance(uncertainSecond, MoreViewsRequired)
+        self.assertEqual(len(uncertainSecond.plan.views), 4)
         self.assertTrue(
             all(
                 math.isclose(view.bfov.horizontalFovRad, self.config.geometry.maxFovRad)
                 and math.isclose(view.bfov.verticalFovRad, self.config.geometry.maxFovRad)
-                for view in lostSecond.plan.views
+                for view in uncertainSecond.plan.views
             )
         )
-        lostFinal = controller.consume(lostSecond.plan, ())
-        assert isinstance(lostFinal, FrameCommitted)
-        self.assertEqual(lostFinal.result.status, TrackStatus.LOST)
+        uncertainFinal = controller.consume(uncertainSecond.plan, ())
+        assert isinstance(uncertainFinal, FrameCommitted)
+        self.assertEqual(uncertainFinal.result.status, TrackStatus.UNCERTAIN)
 
         frame5 = FramePacket(SequenceId("routes"), FrameIndex(5), 5_000_000_000, frame0.rgb)
-        lostFirst = controller.beginFrame(frame5)
-        self.assertEqual(len(lostFirst.views), 10)
-        lostFinal = controller.consume(lostFirst, ())
-        assert isinstance(lostFinal, FrameCommitted)
-        self.assertEqual(lostFinal.result.status, TrackStatus.LOST)
+        uncertainFirst = controller.beginFrame(frame5)
+        self.assertEqual(len(uncertainFirst.views), 4)
+        uncertainSecond = controller.consume(uncertainFirst, ())
+        assert isinstance(uncertainSecond, MoreViewsRequired)
+        self.assertEqual(len(uncertainSecond.plan.views), 4)
+        uncertainFinal = controller.consume(uncertainSecond.plan, ())
+        assert isinstance(uncertainFinal, FrameCommitted)
+        self.assertEqual(uncertainFinal.result.status, TrackStatus.UNCERTAIN)
 
-    def testLostFusionCandidateReacquiresWithoutRecoveryState(self) -> None:
+    def testExplicitLostComponentCanStillReacquire(self) -> None:
         frame0 = FramePacket(
             SequenceId("recover"),
             FrameIndex(0),
@@ -761,22 +766,11 @@ class ControllerV2Test(unittest.TestCase):
         controller = DepthAwareTrackController(self.geometry, self.config)
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
         controller.commitInitialization(init, None)
+        controller._mode = TrackMode.LOST
 
-        for index in (1, 2, 3, 4):
-            frame = FramePacket(
-                SequenceId("recover"), FrameIndex(index), index * 1_000_000_000, frame0.rgb
-            )
-            plan = controller.beginFrame(frame)
-            while True:
-                step = controller.consume(plan, ())
-                if isinstance(step, MoreViewsRequired):
-                    plan = step.plan
-                    continue
-                break
-        self.assertEqual(step.result.status, TrackStatus.LOST)
-
-        frame5 = FramePacket(SequenceId("recover"), FrameIndex(5), 5_000_000_000, frame0.rgb)
-        lostFirst = controller.beginFrame(frame5)
+        frame1 = FramePacket(SequenceId("recover"), FrameIndex(1), 1_000_000_000, frame0.rgb)
+        lostFirst = controller.beginFrame(frame1)
+        self.assertEqual(len(lostFirst.views), 10)
         pending = controller.consume(
             lostFirst,
             tuple(
@@ -792,10 +786,11 @@ class ControllerV2Test(unittest.TestCase):
         assert isinstance(pending, FrameCommitted)
         self.assertEqual(pending.result.status, TrackStatus.TRACKING)
         self.assertTrue(pending.result.valid)
+        self.assertEqual(pending.result.resultSource, ResultSource.OBSERVED_REACQUIRED)
         self.assertAlmostEqual(pending.result.bbox.xPx, 30.0)
         self.assertAlmostEqual(pending.result.bbox.widthPx, 80.0)
 
-    def testLostIsEnabledByDefaultAndUsesRecoveryPlan(self) -> None:
+    def testRuntimeDoesNotEnterLostAndKeepsUsingUncertainPlan(self) -> None:
         frame0 = FramePacket(
             SequenceId("suppress-lost"),
             FrameIndex(0),
@@ -820,10 +815,8 @@ class ControllerV2Test(unittest.TestCase):
                     plan = step.plan
                     continue
                 break
-            if frameIndex < 4:
-                self.assertNotEqual(step.result.status, TrackStatus.LOST)
-            else:
-                self.assertEqual(step.result.status, TrackStatus.LOST)
+            self.assertNotEqual(step.result.status, TrackStatus.LOST)
+        self.assertEqual(step.result.status, TrackStatus.UNCERTAIN)
 
         nextFrame = FramePacket(
             SequenceId("suppress-lost"),
@@ -831,7 +824,7 @@ class ControllerV2Test(unittest.TestCase):
             5_000_000_000,
             frame0.rgb,
         )
-        self.assertEqual(len(controller.beginFrame(nextFrame).views), 10)
+        self.assertEqual(len(controller.beginFrame(nextFrame).views), 4)
 
 
 if __name__ == "__main__":

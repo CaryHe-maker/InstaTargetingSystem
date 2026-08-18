@@ -2,9 +2,9 @@
 
 ## 状态
 
-内部状态只有 `INIT`、`TRACKING`、`UNCERTAIN`、`LOST`。初始化提交后公开状态为 `TRACKING`；公开 `TrackStatus` 不单独输出 `INIT`。
+内部类型保留 `INIT`、`TRACKING`、`UNCERTAIN`、`LOST`。初始化提交后公开状态为 `TRACKING`；公开 `TrackStatus` 不单独输出 `INIT`。当前实验的正常评分线程只会选择 `TRACKING` 或 `UNCERTAIN`，不会自动进入 `LOST`。
 
-`RECOVERING` 已移除。LOST 找回时仍保留“是否接受测量”的独立判断和运动历史重置，但不再增加公开中间状态。
+`RECOVERING` 已移除。LOST 的状态类型、10 视图 planner、找回接受判断和运动历史重置组件仍保留，供显式调用、兼容和后续实验使用；它们不由当前 StateScore 转移自动触发。
 
 ## StateScore 与 ScoreGroup
 
@@ -18,21 +18,23 @@
 - 第 3 至第 10 个状态：`UT = 0.5 * max + 0.5 * min`，`LT = 0.2 * max + 0.8 * min`。
 - 第 11 个状态起：按 ScoreGroup 降序排列，`UT` 取第 5 大数据，`LT` 取第 8 大数据。
 
-每次帧事务提交后才把当前 StateScore 加入 ScoreGroup。无候选使用 0；全零预热窗口不会停留在 `TRACKING`，而会进入 `LOST`，避免 `score >= UT == 0` 造成死循环。
+每次帧事务提交后才把当前 StateScore 加入 ScoreGroup。无候选使用 0；全零预热窗口不会停留在 `TRACKING`，而会进入 `UNCERTAIN` 并记录 `HARD_MISS`，避免 `score >= UT == 0` 造成死循环。
 
 统一转移规则为：
 
 ```text
 StateScore >= UT       -> TRACKING
 LT <= StateScore < UT  -> UNCERTAIN
-StateScore < LT        -> LOST
+StateScore < LT        -> UNCERTAIN (reason=HARD_MISS)
 ```
+
+因此当前正常线程不会发布新的 `LOST` 结果；低于 LT 与全零缺失都继续执行 UNCERTAIN 的两轮扩大局部搜索。`LT` 和 HARD_MISS 诊断仍保留，便于比较实验结果。
 
 ## 证据与提交
 
 StateEvaluator 仍输出可靠融合、可靠单框、弱和缺失等证据，供 Controller 判断 `acceptMeasurement`。这项判断不能被 StateScore-only 状态选择替代：只有被接受的测量才更新当前 bbox/BFoV、运动样本或模板。
 
-LOST 的可靠融合或达到候选质量门控的单框可以直接回到 `TRACKING` 并重置运动历史；低质量候选仍可让下一状态由 StateScore 决定，但结果保持 `valid=False`。
+若兼容调用显式构造 LOST 状态，可靠融合或达到候选质量门控的单框仍可直接回到 `TRACKING` 并重置运动历史；这条保留路径不代表正常评分线程能够进入 LOST。
 
 ## 模板与事务
 

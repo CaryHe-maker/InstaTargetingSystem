@@ -26,7 +26,7 @@ singleScore = clip(0.70*appearanceProbability + 0.30*effectiveMotion, 0, 1)
 
 ## 轮次评分
 
-所有生产轮次都使用固定的 70/30 `SingleScore`。`SearchPlan.appearanceOnlyScoring` 仍作为协议兼容字段保留，但当前固定为 `false`；TRACKING/UNCERTAIN 在第二轮提交时把两轮观测合并后统一按 `singleScore` 排序和融合。LOST 的 6 张 cubemap 和 4 张 Type1 在同一轮统一交给 Fusor。
+所有轮次都使用固定的 70/30 `SingleScore`。`SearchPlan.appearanceOnlyScoring` 仍作为协议兼容字段保留，但当前固定为 `false`；正常线程的 TRACKING/UNCERTAIN 在第二轮提交时把两轮观测合并后统一按 `singleScore` 排序和融合。保留的显式 LOST 组件仍把 6 张 cubemap 和 4 张 Type1 在同一轮统一交给 Fusor。
 
 ## 为什么不用分段映射
 

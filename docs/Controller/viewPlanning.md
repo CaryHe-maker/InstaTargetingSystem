@@ -5,6 +5,8 @@
 使用上一帧运动预测的目标角尺寸动态规划四角视图；UNCERTAIN 使用同样的两轮 Type1 路径，
 但两轮均固定采用 120° 最大视场。
 
+当前实验的正常运行线程不会自动进入 LOST，因此实际只调用 TRACKING/UNCERTAIN 的两轮路径。LOST planner 及 cubemap 布局保留，可通过显式 LOST 状态独立调用和测试。
+
 ## VStype1 四角
 
 `ViewSpecType1(center, width, height)` 返回四个 `ViewSpec`，顺序固定为左上、右上、左下、右下。
@@ -32,4 +34,4 @@ TRACKING 和 UNCERTAIN 的第一轮观测先由 Fusor 选择一个最佳候选�
 
 ## 预算与计划身份
 
-单帧预算最大为 12 张：TRACKING 固定 4+4=8，UNCERTAIN 固定 4+4=8，LOST 固定 6+4=10。Planner 不生成部分 cubemap 或部分四角计划；预算不足时抛出 ProtocolError。SearchPlan 的 viewId 和 viewRoles 用于验证响应顺序，第二轮 observation 只能包含该轮明确请求的 viewId。第二轮模板命令强制 KEEP，但 expectedRevision 仍按轮严格递增。
+单帧预算最大为 12 张：正常线程的 TRACKING 和 UNCERTAIN 均固定 4+4=8；保留的显式 LOST planner 固定 6+4=10。Planner 不生成部分 cubemap 或部分四角计划；预算不足时抛出 ProtocolError。SearchPlan 的 viewId 和 viewRoles 用于验证响应顺序，第二轮 observation 只能包含该轮明确请求的 viewId。第二轮模板命令强制 KEEP，但 expectedRevision 仍按轮严格递增。

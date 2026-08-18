@@ -38,7 +38,7 @@ appearanceProbability + effective motion
 - 运动组合权重：尺度残差 0.35，深度残差 0.15，`d2` 上限 25。
 - motion calibration 当前为 identity；在独立校准集完成前，不使用逐帧 min-max 或伪造经验参数。
 
-所有轮次都使用 70/30 SingleScore。LOST 第一轮的 6 张旋转 cubemap 和 4 张 Type1 在同一批次内评估；TRACKING/UNCERTAIN 第一轮先由 Fusor 选择中心，第二轮围绕该中心推理 VStype1 四角 4 张视图，提交时将两轮投影观测统一交给 Fusor。`appearanceOnlyScoring` 作为兼容字段固定为 false。
+所有轮次都使用 70/30 SingleScore。正常线程只执行 TRACKING/UNCERTAIN：第一轮先由 Fusor 选择中心，第二轮围绕该中心推理 VStype1 四角 4 张视图，提交时将两轮投影观测统一交给 Fusor。保留的显式 LOST 组件仍在同一批次评估 6 张旋转 cubemap 和 4 张 Type1。`appearanceOnlyScoring` 作为兼容字段固定为 false。
 
 ## 验证门槛
 

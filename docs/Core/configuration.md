@@ -21,7 +21,7 @@
 - `geometry.maxFovDeg` 必须为 120，作为 cubemap/UNCERTAIN 的固定视域和 TRACKING 动态视域上限。
 - schema 仍要求 `firstRoundFusionOverlap < overlapThreshold`，但两项当前只为配置兼容；生产 Fusor 使用固定 0.70 常量。
 - 状态阈值不再来自 YAML 标量；状态机根据最近 10 个 `StateScore` 动态计算 UT/LT。
-- `tracking.maxAttemptsPerFrame` 固定为 2；当前校验硬性要求 `tracking.maxViewsPerFrameTotal >= 12`，两份生产配置也都取 12。虽然实际状态路线最多使用 10 张（LOST 的 6 张 cubemap 和 4 张 Type1），但不能据此把配置降到 10。
+- `tracking.maxAttemptsPerFrame` 固定为 2；当前校验硬性要求 `tracking.maxViewsPerFrameTotal >= 12`，两份生产配置也都取 12。正常线程每帧最多使用 8 张（TRACKING/UNCERTAIN 的 4+4）；保留的显式 LOST planner 使用 10 张（6 张 cubemap 和 4 张 Type1）。不能仅按当前可达路线把配置降到 8。
 - `fusionHead` 权重非负且至少一个为正。
 - DecisionGate 三项权重总和不超过 1；生产 StateEvaluator 当前忽略整组 DecisionGate。
 

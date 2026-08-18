@@ -10,6 +10,7 @@ from instatarget.controller import (
     SphericalMotionEstimator,
     TrackStateMachine,
 )
+from instatarget.controller.state_model import TransitionReason
 from instatarget.core.config import DecisionGateConfig, loadConfig
 from instatarget.core.errors import ProtocolError
 from instatarget.core.types import (
@@ -107,6 +108,18 @@ class ControllerTest(unittest.TestCase):
         self.assertEqual(uncertain.status, TrackStatus.UNCERTAIN)
         self.assertTrue(recovered.accepted)
         self.assertEqual(recovered.status, TrackStatus.TRACKING)
+
+    def testStateMachineKeepsHardMissInUncertain(self) -> None:
+        state = TrackStateMachine(self.config.tracking)
+        state.initialize()
+        state.update(0.8, True, True)
+        state.update(0.8, True, True)
+        state.update(0.8, True, True)
+
+        hardMiss = state.update(0.0, False, False)
+
+        self.assertEqual(hardMiss.status, TrackStatus.UNCERTAIN)
+        self.assertEqual(hardMiss.reason, TransitionReason.HARD_MISS)
 
     def testControllerPlansGuardsAndCommitsOrderedUpdates(self) -> None:
         frame0 = FramePacket(
