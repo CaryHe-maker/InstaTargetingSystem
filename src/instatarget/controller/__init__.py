@@ -23,9 +23,17 @@ from instatarget.controller.fused_score import (
     scoreMotionConsistency,
     scoreViewCenterMotion,
 )
-from instatarget.controller.fusor import FUSION_OVERLAP_RATE, Fusor, fuse
+from instatarget.controller.fusor import (
+    FUSION_AGREEMENT_BONUS_WEIGHT,
+    FUSION_MAX_SCORE_GAIN,
+    FUSION_OVERLAP_RATE,
+    FUSION_SCORE_CAP,
+    FusionBoxMode,
+    Fusor,
+    fuse,
+)
 from instatarget.controller.motion_estimator import MotionEstimatorImpl, SphericalMotionEstimator
-from instatarget.controller.recovery_planner import PlannedView, RecoveryPlanner
+from instatarget.controller.recovery_planner import PlannedView, RecoveryPlanner, ViewSpecType1
 from instatarget.controller.state_evaluator import StateEvaluator
 from instatarget.controller.state_machine import StateUpdate, TrackStateMachine
 from instatarget.controller.state_model import (
@@ -47,7 +55,11 @@ __all__ = [
     "ClusterCenter",
     "DepthAwareTrackController",
     "FUSED_SCORE_BETA_PARAMETERS",
+    "FUSION_AGREEMENT_BONUS_WEIGHT",
+    "FUSION_MAX_SCORE_GAIN",
     "FUSION_OVERLAP_RATE",
+    "FUSION_SCORE_CAP",
+    "FusionBoxMode",
     "Fusor",
     "MotionScore",
     "FrameAggregate",
@@ -56,6 +68,7 @@ __all__ = [
     "MotionEstimatorImpl",
     "PlannedView",
     "RecoveryPlanner",
+    "ViewSpecType1",
     "calibrateBackendFusedScore",
     "calibrateLocalAppearanceProbabilities",
     "calibrateMotionScore",

@@ -514,7 +514,7 @@ class ControllerV2Test(unittest.TestCase):
         )
         self.assertTrue(all(item.role.startswith("round1_") for item in lost))
 
-    def testSourceConfidenceFloorBlocksFirstRoundReliableFusion(self) -> None:
+    def testSourceConfidenceFloorLeavesLowSourcesAsSingles(self) -> None:
         frame0 = FramePacket(
             SequenceId("floor"),
             FrameIndex(0),
@@ -538,11 +538,13 @@ class ControllerV2Test(unittest.TestCase):
         )
         self.assertIsInstance(final, FrameCommitted)
         assert isinstance(final, FrameCommitted)
-        self.assertFalse(final.result.valid)
+        self.assertTrue(final.result.valid)
         self.assertEqual(final.result.status, TrackStatus.TRACKING)
         assert controller.lastStateObservation is not None
-        self.assertTrue(controller.lastStateObservation.selectedIsFused)
-        self.assertFalse(controller.lastStateObservation.selectedSourceConfidencePassed)
+        self.assertFalse(controller.lastStateObservation.selectedIsFused)
+        self.assertTrue(controller.lastStateObservation.selectedSourceConfidencePassed)
+        self.assertEqual(len(controller.lastStateObservation.sourceViewIds), 1)
+        self.assertAlmostEqual(controller.lastStateObservation.stateScore, 0.79)
 
     def testOverlapThresholdSevenTenthsAllowsFirstRoundFusion(self) -> None:
         frame0 = FramePacket(
@@ -623,7 +625,7 @@ class ControllerV2Test(unittest.TestCase):
         )
         self.assertEqual(controller.lastStateObservation.candidateCount, 2)
 
-    def testFirstRoundFusionUsesErpIntersectionBox(self) -> None:
+    def testTrackingFusionUsesErpUnionBox(self) -> None:
         frame0 = FramePacket(
             SequenceId("wide-fusion"),
             FrameIndex(0),
@@ -641,17 +643,17 @@ class ControllerV2Test(unittest.TestCase):
         result = controller.update(
             plan,
             (
-                _boxedCandidate(0, 0.0, 0.99, widthPx=120.0),
-                _boxedCandidate(1, 80.0, 0.99, widthPx=120.0),
+                _boxedCandidate(0, 0.0, 0.99, widthPx=100.0),
+                _boxedCandidate(1, 10.0, 0.99, widthPx=100.0),
             ),
         )
 
         self.assertAlmostEqual(result.bbox.xPx, 0.0)
-        self.assertAlmostEqual(result.bbox.widthPx, 120.0)
+        self.assertAlmostEqual(result.bbox.widthPx, 110.0)
         self.assertLess(result.bfov.horizontalFovRad, math.pi)
         self.assertTrue(result.valid)
 
-    def testFusedResultUsesIntersectionAcrossErpSeam(self) -> None:
+    def testTrackingFusedResultUsesUnionAcrossErpSeam(self) -> None:
         frame0 = FramePacket(
             SequenceId("seam-intersection"),
             FrameIndex(0),
@@ -677,8 +679,8 @@ class ControllerV2Test(unittest.TestCase):
             ),
         )
 
-        self.assertAlmostEqual(result.bbox.xPx, 350.0)
-        self.assertAlmostEqual(result.bbox.widthPx, 30.0)
+        self.assertAlmostEqual(result.bbox.xPx, 340.0)
+        self.assertAlmostEqual(result.bbox.widthPx, 40.0)
         self.assertTrue(result.valid)
 
     def testUncertainUsesCubemapThenFourCornersAndLostUsesCombinedCubemaps(self) -> None:
@@ -688,7 +690,11 @@ class ControllerV2Test(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = DepthAwareTrackController(
+            self.geometry,
+            self.config,
+            enableLostState=True,
+        )
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
         controller.commitInitialization(init, None)
 
@@ -742,7 +748,11 @@ class ControllerV2Test(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = DepthAwareTrackController(
+            self.geometry,
+            self.config,
+            enableLostState=True,
+        )
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
         controller.commitInitialization(init, None)
 
@@ -768,6 +778,41 @@ class ControllerV2Test(unittest.TestCase):
         assert isinstance(pending, FrameCommitted)
         self.assertEqual(pending.result.status, TrackStatus.TRACKING)
         self.assertTrue(pending.result.valid)
+
+    def testLostIsTemporarilySuppressedAndRoutesThroughTracking(self) -> None:
+        frame0 = FramePacket(
+            SequenceId("suppress-lost"),
+            FrameIndex(0),
+            0,
+            np.zeros((180, 360, 3), dtype=np.uint8),
+        )
+        controller = DepthAwareTrackController(self.geometry, self.config)
+        init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
+        controller.commitInitialization(init, None)
+
+        for frameIndex in range(1, 5):
+            frame = FramePacket(
+                SequenceId("suppress-lost"),
+                FrameIndex(frameIndex),
+                frameIndex * 1_000_000_000,
+                frame0.rgb,
+            )
+            plan = controller.beginFrame(frame)
+            while True:
+                step = controller.consume(plan, ())
+                if isinstance(step, MoreViewsRequired):
+                    plan = step.plan
+                    continue
+                break
+            self.assertNotEqual(step.result.status, TrackStatus.LOST)
+
+        nextFrame = FramePacket(
+            SequenceId("suppress-lost"),
+            FrameIndex(5),
+            5_000_000_000,
+            frame0.rgb,
+        )
+        self.assertEqual(len(controller.beginFrame(nextFrame).views), 4)
 
 
 if __name__ == "__main__":

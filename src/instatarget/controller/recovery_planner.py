@@ -1,10 +1,10 @@
-"""Fixed 120-degree four-corner and cubemap search planning."""
+"""State-specific four-corner and cubemap search planning."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from math import asin, atan2, cos, pi, sin, sqrt, tan
+from math import asin, atan2, cos, isfinite, pi, sin, sqrt, tan
 
 from instatarget.controller.state_model import RecoveryMemory
 from instatarget.core.config import GeometryConfig, RecoveryConfig, TrackingConfig
@@ -28,6 +28,87 @@ from instatarget.geometry.projection_math import (
 class PlannedView:
     spec: ViewSpec
     role: str
+
+
+def ViewSpecType1(
+    center: SphericalPoint,
+    horizontalSizeRad: float | tuple[float, float],
+    verticalSizeRad: float | None = None,
+    *,
+    viewIdStart: int = 0,
+    outputWidthPx: int = 256,
+    outputHeightPx: int = 256,
+    minFovRad: float = pi / 6.0,
+    maxFovRad: float = 2.0 * pi / 3.0,
+) -> tuple[ViewSpec, ...]:
+    """Build the four dynamic VStype1 views around ``center``.
+
+    ``horizontalSizeRad`` and ``verticalSizeRad`` are the predicted target angular
+    width and height from the previous frame.  Each view is three times as wide and
+    three times as high as that target (nine times its area), clamped to
+    ``[minFovRad, maxFovRad]``.  The view centers are offset by a third of their
+    corresponding FOV, preserving the overlap ratio of the former
+    120-degree/40-degree layout.
+
+    A two-element ``(width, height)`` tuple is accepted as a convenience for callers
+    that already keep the predicted size together.
+    """
+    if verticalSizeRad is None:
+        if not isinstance(horizontalSizeRad, tuple) or len(horizontalSizeRad) != 2:
+            raise ProtocolError("ViewSpecType1 requires horizontal and vertical sizes")
+        horizontalSizeRad, verticalSizeRad = horizontalSizeRad
+    if (
+        not isfinite(float(horizontalSizeRad))
+        or not isfinite(float(verticalSizeRad))
+        or float(horizontalSizeRad) <= 0.0
+        or float(verticalSizeRad) <= 0.0
+    ):
+        raise ProtocolError("ViewSpecType1 sizes must be finite and positive")
+    if viewIdStart < 0:
+        raise ProtocolError("viewIdStart must be non-negative")
+    if outputWidthPx <= 0 or outputHeightPx <= 0:
+        raise ProtocolError("view output dimensions must be positive")
+    if (
+        not isfinite(minFovRad)
+        or not isfinite(maxFovRad)
+        or not 0.0 < minFovRad <= maxFovRad < pi
+    ):
+        raise ProtocolError("FOV limits must satisfy 0 < minFovRad <= maxFovRad < pi")
+
+    # The target angular extent is tripled independently on each axis.  Keep the
+    # resulting BFoV in the perspective-camera domain for unusually large targets;
+    # ordinary tracking boxes are unaffected by this safety bound.
+    horizontalFov = _dynamicFov(
+        3.0 * float(horizontalSizeRad),
+        minFovRad,
+        maxFovRad,
+    )
+    verticalFov = _dynamicFov(
+        3.0 * float(verticalSizeRad),
+        minFovRad,
+        maxFovRad,
+    )
+    yawOffset = horizontalFov / 3.0
+    pitchOffset = verticalFov / 3.0
+    roles = (
+        (-yawOffset, pitchOffset),
+        (yawOffset, pitchOffset),
+        (-yawOffset, -pitchOffset),
+        (yawOffset, -pitchOffset),
+    )
+    return tuple(
+        ViewSpec(
+            viewId=viewIdStart + index,
+            bfov=BFoV(
+                center=_offsetDirection(center, localYawOffset, localPitchOffset),
+                horizontalFovRad=horizontalFov,
+                verticalFovRad=verticalFov,
+            ),
+            outputWidthPx=outputWidthPx,
+            outputHeightPx=outputHeightPx,
+        )
+        for index, (localYawOffset, localPitchOffset) in enumerate(roles)
+    )
 
 
 class RecoveryPlanner:
@@ -103,11 +184,26 @@ class RecoveryPlanner:
             raise ProtocolError(
                 f"view budget cannot fit attempt: required={requiredViews}, available={budget}"
             )
+        trackingSize = (
+            _trackingSize(predictedMotion, fallbackBfov)
+            if status is TrackStatus.TRACKING
+            else None
+        )
         if attemptIndex == 1:
-            return self._fourCorners(center, viewIdStart, attemptIndex)
+            return self._fourCorners(
+                center,
+                viewIdStart,
+                attemptIndex,
+                dynamicSize=trackingSize,
+            )
         if status is TrackStatus.UNCERTAIN:
             return self._cubeMap(center, viewIdStart, attemptIndex, rolePrefix="cubemap")
-        return self._fourCorners(center, viewIdStart, attemptIndex)
+        return self._fourCorners(
+            center,
+            viewIdStart,
+            attemptIndex,
+            dynamicSize=trackingSize,
+        )
 
     def contextBfov(
         self,
@@ -136,23 +232,43 @@ class RecoveryPlanner:
         center: SphericalPoint,
         viewIdStart: int,
         attemptIndex: int,
+        *,
+        dynamicSize: tuple[float, float] | None = None,
     ) -> tuple[PlannedView, ...]:
-        offset = 40.0 * pi / 180.0
         roles = (
-            ("left_top", -offset, offset),
-            ("right_top", offset, offset),
-            ("left_bottom", -offset, -offset),
-            ("right_bottom", offset, -offset),
+            "left_top",
+            "right_top",
+            "left_bottom",
+            "right_bottom",
         )
-        return tuple(
-            PlannedView(
-                spec=self._viewSpec(
+        if dynamicSize is not None:
+            specs = ViewSpecType1(
+                center,
+                dynamicSize,
+                viewIdStart=viewIdStart,
+                outputWidthPx=self._geometry.viewWidthPx,
+                outputHeightPx=self._geometry.viewHeightPx,
+                maxFovRad=self._geometry.maxFovRad,
+            )
+        else:
+            offset = 40.0 * pi / 180.0
+            specs = tuple(
+                self._viewSpec(
                     viewIdStart + index,
                     _offsetDirection(center, yawOffset, pitchOffset),
-                ),
-                role=f"round{attemptIndex + 1}_{role}",
+                )
+                for index, (yawOffset, pitchOffset) in enumerate(
+                    (
+                        (-offset, offset),
+                        (offset, offset),
+                        (-offset, -offset),
+                        (offset, -offset),
+                    )
+                )
             )
-            for index, (role, yawOffset, pitchOffset) in enumerate(roles)
+        return tuple(
+            PlannedView(spec=spec, role=f"round{attemptIndex + 1}_{role}")
+            for spec, role in zip(specs, roles, strict=True)
         )
 
     def _cubeMap(
@@ -242,4 +358,22 @@ def _cubeDirections(center: SphericalPoint) -> tuple[tuple[str, SphericalPoint],
     )
 
 
-__all__ = ["PlannedView", "RecoveryPlanner"]
+def _trackingSize(
+    motion: MotionState3D | None,
+    fallbackBfov: BFoV,
+) -> tuple[float, float]:
+    """Return the previous-frame target size used by every TRACKING attempt."""
+    if motion is not None and motion.horizontalSizeRad > 0.0 and motion.verticalSizeRad > 0.0:
+        return motion.horizontalSizeRad, motion.verticalSizeRad
+    # The initialized/current BFoV is the frame-0 (or last committed) standard
+    # tracking box, so it is the correct first-frame basis when an estimator has
+    # not exposed angular scale yet.  TRACKING never falls back to fixed corners.
+    return fallbackBfov.horizontalFovRad, fallbackBfov.verticalFovRad
+
+
+def _dynamicFov(value: float, minFovRad: float, maxFovRad: float) -> float:
+    """Keep a dynamic view valid for perspective projection."""
+    return min(maxFovRad, max(minFovRad, value))
+
+
+__all__ = ["PlannedView", "RecoveryPlanner", "ViewSpecType1"]

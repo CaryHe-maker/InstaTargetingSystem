@@ -6,9 +6,11 @@
 | `geometry.viewHeightPx` | 256 | LocalView 输出高度 |
 | `geometry.boundarySamplesPerEdge` | 65 | bbox/BFoV 边界每边采样点数 |
 | `geometry.minFovDeg` | 20 | 运动回退包络最低 FOV |
-| `geometry.maxFovDeg` | 120 | 所有搜索 ViewSpec 的固定水平/垂直 FOV |
+| `geometry.maxFovDeg` | 120 | cubemap 与 UNCERTAIN 回退四角的固定 FOV，也是 TRACKING 动态四角的 FOV 上限 |
 
-`maxFovDeg` 由 schema 强制为 120。四角中心水平/垂直偏移 40 度和 cubemap 六个方向目前是 `controller/recovery_planner.py` 中的布局常量，不是 YAML 参数。
+`maxFovDeg` 由 schema 强制为 120。cubemap 和兼容回退四角的中心偏移 40 度仍是
+`controller/recovery_planner.py` 中的布局常量；TRACKING 的动态四角由 `ViewSpecType1`
+按预测框角尺寸计算 FOV 和偏移，固定使用 30° 下限，并由 `maxFovDeg` 限制上限。
 
 提高局部分辨率会近似按像素数增加投影和模型成本；HiT 当前仍缩放到 256×256，因此只改 ViewSpec 尺寸不会自动增加网络有效分辨率。提高 boundarySamples 主要增加框回投成本。优化时应分别测试目标位于视图中心、边缘、极点和 ERP 经线附近的直接 bbox、BFoV 误差与 `envelopeInflation`。
 

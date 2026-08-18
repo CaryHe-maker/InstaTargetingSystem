@@ -14,13 +14,19 @@ Runtime 先完成局部框回投和 SingleScore，再把投影结果交给 State
 OverlapRate = ERP 交集面积 / min(框 A 面积, 框 B 面积)
 ```
 
-Fusor 先把每个观测加入单框候选，再枚举全部无序观测对。当 OverlapRate >= 固定常量 0.70 时尝试两框融合，融合几何仍为 ERP 交集，最多使用两个来源。融合分数为：
+Fusor 先把每个观测加入单框候选，再枚举全部无序观测对。只有两个来源的 SingleScore 都不低于 `evaluator.fusionSourceMinConfidence`，且 OverlapRate >= 固定常量 0.70 时，才生成两框融合候选。融合几何由当前状态选择，最多使用两个来源。
+
+OverlapRate 只负责判断两个来源是否足够重叠。融合置信度另用 seam-aware ERP IoU 衡量两框整体一致性：
 
 ```text
-fusionScore = 1 - ((2 - a - b) * (1 - overlap) / 2)
+agreementIoU = ERP 交集面积 / ERP 并集面积
+base = sqrt(a * b)
+consistency = 1 - abs(a - b)
+bonus = 0.15 * agreementIoU * consistency * (1 - base)
+fusionScore = min(base + bonus, max(a, b) + 0.03, 0.99)
 ```
 
-Fusor 将所有单框和可行融合框统一排序，只返回一个最佳结果。先比较 confidence，同分时优先融合候选，再选择 representative viewId 较小者。`evaluator.fusionSourceMinConfidence` 不阻止生成融合候选，只决定该融合候选能否作为测量被接受；最终测量还必须达到 `tracking.candidateMinScore`。Fusor 不会返回候选列表，也不会融合三个或更多来源。
+几何平均值抑制一高一低来源造成的虚高，IoU 奖励只在来源分数一致且框形状一致时生效；最终分数最多比最高来源增加 0.03，并硬限制在 0.99。Fusor 将所有单框和可行融合框统一排序，只返回一个最佳结果。先比较 confidence，同分时优先融合候选，再选择 representative viewId 较小者。最终测量还必须达到 `tracking.candidateMinScore`。Fusor 不会返回候选列表，也不会融合三个或更多来源。
 
 ## 保留的 Classifier
 

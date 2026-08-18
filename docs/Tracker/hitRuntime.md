@@ -2,7 +2,7 @@
 
 ## 接口分层
 
-`hit_backend.py::HiTSession` 只强制要求四项能力：是否支持在线模板、编码模板、单图推理、关闭资源。`inferBatch()` 是可选扩展；`HiTBackend` 优先调用它，不支持时按输入顺序回退到单图 `infer()`。外层统一检查 RGB 形状、模板非空、返回数量和分数范围，并把第三方异常翻译为项目 `ModelError`。
+`hit_backend.py::HiTSession` 只强制要求四项能力：在线模板能力声明、编码模板、单图推理、关闭资源。`inferBatch()` 是可选扩展；`HiTBackend` 优先调用它，不支持时按输入顺序回退到单图 `infer()`。当前生产 TrackerBackend 始终只传入第 0 帧 anchor 特征，不使用在线模板。外层统一检查 RGB 形状、模板非空、返回数量和分数范围，并把第三方异常翻译为项目 `ModelError`。
 
 真实实现位于 `pytorch_hit_session.py::PyTorchHiTSession`。它加载 `src/instatarget/vendor/hit` 中的 HiT-Small 结构和 `model.weights` checkpoint，选择 CUDA 设备并按 `model.precision` 决定 fp32/fp16。
 

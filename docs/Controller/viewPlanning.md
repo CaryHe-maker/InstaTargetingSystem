@@ -1,10 +1,23 @@
 # 分状态视域规划
 
-实现位于 `controller/recovery_planner.py`。所有搜索 ViewSpec 的水平和垂直 FOV 都等于 `geometry.maxFovDeg=120`，局部输出尺寸仍为 256×256。
+实现位于 `controller/recovery_planner.py`。LOST 和 UNCERTAIN 的 cubemap 仍使用
+`geometry.maxFovDeg=120`，局部输出尺寸仍为 256×256。TRACKING 从初始化后的第二帧开始
+使用上一帧运动预测的目标角尺寸动态规划四角视图。
 
 ## VStype1 四角
 
-给定中心 c，Planner 在 c 的局部相机坐标系向左上、右上、左下、右下各偏移 40°。中心通过 forward/right/up 基向量计算，靠近极点时仍保持局部四角语义。
+`ViewSpecType1(center, width, height)` 返回四个 `ViewSpec`，顺序固定为左上、右上、左下、右下。
+其中 `width`/`height` 是上一帧预测框的水平/垂直角尺寸；每个 ViewSpec 的 FOV 分别为
+`3*width` 和 `3*height`（面积是预测框的 9 倍），随后分别限制在 30° 到
+`geometry.maxFovDeg=120` 之间。下限避免目标很小时视域收缩过度，上限避免超大目标跨过
+透视相机背面。中心在局部相机坐标系中按各自最终 FOV 的三分之一偏移，
+因此相邻视图的重合比例与原来 120° FOV、±40° 偏移相同。中心通过
+forward/right/up 基向量计算，靠近极点时仍保持局部四角语义。
+
+TRACKING 的第一轮和第二轮都调用该动态 VStype1。首个 tracking 帧使用 frame 0 初始化时
+提交的标准追踪框角尺寸；后续帧使用上一帧预测角尺寸。即使运动估计器暂时没有输出尺度，
+也使用上一帧已提交 BFoV，不回退到固定四角布局。UNCERTAIN 的四角第二轮和所有 LOST
+路径保持旧布局。
 
 ## VStype2 旋转 Cubemap
 

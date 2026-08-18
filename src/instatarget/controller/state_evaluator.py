@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from instatarget.controller.fusor import FUSION_OVERLAP_RATE, Fusor
+from instatarget.controller.fusor import FUSION_OVERLAP_RATE, FusionBoxMode, Fusor
 from instatarget.controller.state_model import (
     EvaluatedCandidate,
     EvaluationReason,
@@ -58,6 +58,11 @@ class StateEvaluator:
             geometry,
             overlapRate=FUSION_OVERLAP_RATE,
             sourceMinConfidence=self._config.fusionSourceMinConfidence,
+            boxMode=(
+                FusionBoxMode.MIN_UNION
+                if state.mode is TrackMode.TRACKING
+                else FusionBoxMode.MAX_INTERSECTION
+            ),
         ).fuse(
             candidatePool,
             frameWidthPx=frameWidthPx,

@@ -84,11 +84,12 @@ class TrackerBackendImpl(TrackerBackendProtocol):
         self._templates.apply(self._hitBackend, command, self._previousViews)
         self._commitDepthCommand(command, pendingDepthFeature)
         snapshot = self._templates.snapshot()
+        anchorFeatures = (snapshot.anchor.features,)
         inferenceStartedNs = perf_counter_ns()
         predictions = self._hitBackend.inferBatch(
-            tuple(view.rgb for view in views), snapshot.features
+            tuple(view.rgb for view in views), anchorFeatures
         )
-        depthScores = self._inferDepthScores(views, tuple(self._depthTemplates))
+        depthScores = self._inferDepthScores(views, tuple(self._depthTemplates[:1]))
         sharedInferenceNs = (
             (perf_counter_ns() - inferenceStartedNs) // len(views) if views else 0
         )

@@ -13,6 +13,6 @@ Controller 负责“看哪里、相信哪个候选、是否继续查询、下一
 | `recovery_planner.py` | 四角视图与 cubemap 规划 |
 | `motion_estimator.py` | 球面多帧运动预测 |
 | `fused_score.py` | 外观/运动校准与 70/30 SingleScore 合成 |
-| `template_policy.py` | 在线模板更新决策 |
+| `template_policy.py` | 固定第 0 帧 anchor 的 KEEP 策略 |
 
 深入阅读：[stateMachine.md](stateMachine.md)、[motionPredictor.md](motionPredictor.md)、[viewPlanning.md](viewPlanning.md)、[stateEvaluator.md](stateEvaluator.md)、[scoreCalibration.md](scoreCalibration.md)、[templateAndTransaction.md](templateAndTransaction.md)、[parameters.md](parameters.md)。

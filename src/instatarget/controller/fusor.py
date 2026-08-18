@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from math import pi
+from enum import StrEnum
+from math import pi, sqrt
 
 import numpy as np
 
@@ -14,6 +15,16 @@ from instatarget.core.types import BBoxXYWH, BFoV, DepthSummary, ProjectedObserv
 from instatarget.geometry.projection_math import erpPixelToSphericalPoint
 
 FUSION_OVERLAP_RATE = 0.70
+FUSION_AGREEMENT_BONUS_WEIGHT = 0.15
+FUSION_MAX_SCORE_GAIN = 0.03
+FUSION_SCORE_CAP = 0.99
+
+
+class FusionBoxMode(StrEnum):
+    """Geometry used for a two-source fused candidate's output box."""
+
+    MAX_INTERSECTION = "max_intersection"
+    MIN_UNION = "min_union"
 
 
 class Fusor:
@@ -25,6 +36,7 @@ class Fusor:
         *,
         overlapRate: float = FUSION_OVERLAP_RATE,
         sourceMinConfidence: float = 0.80,
+        boxMode: FusionBoxMode | str = FusionBoxMode.MAX_INTERSECTION,
     ) -> None:
         if not 0.0 <= overlapRate <= 1.0:
             raise ValueError("fusion overlapRate must be in [0, 1]")
@@ -33,6 +45,12 @@ class Fusor:
         self._geometry = geometry
         self._overlapRate = float(overlapRate)
         self._sourceMinConfidence = float(sourceMinConfidence)
+        try:
+            self._boxMode = FusionBoxMode(boxMode)
+        except ValueError as error:
+            raise ValueError(
+                "fusion boxMode must be 'max_intersection' or 'min_union'"
+            ) from error
 
     def fuse(
         self,
@@ -51,6 +69,10 @@ class Fusor:
         candidates = [_singleCandidate(item) for item in observations]
         for firstIndex, first in enumerate(observations):
             for second in observations[firstIndex + 1 :]:
+                firstScore = _singleScore(first)
+                secondScore = _singleScore(second)
+                if min(firstScore, secondScore) < self._sourceMinConfidence:
+                    continue
                 overlap = _overlapRate(first.bbox, second.bbox, frameWidthPx)
                 if overlap < self._overlapRate:
                     continue
@@ -58,6 +80,7 @@ class Fusor:
                     first,
                     second,
                     overlap,
+                    _agreementIou(first.bbox, second.bbox, frameWidthPx),
                     frameWidthPx,
                     frameHeightPx,
                 )
@@ -70,16 +93,30 @@ class Fusor:
         first: ProjectedObservation,
         second: ProjectedObservation,
         overlap: float,
+        agreementIou: float,
         frameWidthPx: int,
         frameHeightPx: int,
     ) -> EvaluatedCandidate | None:
-        bbox = _intersectionBox(first.bbox, second.bbox, frameWidthPx, frameHeightPx)
+        if self._boxMode is FusionBoxMode.MIN_UNION:
+            bbox = _unionBox(first.bbox, second.bbox, frameWidthPx, frameHeightPx)
+        else:
+            bbox = _intersectionBox(first.bbox, second.bbox, frameWidthPx, frameHeightPx)
         if bbox is None:
             return None
         firstScore = _singleScore(first)
         secondScore = _singleScore(second)
-        confidence = float(
-            np.clip(1.0 - ((2.0 - firstScore - secondScore) * (1.0 - overlap) / 2.0), 0.0, 1.0)
+        base = sqrt(firstScore * secondScore)
+        consistency = 1.0 - abs(firstScore - secondScore)
+        bonus = (
+            FUSION_AGREEMENT_BONUS_WEIGHT
+            * agreementIou
+            * consistency
+            * (1.0 - base)
+        )
+        confidence = min(
+            base + bonus,
+            max(firstScore, secondScore) + FUSION_MAX_SCORE_GAIN,
+            FUSION_SCORE_CAP,
         )
         representative = max(
             (first, second),
@@ -93,7 +130,7 @@ class Fusor:
             fused=True,
             overlapRate=overlap,
             minSourceConfidence=min(firstScore, secondScore),
-            sourceConfidencePassed=min(firstScore, secondScore) >= self._sourceMinConfidence,
+            sourceConfidencePassed=True,
             representativeViewId=representative.viewId,
             representativeLocalBox=representative.localBox,
             depthSummary=_mergeDepth(first, second),
@@ -108,11 +145,13 @@ def fuse(
     frameHeightPx: int,
     overlapRate: float = FUSION_OVERLAP_RATE,
     sourceMinConfidence: float = 0.80,
+    boxMode: FusionBoxMode | str = FusionBoxMode.MAX_INTERSECTION,
 ) -> EvaluatedCandidate | None:
     return Fusor(
         geometry,
         overlapRate=overlapRate,
         sourceMinConfidence=sourceMinConfidence,
+        boxMode=boxMode,
     ).fuse(observations, frameWidthPx=frameWidthPx, frameHeightPx=frameHeightPx)
 
 
@@ -158,6 +197,26 @@ def _xSegments(box: BBoxXYWH, frameWidthPx: int) -> tuple[tuple[float, float], .
 
 
 def _overlapRate(first: BBoxXYWH, second: BBoxXYWH, frameWidthPx: int) -> float:
+    intersectionArea = _intersectionArea(first, second, frameWidthPx)
+    smallerArea = min(_boxArea(first, frameWidthPx), _boxArea(second, frameWidthPx))
+    if smallerArea <= 0.0:
+        return 0.0
+    return float(np.clip(intersectionArea / smallerArea, 0.0, 1.0))
+
+
+def _agreementIou(first: BBoxXYWH, second: BBoxXYWH, frameWidthPx: int) -> float:
+    intersectionArea = _intersectionArea(first, second, frameWidthPx)
+    unionArea = (
+        _boxArea(first, frameWidthPx)
+        + _boxArea(second, frameWidthPx)
+        - intersectionArea
+    )
+    if unionArea <= 0.0:
+        return 0.0
+    return float(np.clip(intersectionArea / unionArea, 0.0, 1.0))
+
+
+def _intersectionArea(first: BBoxXYWH, second: BBoxXYWH, frameWidthPx: int) -> float:
     yStart = max(first.yPx, second.yPx)
     yEnd = min(first.yPx + first.heightPx, second.yPx + second.heightPx)
     if yEnd <= yStart:
@@ -167,10 +226,11 @@ def _overlapRate(first: BBoxXYWH, second: BBoxXYWH, frameWidthPx: int) -> float:
         for firstStart, firstEnd in _xSegments(first, frameWidthPx)
         for secondStart, secondEnd in _xSegments(second, frameWidthPx)
     )
-    smallerArea = min(first.widthPx * first.heightPx, second.widthPx * second.heightPx)
-    if smallerArea <= 0.0:
-        return 0.0
-    return float(np.clip(horizontal * (yEnd - yStart) / smallerArea, 0.0, 1.0))
+    return horizontal * (yEnd - yStart)
+
+
+def _boxArea(box: BBoxXYWH, frameWidthPx: int) -> float:
+    return min(float(frameWidthPx), box.widthPx) * box.heightPx
 
 
 def _intersectionBox(
@@ -207,6 +267,41 @@ def _intersectionBox(
     if yEnd <= yStart or width <= 0.0:
         return None
     return BBoxXYWH(xPx=xPx, yPx=yStart, widthPx=width, heightPx=yEnd - yStart)
+
+
+def _unionBox(
+    first: BBoxXYWH,
+    second: BBoxXYWH,
+    frameWidthPx: int,
+    frameHeightPx: int,
+) -> BBoxXYWH | None:
+    """Return the smallest circular ERP box containing both source boxes."""
+    firstStart = first.xPx % frameWidthPx
+    firstWidth = min(float(frameWidthPx), first.widthPx)
+    secondStart = second.xPx % frameWidthPx
+    secondWidth = min(float(frameWidthPx), second.widthPx)
+    best: tuple[float, float] | None = None
+    for shift in (-float(frameWidthPx), 0.0, float(frameWidthPx)):
+        start = min(firstStart, secondStart + shift)
+        end = max(firstStart + firstWidth, secondStart + shift + secondWidth)
+        width = end - start
+        if best is None or width < best[1]:
+            best = (start, width)
+    if best is None or best[1] <= 0.0:
+        return None
+    yStart = max(0.0, min(first.yPx, second.yPx))
+    yEnd = min(
+        float(frameHeightPx),
+        max(first.yPx + first.heightPx, second.yPx + second.heightPx),
+    )
+    if yEnd <= yStart:
+        return None
+    return BBoxXYWH(
+        xPx=best[0] % frameWidthPx,
+        yPx=yStart,
+        widthPx=min(float(frameWidthPx), best[1]),
+        heightPx=yEnd - yStart,
+    )
 
 
 def _intersectionBfov(
@@ -264,4 +359,12 @@ def _mergeDepth(first: ProjectedObservation, second: ProjectedObservation) -> De
     )
 
 
-__all__ = ["FUSION_OVERLAP_RATE", "Fusor", "fuse"]
+__all__ = [
+    "FUSION_AGREEMENT_BONUS_WEIGHT",
+    "FUSION_MAX_SCORE_GAIN",
+    "FUSION_OVERLAP_RATE",
+    "FUSION_SCORE_CAP",
+    "FusionBoxMode",
+    "Fusor",
+    "fuse",
+]

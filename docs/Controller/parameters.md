@@ -9,22 +9,22 @@
 | `evaluator.successRate` | 0.90 | 仅复制到 `StateObservation` 诊断字段 |
 | `evaluator.firstRoundFusionOverlap` | 0.30 | schema/配置兼容；当前生产评估不读取 |
 | `evaluator.overlapThreshold` | 0.70 | schema/配置兼容；生产 Fusor 使用代码常量 0.70 |
-| `evaluator.fusionSourceMinConfidence` | 0.80 | 融合候选被接受时两个来源各自的最低 SingleScore |
+| `evaluator.fusionSourceMinConfidence` | 0.80 | 生成融合候选时两个来源各自的最低 SingleScore |
 | `evaluator.supportWeight` | 0.25 | schema/接口兼容；当前生产评估不读取 |
 | `evaluator.agreementWeight` | 0.25 | schema/接口兼容；当前生产评估不读取 |
 | `evaluator.minReacquireViews` | 2 | schema/旧重捕获兼容；当前生产评估不读取 |
 
-当前只有 `fusionSourceMinConfidence` 直接影响测量接受。Fusor 对每一轮都使用固定的 0.70 overlap 常量枚举全部候选对；来源最低分不会阻止候选生成或排序，只会阻止低来源分的融合候选被接受为测量。
+当前只有 `fusionSourceMinConfidence` 直接影响融合候选生成。Fusor 对每一轮都使用固定的 0.70 overlap 常量枚举全部候选对；任一来源低于最低分时，该观测对不生成融合候选，但各自仍保留为单框候选。
 
 ## 状态、事务和模板
 
 | 参数 | 当前值 | 作用 |
 |---|---:|---|
-| `tracking.stableFramesBeforeUpdate` | 8 | 在线模板更新前的稳定帧数 |
+| `tracking.stableFramesBeforeUpdate` | 8 | 协议兼容；当前固定第 0 帧模板，不读取此值 |
 | `tracking.sameFrameEscalationEnabled` | true | 允许 TRACKING/UNCERTAIN 在第一轮后进入第二轮 |
 | `tracking.maxAttemptsPerFrame` | 2 | 固定同帧最多两轮；LOST 使用一次 12 视图恢复计划 |
 | `tracking.maxViewsPerFrameTotal` | 12 | 单帧事务总视图预算 |
-| `tracking.reacquireCooldownFrames` | 2 | 重捕获后模板更新冷却 |
+| `tracking.reacquireCooldownFrames` | 2 | 保留重捕获稳定计数冷却；当前不触发模板更新 |
 | `tracking.maxPredictionHorizon` | 3 | Controller 请求的最大运动外推帧数 |
 
 ## 运动预测
@@ -44,6 +44,8 @@
 ## 分数常量
 
 当前 SingleScore 权重 0.70/0.30、运动尺度权重 0.35、深度权重 0.15、最大 d2=25、中心测量标准差 0.025 rad 和 log 尺度测量标准差 0.08 位于 `controller/fused_score.py`。它们尚未进入严格 YAML schema；替换前必须完成独立校准并联动重标 `tracking.candidateMinScore` 与来源最低分。
+
+Fusor 的置信度常量位于 `controller/fusor.py`：`FUSION_AGREEMENT_BONUS_WEIGHT=0.15` 控制 IoU 一致性奖励，`FUSION_MAX_SCORE_GAIN=0.03` 限制融合分数相对最高来源的增益，`FUSION_SCORE_CAP=0.99` 是融合分数硬上限。这三个常量当前不进入 YAML 配置。
 
 ## 回退包络和兼容参数
 

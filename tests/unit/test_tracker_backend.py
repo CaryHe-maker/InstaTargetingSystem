@@ -138,11 +138,12 @@ class TrackerBackendTest(unittest.TestCase):
         backend.infer([_view(1, 20)], _command(TemplateCommandKind.KEEP, 1, 1))
 
         backend.infer(
-            [],
+            [_view(2, 30)],
             _command(TemplateCommandKind.UPDATE_RECENT, 2, 2, viewId=1),
         )
         self.assertEqual(backend.templateRevision, 2)
         self.assertEqual(session.encoded[-1][0], 20)
+        self.assertEqual(session.inferred[-1][1], ("template-0",))
 
         with self.assertRaises(ProtocolError):
             backend.infer([], _command(TemplateCommandKind.KEEP, 3, 2))

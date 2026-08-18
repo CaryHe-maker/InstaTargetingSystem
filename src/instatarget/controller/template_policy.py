@@ -17,10 +17,10 @@ class TemplateDecision:
 
 
 class TemplatePolicy:
-    """Protect anchor and dynamic slots from uncertain or recovery observations."""
+    """Keep the frame-zero anchor as the only runtime template."""
 
     def __init__(self, trackingConfig: TrackingConfig) -> None:
-        self._config = trackingConfig
+        del trackingConfig
 
     def decide(
         self,
@@ -28,24 +28,7 @@ class TemplatePolicy:
         stableFrames: int,
         aggregate: FrameAggregate | None,
     ) -> TemplateDecision:
-        if status is not TrackStatus.TRACKING or aggregate is None or not aggregate.supported:
-            return TemplateDecision(TemplateCommandKind.KEEP)
-        if aggregate.localBox is None:
-            return TemplateDecision(TemplateCommandKind.KEEP)
-        stableThreshold = self._config.stableFramesBeforeUpdate
-        recentThreshold = max(2, stableThreshold // 2)
-        if stableFrames >= stableThreshold and stableFrames % stableThreshold == 0:
-            return TemplateDecision(
-                TemplateCommandKind.UPDATE_STABLE,
-                aggregate.representativeViewId,
-                aggregate.localBox,
-            )
-        if stableFrames == recentThreshold:
-            return TemplateDecision(
-                TemplateCommandKind.UPDATE_RECENT,
-                aggregate.representativeViewId,
-                aggregate.localBox,
-            )
+        del status, stableFrames, aggregate
         return TemplateDecision(TemplateCommandKind.KEEP)
 
 

@@ -2,20 +2,41 @@ import math
 import unittest
 from pathlib import Path
 
-from instatarget.controller import Classifier, Fusor, RecoveryPlanner
+from instatarget.controller import (
+    Classifier,
+    FrameAggregate,
+    FusionBoxMode,
+    Fusor,
+    RecoveryPlanner,
+    TemplatePolicy,
+    ViewSpecType1,
+)
 from instatarget.controller.state_model import ScoreGroup
 from instatarget.core.config import loadConfig
-from instatarget.core.types import BBoxXYWH, BFoV, ProjectedObservation, TrackStatus
+from instatarget.core.types import (
+    BBoxXYWH,
+    BFoV,
+    ProjectedObservation,
+    TemplateCommandKind,
+    TrackStatus,
+)
 from instatarget.geometry import SphericalGeometryImpl, makeSphericalPoint
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _observation(viewId: int, yaw: float, score: float, x: float = 30.0) -> ProjectedObservation:
+def _observation(
+    viewId: int,
+    yaw: float,
+    score: float,
+    x: float = 30.0,
+    width: float = 100.0,
+    height: float = 60.0,
+) -> ProjectedObservation:
     return ProjectedObservation(
         viewId=viewId,
         bfov=BFoV(makeSphericalPoint(yaw, 0.0), 0.5, 0.4),
-        bbox=BBoxXYWH(x, 60.0, 100.0, 60.0),
+        bbox=BBoxXYWH(x, 60.0, width, height),
         modelScore=score,
         appearanceScore=score,
         motionScore=score,
@@ -35,12 +56,46 @@ class ControllerPlanTest(unittest.TestCase):
             boundarySamplesPerEdge=self.config.geometry.boundarySamplesPerEdge
         )
 
+    def testViewSpecType1ClampsSmallPredictedViewsToThirtyDegrees(self) -> None:
+        views = ViewSpecType1(
+            makeSphericalPoint(0.0, 0.0),
+            math.radians(5.0),
+            math.radians(8.0),
+        )
+
+        self.assertEqual(len(views), 4)
+        self.assertTrue(
+            all(
+                math.isclose(item.bfov.horizontalFovRad, math.radians(30.0))
+                and math.isclose(item.bfov.verticalFovRad, math.radians(30.0))
+                for item in views
+            )
+        )
+        self.assertTrue(
+            all(math.isclose(abs(item.bfov.center.yawRad), math.radians(10.0)) for item in views)
+        )
+
+    def testViewSpecType1UsesThreeTimesPredictedExtentOnEachAxis(self) -> None:
+        views = ViewSpecType1(
+            makeSphericalPoint(0.0, 0.0),
+            math.radians(20.0),
+            math.radians(15.0),
+        )
+
+        self.assertTrue(
+            all(
+                math.isclose(item.bfov.horizontalFovRad, math.radians(60.0))
+                and math.isclose(item.bfov.verticalFovRad, math.radians(45.0))
+                for item in views
+            )
+        )
+
     def testFusorReturnsTheBestFusedCandidate(self) -> None:
         result = Fusor(self.geometry).fuse(
             (
                 _observation(0, 0.0, 0.90, 30.0),
                 _observation(1, 0.01, 0.90, 40.0),
-                _observation(2, 2.0, 0.99, 220.0),
+                _observation(2, 2.0, 0.79, 220.0),
             ),
             frameWidthPx=360,
             frameHeightPx=180,
@@ -50,6 +105,108 @@ class ControllerPlanTest(unittest.TestCase):
         self.assertTrue(result.fused)
         self.assertEqual(result.sourceViewIds, (0, 1))
         self.assertGreater(result.confidence, 0.80)
+
+    def testFusorCanChooseMinimumUnionBox(self) -> None:
+        result = Fusor(self.geometry, boxMode=FusionBoxMode.MIN_UNION).fuse(
+            (
+                _observation(0, 0.0, 0.90, 30.0),
+                _observation(1, 0.01, 0.90, 40.0),
+            ),
+            frameWidthPx=360,
+            frameHeightPx=180,
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result.fused)
+        self.assertAlmostEqual(result.bbox.xPx, 30.0)
+        self.assertAlmostEqual(result.bbox.widthPx, 110.0)
+
+    def testFusorFullAgreementDoesNotSaturateConfidence(self) -> None:
+        result = Fusor(self.geometry).fuse(
+            (
+                _observation(0, 0.0, 0.80),
+                _observation(1, 0.0, 0.80),
+            ),
+            frameWidthPx=360,
+            frameHeightPx=180,
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result.fused)
+        self.assertAlmostEqual(result.confidence, 0.83)
+        self.assertLess(result.confidence, 1.0)
+
+    def testFusorScoresContainedBoxesWithIou(self) -> None:
+        result = Fusor(self.geometry).fuse(
+            (
+                _observation(0, 0.0, 0.80, width=100.0),
+                _observation(1, 0.0, 0.80, width=80.0),
+            ),
+            frameWidthPx=360,
+            frameHeightPx=180,
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result.fused)
+        self.assertAlmostEqual(result.overlapRate or 0.0, 1.0)
+        self.assertAlmostEqual(result.confidence, 0.824)
+
+    def testFusorDoesNotFuseBelowSourceConfidenceThreshold(self) -> None:
+        result = Fusor(self.geometry).fuse(
+            (
+                _observation(0, 0.0, 0.90),
+                _observation(1, 0.0, 0.79),
+            ),
+            frameWidthPx=360,
+            frameHeightPx=180,
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertFalse(result.fused)
+        self.assertEqual(result.sourceViewIds, (0,))
+        self.assertAlmostEqual(result.confidence, 0.90)
+
+    def testFusorCapsFusionGainAtThreeHundredths(self) -> None:
+        result = Fusor(self.geometry, sourceMinConfidence=0.0).fuse(
+            (
+                _observation(0, 0.0, 0.50),
+                _observation(1, 0.0, 0.50),
+            ),
+            frameWidthPx=360,
+            frameHeightPx=180,
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result.fused)
+        self.assertAlmostEqual(result.confidence, 0.53)
+
+    def testTemplatePolicyAlwaysKeepsFrameZeroAnchor(self) -> None:
+        box = BBoxXYWH(10.0, 10.0, 20.0, 20.0)
+        aggregate = FrameAggregate(
+            bfov=BFoV(makeSphericalPoint(0.0, 0.0), 0.3, 0.3),
+            bbox=box,
+            confidence=0.99,
+            decisionScore=0.99,
+            sourceViewIds=(0, 1),
+            representativeViewId=0,
+            localBox=box,
+            depthSummary=None,
+            supported=True,
+        )
+
+        decision = TemplatePolicy(self.config.tracking).decide(
+            TrackStatus.TRACKING,
+            self.config.tracking.stableFramesBeforeUpdate * 2,
+            aggregate,
+        )
+
+        self.assertEqual(decision.kind, TemplateCommandKind.KEEP)
+        self.assertIsNone(decision.viewId)
+        self.assertIsNone(decision.localBox)
 
     def testFusorUsesCircularIntersectionAtTheSeam(self) -> None:
         result = Fusor(self.geometry).fuse(
@@ -96,7 +253,7 @@ class ControllerPlanTest(unittest.TestCase):
         self.assertEqual(thresholds, (0.6, 0.3))
         self.assertEqual(len(group.values), 10)
 
-    def testPlannerBuildsSecondRoundFourCornersAndTwelveViewLostRoute(self) -> None:
+    def testPlannerBuildsDynamicTrackingCornersAndTwelveViewLostRoute(self) -> None:
         planner = RecoveryPlanner(
             self.config.geometry,
             self.config.tracking,
@@ -104,6 +261,17 @@ class ControllerPlanTest(unittest.TestCase):
         )
         box = BBoxXYWH(150.0, 70.0, 40.0, 50.0)
         fallback = self.geometry.bboxToBfov(box, 360, 180)
+        primary = planner.buildViews(
+            1,
+            360,
+            180,
+            box,
+            box,
+            fallback,
+            None,
+            TrackStatus.TRACKING,
+            attemptIndex=0,
+        )
         refined = planner.buildViews(
             1,
             360,
@@ -116,7 +284,22 @@ class ControllerPlanTest(unittest.TestCase):
             attemptIndex=1,
             searchSeedCenter=makeSphericalPoint(0.0, 0.0),
         )
-        self.assertEqual(len(refined), 4)
+        self.assertEqual((len(primary), len(refined)), (4, 4))
+        expectedHorizontalFov = min(
+            3.0 * fallback.horizontalFovRad,
+            self.config.geometry.maxFovRad,
+        )
+        expectedVerticalFov = min(
+            3.0 * fallback.verticalFovRad,
+            self.config.geometry.maxFovRad,
+        )
+        self.assertTrue(
+            all(
+                math.isclose(item.spec.bfov.horizontalFovRad, expectedHorizontalFov)
+                and math.isclose(item.spec.bfov.verticalFovRad, expectedVerticalFov)
+                for item in (*primary, *refined)
+            )
+        )
         self.assertEqual(tuple(item.spec.viewId for item in refined), (0, 1, 2, 3))
         self.assertEqual(
             tuple(item.role for item in refined),

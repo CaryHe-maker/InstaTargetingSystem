@@ -2,15 +2,15 @@
 
 ## 模板命令
 
-Controller 不直接编码模板，而是产生 `TemplateCommand`：KEEP 保持当前模板，UPDATE 使用某个已确认视图的局部框添加在线模板。命令带 `expectedRevision`，Tracker 只接受严格递增 revision。
+Controller 不直接编码模板，而是产生 `TemplateCommand`。当前生产策略始终发送 KEEP，HiT 的模板内容固定为第 0 帧初始化得到的 anchor。命令仍带 `expectedRevision`，Tracker 只接受严格递增 revision；revision 推进不代表模板内容发生变化。
 
 ## 更新条件
 
-`template_policy.py::TemplatePolicy` 只在 TRACKING 中考虑更新。状态必须连续稳定达到 `stableFramesBeforeUpdate`，当前聚合必须存在代表视图和局部框，并通过支持性判断。重捕获后的 `reacquireCooldownFrames` 内稳定计数被视为 0，避免把刚找回但仍不确定的外观写入模板。
+`template_policy.py::TemplatePolicy` 无论状态、稳定帧数或候选支持性如何都返回 KEEP。`UPDATE_RECENT`、`UPDATE_STABLE` 和相关配置字段仅为协议兼容保留，不进入当前生产路径。
 
 ## 模板缓存
 
-实际特征存储在 `tracker/template.py::TemplateCache`。初始模板永远存在；在线模板仅在会话声明支持时加入。Controller 只持有下一帧命令，不持有模型特征。
+实际特征存储在 `tracker/template.py::TemplateCache`。TrackerBackend 每次推理只把 anchor 特征传给 RGB HiT；RGB-D 模式的深度 HiT 同样只接收第 0 帧深度 anchor。即使外部兼容调用写入动态槽，动态特征也不会进入模型推理。
 
 ## 帧事务
 
@@ -18,11 +18,11 @@ Controller 不直接编码模板，而是产生 `TemplateCommand`：KEEP 保持�
 
 ## 为什么模板命令只在 Round 1 应用
 
-同一帧的多个 round 必须使用相同的模板特征内容，否则不同视图的分数不可比较。Controller 因此只在 attemptIndex=0 发送待处理模板命令，后续 round 强制 KEEP；模板更新来源是上一帧已提交测量，不是当前尚未完成的候选。
+同一帧和跨帧推理都使用相同的第 0 帧 anchor，因此不同视图的模板输入保持一致。每个 round 仍发送 KEEP 并推进 expectedRevision，以保留事务乱序和重复消费检查。
 
 revision 与特征内容不是同一概念。Tracker 每消费一个 attempt 都应用一次命令并将 backend/template revision 加一，所以 Round 1 与 Round 2 的 expectedRevision 不同且严格递增；Round 2 的 KEEP 不改变模板特征集合。
 
-## 优化风险
+## 固定模板的取舍
 
-提高模板更新频率可能改善外观变化，也可能在短暂误检时造成不可逆漂移。优化时应记录模板 revision、来源 viewId、更新时状态、后续若干帧置信度和是否进入 LOST，而不是只比较平均分数。
+固定 anchor 避免短暂误检污染身份模板，但不会自适应长期外观变化。评估时应分别观察长序列外观漂移和误跟踪恢复能力；若未来重新启用在线模板，需要同步恢复策略、backend 输入和对应回归测试。
 

@@ -16,7 +16,7 @@
 
 ## 与阈值联调
 
-先冻结两个校准映射，再在另一验证子集联合比较 80/20、70/30、60/40，并选择 `successRate` 和来源最低置信度。把同一数据同时用于拟合映射和调阈值会产生过拟合。
+先冻结两个校准映射，再在另一验证子集联合比较 80/20、70/30、60/40，并选择 `tracking.candidateMinScore` 和 `evaluator.fusionSourceMinConfidence`。`evaluator.successRate` 当前只写入诊断字段，不是可调生产门限。把同一数据同时用于拟合映射和调阈值会产生过拟合。
 
 ## 发布
 
