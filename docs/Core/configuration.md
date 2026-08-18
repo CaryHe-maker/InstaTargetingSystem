@@ -21,7 +21,7 @@
 - `geometry.maxFovDeg` 必须为 120，保证固定最大搜索视域。
 - schema 仍要求 `firstRoundFusionOverlap < overlapThreshold`，但两项当前只为配置兼容；生产 Fusor 使用固定 0.70 常量。
 - 状态阈值不再来自 YAML 标量；状态机根据最近 10 个 `StateScore` 动态计算 UT/LT。
-- `tracking.maxAttemptsPerFrame` 固定为 2，`tracking.maxViewsPerFrameTotal` 至少容纳 12 张视图（LOST 的两个旋转 cubemap）。
+- `tracking.maxAttemptsPerFrame` 固定为 2，`tracking.maxViewsPerFrameTotal` 至少容纳 10 张视图（LOST 的 6 张 cubemap 和 4 张 Type1）。
 - `fusionHead` 权重非负且至少一个为正。
 - DecisionGate 三项权重总和不超过 1；生产 StateEvaluator 当前忽略整组 DecisionGate。
 

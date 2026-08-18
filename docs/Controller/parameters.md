@@ -22,7 +22,7 @@
 |---|---:|---|
 | `tracking.stableFramesBeforeUpdate` | 8 | 协议兼容；当前固定第 0 帧模板，不读取此值 |
 | `tracking.sameFrameEscalationEnabled` | true | 允许 TRACKING/UNCERTAIN 在第一轮后进入第二轮 |
-| `tracking.maxAttemptsPerFrame` | 2 | 固定同帧最多两轮；LOST 使用一次 12 视图恢复计划 |
+| `tracking.maxAttemptsPerFrame` | 2 | 固定同帧最多两轮；LOST 使用一次 10 视图恢复计划 |
 | `tracking.maxViewsPerFrameTotal` | 12 | 单帧事务总视图预算 |
 | `tracking.reacquireCooldownFrames` | 2 | 保留重捕获稳定计数冷却；当前不触发模板更新 |
 | `tracking.maxPredictionHorizon` | 3 | Controller 请求的最大运动外推帧数 |
@@ -59,7 +59,7 @@ Fusor 的置信度常量位于 `controller/fusor.py`：`FUSION_AGREEMENT_BONUS_W
 | `tracking.minViewsForCommit` | 2 | 旧聚合最少视图数 |
 | `tracking.uncertainFovScale` | 1.25 | 当前固定 120 度搜索不使用 |
 
-除 `candidateMinScore` 外，本节其余 tracking 字段为回退包络或旧聚合兼容项。RecoveryConfig 中的 `maxViewsPerFrame=12`、`globalSearchInterval=5`、`ringRadii=[1,1.75,2.5]`、`viewsPerRing=[4,8,12]`、`cubeMapOverlapRatio=0.10`、`maxCoveredCells=256` 保留恢复内存/旧环搜配置；当前实际 LOST 路径固定生成两个旋转 cubemap（12 张），不运行环搜。`decisionGate.*` 也只受 schema 校验，生产 StateEvaluator 会忽略整组配置。
+除 `candidateMinScore` 外，本节其余 tracking 字段为回退包络或旧聚合兼容项。RecoveryConfig 中的 `maxViewsPerFrame=12`、`globalSearchInterval=5`、`ringRadii=[1,1.75,2.5]`、`viewsPerRing=[4,8,12]`、`cubeMapOverlapRatio=0.10`、`maxCoveredCells=256` 保留恢复内存/旧环搜配置；当前实际 LOST 路径固定生成 6 张旋转 cubemap 加 4 张 Type1（10 张），不运行环搜。`decisionGate.*` 也只受 schema 校验，生产 StateEvaluator 会忽略整组配置。
 
 ## ScoreGroup 阈值
 

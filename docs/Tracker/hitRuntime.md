@@ -16,7 +16,7 @@
 
 网络输出的 bbox 和两个 corner heatmap 按 batch 维拆回每张图。bbox 转为对应 LocalView 的局部像素并裁剪到边界；每张图的 heatmap 有限性和集中度独立生成置信度。返回结果数量必须等于输入数量，并保持输入顺序。fp16 任一 bbox 或 heatmap 非有限时，PyTorch 会话以 fp32 重算整个 batch。
 
-当前自然 batch size 为 TRACKING 4+4、UNCERTAIN 6+4、LOST 12。两轮不能合并，因为第二轮 ViewSpec 依赖第一轮 Fusor 结果。自定义/测试 session 若没有 `inferBatch()` 仍可运行，但会退回逐图 forward，性能不能按生产 PyTorch 会话估算。
+当前自然 batch size 为 TRACKING 4+4、UNCERTAIN 4+4、LOST 10。两轮不能合并，因为第二轮 ViewSpec 依赖第一轮 Fusor 结果。自定义/测试 session 若没有 `inferBatch()` 仍可运行，但会退回逐图 forward，性能不能按生产 PyTorch 会话估算。
 
 ## 模型参数
 

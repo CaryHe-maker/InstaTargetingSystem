@@ -46,6 +46,7 @@ class StateEvaluator:
         priorObservations: Sequence[ProjectedObservation] = (),
         prediction: MotionPrediction,
         predictedBfov: BFoV,
+        referenceBoxAreaPx: float,
         geometry: SphericalGeometry,
         frameWidthPx: int,
         frameHeightPx: int,
@@ -58,15 +59,12 @@ class StateEvaluator:
             geometry,
             overlapRate=FUSION_OVERLAP_RATE,
             sourceMinConfidence=self._config.fusionSourceMinConfidence,
-            boxMode=(
-                FusionBoxMode.MIN_UNION
-                if state.mode is TrackMode.TRACKING
-                else FusionBoxMode.MAX_INTERSECTION
-            ),
+            boxMode=FusionBoxMode.REFERENCE_ADAPTIVE,
         ).fuse(
             candidatePool,
             frameWidthPx=frameWidthPx,
             frameHeightPx=frameHeightPx,
+            referenceBoxAreaPx=referenceBoxAreaPx,
         )
         isFinalAttempt = not (
             state.mode in {TrackMode.TRACKING, TrackMode.UNCERTAIN}

@@ -28,9 +28,8 @@ class StateUpdate:
 class TrackStateMachine:
     """State selection and a committed ten-score rolling history."""
 
-    def __init__(self, trackingConfig: TrackingConfig, *, enableLostState: bool = False) -> None:
+    def __init__(self, trackingConfig: TrackingConfig) -> None:
         self._config = trackingConfig
-        self._enableLostState = bool(enableLostState)
         self._status: TrackStatus | None = None
         self._scoreGroup = ScoreGroup()
         self._uncertainFrames = 0
@@ -99,10 +98,6 @@ class TrackStateMachine:
                 nextMode = TrackMode.UNCERTAIN
             else:
                 nextMode = TrackMode.LOST
-            if nextMode is TrackMode.LOST and not self._enableLostState:
-                # Temporary experiment: keep the recovery implementation available,
-                # but route every would-be LOST decision through TRACKING.
-                nextMode = TrackMode.TRACKING
             reason = (
                 TransitionReason.RELIABLE_MEASUREMENT
                 if nextMode is TrackMode.TRACKING

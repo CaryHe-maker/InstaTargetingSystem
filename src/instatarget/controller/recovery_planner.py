@@ -148,35 +148,36 @@ class RecoveryPlanner:
         if attemptIndex < 0 or attemptIndex >= self._tracking.maxAttemptsPerFrame:
             raise ProtocolError(f"unsupported attemptIndex: {attemptIndex}")
 
-        center = searchSeedCenter or (
+        predictedCenter = (
             _motionCenter(predictedMotion) if predictedMotion is not None else fallbackBfov.center
         )
+        center = searchSeedCenter or predictedCenter
         if status is TrackStatus.LOST:
             if attemptIndex != 0:
-                raise ProtocolError("LOST uses one combined 12-view recovery attempt")
-            firstDirections = _cubeDirections(center)
-            expansionCenter = firstDirections[1][1]
-            requiredViews = 12
+                raise ProtocolError("LOST uses one combined 10-view recovery attempt")
+            requiredViews = 10
             budget = viewBudget if viewBudget is not None else self._tracking.maxViewsPerFrameTotal
             if budget < requiredViews:
                 raise ProtocolError(
                     "view budget cannot fit LOST recovery: "
                     f"required={requiredViews}, available={budget}"
                 )
-            return (
-                self._cubeMap(center, viewIdStart, attemptIndex, rolePrefix="cubemap")
-                + self._cubeMap(
-                    expansionCenter,
-                    viewIdStart + 6,
-                    attemptIndex,
-                    rolePrefix="recovery_cubemap",
-                )
+            return self._cubeMap(
+                predictedCenter,
+                viewIdStart,
+                attemptIndex,
+                rolePrefix="cubemap",
+            ) + self._fourCorners(
+                predictedCenter,
+                viewIdStart + 6,
+                attemptIndex,
+                dynamicSize=_trackingSize(predictedMotion, fallbackBfov),
+                forceMaxFov=True,
             )
 
-        if attemptIndex == 1:
+        if attemptIndex in (0, 1):
+            # UNCERTAIN follows the same two-round Type1 route as TRACKING.
             requiredViews = 4
-        elif attemptIndex == 0:
-            requiredViews = 6 if status is TrackStatus.UNCERTAIN else 4
         else:
             raise ProtocolError(f"unsupported {status.name} attemptIndex: {attemptIndex}")
         budget = viewBudget if viewBudget is not None else self._tracking.maxViewsPerFrameTotal
@@ -184,25 +185,21 @@ class RecoveryPlanner:
             raise ProtocolError(
                 f"view budget cannot fit attempt: required={requiredViews}, available={budget}"
             )
-        trackingSize = (
-            _trackingSize(predictedMotion, fallbackBfov)
-            if status is TrackStatus.TRACKING
-            else None
-        )
+        trackingSize = _trackingSize(predictedMotion, fallbackBfov)
         if attemptIndex == 1:
             return self._fourCorners(
                 center,
                 viewIdStart,
                 attemptIndex,
                 dynamicSize=trackingSize,
+                forceMaxFov=status is TrackStatus.UNCERTAIN,
             )
-        if status is TrackStatus.UNCERTAIN:
-            return self._cubeMap(center, viewIdStart, attemptIndex, rolePrefix="cubemap")
         return self._fourCorners(
             center,
             viewIdStart,
             attemptIndex,
             dynamicSize=trackingSize,
+            forceMaxFov=status is TrackStatus.UNCERTAIN,
         )
 
     def contextBfov(
@@ -234,6 +231,7 @@ class RecoveryPlanner:
         attemptIndex: int,
         *,
         dynamicSize: tuple[float, float] | None = None,
+        forceMaxFov: bool = False,
     ) -> tuple[PlannedView, ...]:
         roles = (
             "left_top",
@@ -248,6 +246,7 @@ class RecoveryPlanner:
                 viewIdStart=viewIdStart,
                 outputWidthPx=self._geometry.viewWidthPx,
                 outputHeightPx=self._geometry.viewHeightPx,
+                minFovRad=self._geometry.maxFovRad if forceMaxFov else pi / 6.0,
                 maxFovRad=self._geometry.maxFovRad,
             )
         else:

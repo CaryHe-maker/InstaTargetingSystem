@@ -12,7 +12,7 @@ TimeCounter 是正式运行产物，记录整个 tracking_processing 区间的�
 
 ## 推荐分解
 
-优化时建议至少使用：frame_decode、view_crop、rgb_infer、depth_infer、appearance_calibration、boundary_projection、motion_scoring、state_evaluation。每项同时按状态和 attemptIndex 分组，并记录 batch size 和模型 forward 数。当前 TRACKING 为 4+4、UNCERTAIN 为 6+4、LOST 为单轮 12，不存在 Round 3。GPU 报告还应包含 images/s、利用率与峰值显存，否则一次大 batch 和多次小 batch 的成本无法比较。
+优化时建议至少使用：frame_decode、view_crop、rgb_infer、depth_infer、appearance_calibration、boundary_projection、motion_scoring、state_evaluation。每项同时按状态和 attemptIndex 分组，并记录 batch size 和模型 forward 数。当前 TRACKING 为 4+4、UNCERTAIN 为 4+4、LOST 为单轮 10，不存在 Round 3。GPU 报告还应包含 images/s、利用率与峰值显存，否则一次大 batch 和多次小 batch 的成本无法比较。
 
 ## GPU 同步
 

@@ -2,7 +2,7 @@
 
 ## 事务候选评估
 
-实现位于 `controller/state_evaluator.py`。TRACKING/UNCERTAIN 第一轮只把本轮 `ProjectedObservation` 交给 Fusor，最佳候选中心作为第二轮搜索中心；没有候选时回退到运动预测中心。第二轮结束时，第一轮和第二轮的全部观测合成同一事务候选池，再统一交给 Fusor。LOST 只有一轮，直接使用该轮 12 张视图。
+实现位于 `controller/state_evaluator.py`。TRACKING/UNCERTAIN 第一轮只把本轮 `ProjectedObservation` 交给 Fusor，最佳候选中心作为第二轮搜索中心；没有候选时回退到运动预测中心。第二轮结束时，第一轮和第二轮的全部观测合成同一事务候选池，再统一交给 Fusor。LOST 只有一轮，直接使用该轮 6 张 cubemap 和 4 张 Type1。
 
 Runtime 先完成局部框回投和 SingleScore，再把投影结果交给 StateEvaluator。StateEvaluator 调用 Fusor 得到当前提交点的唯一最佳候选，输出 StateObservation、StateScore、测量接受资格和诊断字段。
 
@@ -38,8 +38,8 @@ fusionScore = min(base + bonus, max(a, b) + 0.03, 0.99)
 
 `TRACKING`：第一轮在预测中心周围取 VStype1 四角 4 张；第一轮 Fusor 最佳中心周围再取 VStype1 四角 4 张。
 
-`UNCERTAIN`：第一轮以预测中心为 front 取旋转 cubemap 6 张；第一轮 Fusor 最佳中心周围再取 VStype1 四角 4 张。
+`UNCERTAIN`：第一轮以预测中心为中心取 VStype1 四角 4 张，且每张视图为 120°×120°；第一轮 Fusor 最佳中心周围再取同样的 VStype1 四角 4 张。最终 Fusor 使用最小交叉框。
 
-`LOST`：第一轮一次性读取两个确定方向的旋转 cubemap，共 12 张，统一交给 Fusor；不再追加第二轮。
+`LOST`：第一轮一次性读取 6 张旋转 cubemap 和预测中心周围的 Type1 四角 4 张，共 10 张，统一交给 Fusor；不再追加第二轮。
 
-TRACKING/UNCERTAIN 当前固定执行两轮，最终 StateScore 取两轮候选统一经过 Fusor 后的最佳分数；LOST 取单轮 12 张视图的 Fusor 最佳分数。没有候选时为 0，并输出预测框但不接受测量。`evaluator.successRate` 只写入诊断字段，不参与当前升级、排序或提交决策。
+TRACKING/UNCERTAIN 当前固定执行两轮，最终 StateScore 取两轮候选统一经过 Fusor 后的最佳分数；LOST 取单轮 10 张视图的 Fusor 最佳分数，并使用最大交叉框。没有候选时为 0，并输出预测框但不接受测量。`evaluator.successRate` 只写入诊断字段，不参与当前升级、排序或提交决策。

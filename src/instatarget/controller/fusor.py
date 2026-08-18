@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from enum import StrEnum
-from math import pi, sqrt
+from math import isfinite, pi, sqrt
 
 import numpy as np
 
@@ -25,6 +26,7 @@ class FusionBoxMode(StrEnum):
 
     MAX_INTERSECTION = "max_intersection"
     MIN_UNION = "min_union"
+    REFERENCE_ADAPTIVE = "reference_adaptive"
 
 
 class Fusor:
@@ -49,7 +51,8 @@ class Fusor:
             self._boxMode = FusionBoxMode(boxMode)
         except ValueError as error:
             raise ValueError(
-                "fusion boxMode must be 'max_intersection' or 'min_union'"
+                "fusion boxMode must be 'max_intersection', 'min_union', "
+                "or 'reference_adaptive'"
             ) from error
 
     def fuse(
@@ -58,6 +61,7 @@ class Fusor:
         *,
         frameWidthPx: int,
         frameHeightPx: int,
+        referenceBoxAreaPx: float | None = None,
     ) -> EvaluatedCandidate | None:
         if not observations:
             return None
@@ -65,6 +69,12 @@ class Fusor:
             raise ProtocolError("fusion frame dimensions must be positive")
         if len({item.viewId for item in observations}) != len(observations):
             raise ProtocolError("fusion observations must have unique viewIds")
+        if self._boxMode is FusionBoxMode.REFERENCE_ADAPTIVE and (
+            referenceBoxAreaPx is None
+            or not isfinite(referenceBoxAreaPx)
+            or referenceBoxAreaPx <= 0.0
+        ):
+            raise ProtocolError("reference-adaptive fusion requires a positive reference area")
 
         candidates = [_singleCandidate(item) for item in observations]
         for firstIndex, first in enumerate(observations):
@@ -86,7 +96,25 @@ class Fusor:
                 )
                 if candidate is not None:
                     candidates.append(candidate)
-        return max(candidates, key=_candidateRank)
+        best = max(candidates, key=_candidateRank)
+        if self._boxMode is not FusionBoxMode.REFERENCE_ADAPTIVE or not best.fused:
+            return best
+        observationsById = {item.viewId: item for item in observations}
+        first, second = (observationsById[viewId] for viewId in best.sourceViewIds)
+        bbox = _referenceAdaptiveBox(
+            first.bbox,
+            second.bbox,
+            float(referenceBoxAreaPx),
+            frameWidthPx,
+            frameHeightPx,
+        )
+        if bbox is None:
+            return best
+        return replace(
+            best,
+            bbox=bbox,
+            bfov=_intersectionBfov(bbox, self._geometry, frameWidthPx, frameHeightPx),
+        )
 
     def _fusedCandidate(
         self,
@@ -146,13 +174,19 @@ def fuse(
     overlapRate: float = FUSION_OVERLAP_RATE,
     sourceMinConfidence: float = 0.80,
     boxMode: FusionBoxMode | str = FusionBoxMode.MAX_INTERSECTION,
+    referenceBoxAreaPx: float | None = None,
 ) -> EvaluatedCandidate | None:
     return Fusor(
         geometry,
         overlapRate=overlapRate,
         sourceMinConfidence=sourceMinConfidence,
         boxMode=boxMode,
-    ).fuse(observations, frameWidthPx=frameWidthPx, frameHeightPx=frameHeightPx)
+    ).fuse(
+        observations,
+        frameWidthPx=frameWidthPx,
+        frameHeightPx=frameHeightPx,
+        referenceBoxAreaPx=referenceBoxAreaPx,
+    )
 
 
 def _singleScore(observation: ProjectedObservation) -> float:
@@ -301,6 +335,69 @@ def _unionBox(
         yPx=yStart,
         widthPx=min(float(frameWidthPx), best[1]),
         heightPx=yEnd - yStart,
+    )
+
+
+def _referenceAdaptiveBox(
+    first: BBoxXYWH,
+    second: BBoxXYWH,
+    referenceAreaPx: float,
+    frameWidthPx: int,
+    frameHeightPx: int,
+) -> BBoxXYWH | None:
+    intersection = _intersectionBox(first, second, frameWidthPx, frameHeightPx)
+    union = _unionBox(first, second, frameWidthPx, frameHeightPx)
+    if intersection is None or union is None:
+        return None
+    intersectionArea = _boxArea(intersection, frameWidthPx)
+    unionArea = _boxArea(union, frameWidthPx)
+    if referenceAreaPx <= intersectionArea:
+        return intersection
+    if referenceAreaPx < unionArea:
+        expandedIntersection = _resizeCenteredToArea(
+            intersection,
+            1.5 * referenceAreaPx,
+            frameWidthPx,
+            frameHeightPx,
+        )
+        return (
+            _intersectionBox(expandedIntersection, union, frameWidthPx, frameHeightPx)
+            or intersection
+        )
+    return _resizeCenteredToArea(
+        union,
+        referenceAreaPx,
+        frameWidthPx,
+        frameHeightPx,
+    )
+
+
+def _resizeCenteredToArea(
+    box: BBoxXYWH,
+    targetAreaPx: float,
+    frameWidthPx: int,
+    frameHeightPx: int,
+) -> BBoxXYWH:
+    frameWidth = float(frameWidthPx)
+    frameHeight = float(frameHeightPx)
+    targetArea = min(float(targetAreaPx), frameWidth * frameHeight)
+    sourceWidth = min(frameWidth, box.widthPx)
+    aspectRatio = sourceWidth / box.heightPx
+    width = sqrt(targetArea * aspectRatio)
+    height = sqrt(targetArea / aspectRatio)
+    if width > frameWidth:
+        width = frameWidth
+        height = targetArea / width
+    if height > frameHeight:
+        height = frameHeight
+        width = min(frameWidth, targetArea / height)
+    centerX = (box.xPx + sourceWidth / 2.0) % frameWidth
+    centerY = min(frameHeight, max(0.0, box.yPx + box.heightPx / 2.0))
+    return BBoxXYWH(
+        xPx=(centerX - width / 2.0) % frameWidth,
+        yPx=min(max(0.0, centerY - height / 2.0), frameHeight - height),
+        widthPx=width,
+        heightPx=height,
     )
 
 

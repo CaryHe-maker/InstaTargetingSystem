@@ -121,6 +121,47 @@ class ControllerPlanTest(unittest.TestCase):
         self.assertAlmostEqual(result.bbox.xPx, 30.0)
         self.assertAlmostEqual(result.bbox.widthPx, 110.0)
 
+    def testFusorReferenceAdaptiveBoxCoversAllSizeBranches(self) -> None:
+        observations = (
+            _observation(0, 0.0, 0.90, 20.0, width=100.0, height=80.0),
+            _observation(1, 0.01, 0.90, 40.0, width=100.0, height=80.0),
+        )
+        fusor = Fusor(self.geometry, boxMode=FusionBoxMode.REFERENCE_ADAPTIVE)
+
+        intersection = fusor.fuse(
+            observations,
+            frameWidthPx=360,
+            frameHeightPx=180,
+            referenceBoxAreaPx=4_800.0,
+        )
+        middle = fusor.fuse(
+            observations,
+            frameWidthPx=360,
+            frameHeightPx=180,
+            referenceBoxAreaPx=7_000.0,
+        )
+        expandedUnion = fusor.fuse(
+            observations,
+            frameWidthPx=360,
+            frameHeightPx=180,
+            referenceBoxAreaPx=12_000.0,
+        )
+
+        assert intersection is not None
+        assert middle is not None
+        assert expandedUnion is not None
+        self.assertTrue(intersection.fused)
+        self.assertAlmostEqual(intersection.bbox.xPx, 40.0)
+        self.assertAlmostEqual(intersection.bbox.widthPx, 80.0)
+        self.assertAlmostEqual(intersection.bbox.heightPx, 80.0)
+        self.assertGreater(middle.bbox.widthPx, intersection.bbox.widthPx)
+        self.assertLess(middle.bbox.widthPx, 120.0)
+        self.assertAlmostEqual(middle.bbox.heightPx, 80.0)
+        self.assertAlmostEqual(
+            expandedUnion.bbox.widthPx * expandedUnion.bbox.heightPx,
+            12_000.0,
+        )
+
     def testFusorFullAgreementDoesNotSaturateConfidence(self) -> None:
         result = Fusor(self.geometry).fuse(
             (
@@ -320,13 +361,15 @@ class ControllerPlanTest(unittest.TestCase):
             None,
             TrackStatus.LOST,
         )
-        self.assertEqual(len(lost), 12)
+        self.assertEqual(len(lost), 10)
         self.assertTrue(
             all(
                 item.spec.bfov.horizontalFovRad == self.config.geometry.maxFovRad
                 for item in lost
             )
         )
+        self.assertEqual(sum("cubemap" in item.role for item in lost), 6)
+        self.assertEqual(sum("left_top" in item.role for item in lost), 1)
 
 
 if __name__ == "__main__":

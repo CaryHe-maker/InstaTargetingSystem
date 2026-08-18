@@ -89,7 +89,6 @@ class DepthAwareTrackController(TrackController):
         evaluatorConfig: EvaluatorConfig | None = None,
         motionConfig: MotionConfig | None = None,
         motionEstimator: MotionEstimator | None = None,
-        enableLostState: bool = False,
     ) -> None:
         if config is not None:
             geometryConfig = config.geometry
@@ -120,10 +119,7 @@ class DepthAwareTrackController(TrackController):
         )
         self._evaluator = StateEvaluator(decisionGateConfig, trackingConfig, evaluatorConfig)
         self._planner = RecoveryPlanner(geometryConfig, trackingConfig, recoveryConfig)
-        self._stateMachine = TrackStateMachine(
-            trackingConfig,
-            enableLostState=enableLostState,
-        )
+        self._stateMachine = TrackStateMachine(trackingConfig)
         self._templatePolicy = TemplatePolicy(trackingConfig)
         self._recovery = RecoveryMemory()
 
@@ -365,6 +361,10 @@ class DepthAwareTrackController(TrackController):
             priorObservations=priorObservations,
             prediction=planned.prediction,
             predictedBfov=planned.predictedBfov,
+            referenceBoxAreaPx=(
+                min(float(planned.frame.rgb.shape[1]), self._currentBox.widthPx)
+                * self._currentBox.heightPx
+            ),
             geometry=self._geometry,
             frameWidthPx=planned.frame.rgb.shape[1],
             frameHeightPx=planned.frame.rgb.shape[0],
