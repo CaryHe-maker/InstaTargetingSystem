@@ -364,12 +364,7 @@ def _referenceAdaptiveBox(
             _intersectionBox(expandedIntersection, union, frameWidthPx, frameHeightPx)
             or intersection
         )
-    return _resizeCenteredToArea(
-        union,
-        referenceAreaPx,
-        frameWidthPx,
-        frameHeightPx,
-    )
+    return union
 
 
 def _resizeCenteredToArea(

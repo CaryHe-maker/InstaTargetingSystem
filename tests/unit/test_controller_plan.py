@@ -140,7 +140,7 @@ class ControllerPlanTest(unittest.TestCase):
             frameHeightPx=180,
             referenceBoxAreaPx=7_000.0,
         )
-        expandedUnion = fusor.fuse(
+        union = fusor.fuse(
             observations,
             frameWidthPx=360,
             frameHeightPx=180,
@@ -149,7 +149,7 @@ class ControllerPlanTest(unittest.TestCase):
 
         assert intersection is not None
         assert middle is not None
-        assert expandedUnion is not None
+        assert union is not None
         self.assertTrue(intersection.fused)
         self.assertAlmostEqual(intersection.bbox.xPx, 40.0)
         self.assertAlmostEqual(intersection.bbox.widthPx, 80.0)
@@ -157,10 +157,9 @@ class ControllerPlanTest(unittest.TestCase):
         self.assertGreater(middle.bbox.widthPx, intersection.bbox.widthPx)
         self.assertLess(middle.bbox.widthPx, 120.0)
         self.assertAlmostEqual(middle.bbox.heightPx, 80.0)
-        self.assertAlmostEqual(
-            expandedUnion.bbox.widthPx * expandedUnion.bbox.heightPx,
-            12_000.0,
-        )
+        self.assertAlmostEqual(union.bbox.xPx, 20.0)
+        self.assertAlmostEqual(union.bbox.widthPx, 120.0)
+        self.assertAlmostEqual(union.bbox.heightPx, 80.0)
 
     def testFusorFullAgreementDoesNotSaturateConfidence(self) -> None:
         result = Fusor(self.geometry).fuse(
