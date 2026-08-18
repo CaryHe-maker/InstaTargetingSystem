@@ -14,7 +14,7 @@ ViewSpec 在 BFoV 之外增加 viewId 和局部输出宽高，是一次实际裁
 
 ## LocalView
 
-LocalView 是 BFoV 对应的透视平面采样结果，包含 RGB、可选深度和原 ViewSpec。HiT 的 bbox 只在这个平面内有意义。
+LocalView 是 BFoV 对应的 RGB 透视平面采样结果，并保留原 ViewSpec。HiT 的 bbox 只在这个平面内有意义。
 
 ## ERP bbox 与局部 bbox
 

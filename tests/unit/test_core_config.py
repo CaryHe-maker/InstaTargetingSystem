@@ -26,8 +26,6 @@ class CoreConfigTest(unittest.TestCase):
         self.assertAlmostEqual(config.evaluator.fusionSourceMinConfidence, 0.80)
         self.assertEqual(config.motion.minSamplesForVelocity, 2)
         self.assertAlmostEqual(config.motion.processNoiseRadPerSec, 0.04)
-        self.assertFalse(config.depth.enabled)
-        self.assertEqual(config.backendFusion.depthScoreWeight, 0.0)
         self.assertEqual(config.model.precision, "fp32")
         self.assertEqual(config.model.weights, REPOSITORY_ROOT / "models" / "hit_small.pth")
         self.assertFalse(config.visualization.enabled)
@@ -37,7 +35,7 @@ class CoreConfigTest(unittest.TestCase):
         )
         self.assertEqual(
             config.visualization.stages,
-            frozenset({"local_rgb", "depth_rgb", "backend_box", "geometry_box"}),
+            frozenset({"local_rgb", "backend_box", "geometry_box"}),
         )
 
     def testLoadConfigRejectsUnknownFields(self) -> None:

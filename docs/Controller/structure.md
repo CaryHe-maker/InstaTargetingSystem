@@ -4,7 +4,7 @@ Controller 负责“看哪里、相信哪个候选、是否继续查询、下一
 
 | 文件 | 职责 |
 |---|---|
-| `depth_aware_track_controller.py` | 状态所有权、帧事务与原子提交 |
+| `track_controller.py` | 状态所有权、帧事务与原子提交 |
 | `state_model.py` | 状态、证据、候选、事务数据结构 |
 | `state_machine.py` | 跨帧纯状态转移 |
 | `state_evaluator.py` | 每轮候选池评估、Fusor 调用和测量接受资格 |

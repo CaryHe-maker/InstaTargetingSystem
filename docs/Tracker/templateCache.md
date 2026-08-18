@@ -6,13 +6,11 @@
 
 ## 初始化
 
-`initialize()` 检查 LocalView 和模板框，调用 HiTBackend.encodeTemplate，将结果作为永远保留的初始模板，并把 revision 建立到已知状态。RGB-D backend 对 RGB 和深度维护对应模板特征。
+`initialize()` 检查 LocalView 和模板框，调用 HiTBackend.encodeTemplate，将 RGB 特征作为永远保留的初始模板，并把 revision 建立到已知状态。
 
 ## 命令应用
 
-当前 Controller 每轮只发送 KEEP，因此 backend 只推进协议 revision，不重新编码模板。UPDATE 命令及动态槽仍保留给兼容调用，但即使动态槽被写入，RGB 和深度推理也只接收各自的第 0 帧 anchor。
-
-RGB-D 初始化时分别建立 RGB anchor 和深度 anchor，后续帧不更新两侧模板。
+当前 Controller 每轮只发送 KEEP，因此 backend 只推进协议 revision，不重新编码模板。UPDATE 命令及动态槽仍保留给兼容调用，但即使动态槽被写入，RGB 推理也只接收第 0 帧 anchor。
 
 ## 为什么固定初始模板
 

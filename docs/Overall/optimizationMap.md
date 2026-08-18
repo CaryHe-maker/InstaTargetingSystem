@@ -10,7 +10,7 @@
 
 ## 想降低延迟
 
-HiT 已按轮执行真实 tensor batch：正常线程的 TRACKING 与 UNCERTAIN 均为 4、4；显式 LOST 组件为 10。RGB-D 每轮还有一个 depth batch。批处理减少模型 forward 次数，但预处理、显存占用和部分模型算术仍随图片数增长。应先统计每种状态的轮数、batch size、forward 数、GPU 利用率与峰值显存，再评估精度、视图尺寸和更深层并行。可视化与 sink 已排除在 `time.json` 外，因此关闭可视化不会改变算法计时。
+HiT 已按轮执行真实 RGB tensor batch：正常线程的 TRACKING 与 UNCERTAIN 均为 4、4；显式 LOST 组件为 10。批处理减少模型 forward 次数，但预处理、显存占用和部分模型算术仍随图片数增长。应先统计每种状态的轮数、batch size、forward 数、GPU 利用率与峰值显存，再评估精度、视图尺寸和更深层并行。可视化与 sink 已排除在 `time.json` 外，因此关闭可视化不会改变算法计时。
 
 ## 想改善快速运动
 

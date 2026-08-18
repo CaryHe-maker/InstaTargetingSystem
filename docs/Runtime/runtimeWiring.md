@@ -4,7 +4,7 @@
 
 Runtime 根据 AppConfig 创建一个 `RuntimeBundle`。Geometry 总是存在；Controller 总是使用同一套状态机。模型 backend 根据 `model.backend` 选择会话类型；当前生产路径完整支持 PyTorch HiT，ONNX/TensorRT 是适配边界。
 
-RGB-only 只创建 RGB HiT 会话。RGB-D 额外创建 DepthPreprocessor 和独立深度 HiT 会话，再把两者交给 TrackerBackendImpl。Visualization 关闭时 recorder 为 `None`，因此不会创建输出目录。
+Runtime 只创建一个 RGB HiT 会话并交给 TrackerBackendImpl。Visualization 关闭时 recorder 为 `None`，因此不会创建输出目录。
 
 ## 依赖注入
 
@@ -12,7 +12,7 @@ RGB-only 只创建 RGB HiT 会话。RGB-D 额外创建 DepthPreprocessor 和独�
 
 ## CLI 路径
 
-`run` 命令根据 `-RGB_only/-RGBD` 选择默认 YAML，解析用户路径后转交 AirSim360 入口。`getInstanceID` 只读取第一帧分割，不建立模型或 Controller。
+`run` 命令默认使用 `configs/RGBonly.yaml`，也允许通过 `--config` 指定兼容 schema 的配置，解析用户路径后转交 AirSim360 入口。`getInstanceID` 只读取第一帧分割，不建立模型或 Controller。
 
 ## 优化注意
 

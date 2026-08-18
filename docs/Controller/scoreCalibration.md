@@ -16,7 +16,7 @@ calibrated = sigmoid(c + alpha*log(p) - beta*log(1-p))
 
 ## MotionScore 与 SingleScore
 
-Runtime 使用 `scoreViewCenterMotion()` 计算同帧局部视图运动先验：预测中心为 1.0，每增加 30 度大圆夹角连续下降 0.1。它以局部图中心而不是检测框中心计量，不经过 reliability 向 0.5 混合，也不做当前帧 min-max。`scoreMotionConsistency()` 的协方差归一化中心/尺度/深度残差保留用于离线诊断；当前 motion calibration 仍为 identity。
+Runtime 使用 `scoreViewCenterMotion()` 计算同帧局部视图运动先验：预测中心为 1.0，每增加 30 度大圆夹角连续下降 0.1。它以局部图中心而不是检测框中心计量，不经过 reliability 向 0.5 混合，也不做当前帧 min-max。`scoreMotionConsistency()` 的协方差归一化中心/尺度残差保留用于离线诊断；当前 motion calibration 仍为 identity。
 
 ```text
 singleScore = clip(0.70*appearanceProbability + 0.30*effectiveMotion, 0, 1)

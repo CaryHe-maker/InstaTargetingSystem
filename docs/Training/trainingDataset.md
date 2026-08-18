@@ -2,7 +2,7 @@
 
 ## 数据集接口
 
-`AirSim360TrainingDataset` 复用 `data.registry.openDataset()`，因此训练和运行读取完全相同的 RGB、深度与 mask。构造时必须显式给出 targetInstanceId，避免自动选择对象导致实验不可复现。
+`AirSim360TrainingDataset` 复用 `data.registry.openDataset()`，因此训练和运行读取完全相同的 RGB 与 mask。构造时必须显式给出 targetInstanceId，避免自动选择对象导致实验不可复现。
 
 ## 样本内容
 
@@ -18,5 +18,5 @@
 
 ## 必要校验
 
-训练前应统计目标可见率、bbox 尺寸/跨缝比例、深度有效率和序列分布，并按序列划分 train/validation，不能把同一序列相邻帧拆到两侧。
+训练前应统计目标可见率、bbox 尺寸/跨缝比例和序列分布，并按序列划分 train/validation，不能把同一序列相邻帧拆到两侧。
 

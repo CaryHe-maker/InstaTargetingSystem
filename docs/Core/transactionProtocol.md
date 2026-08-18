@@ -24,7 +24,7 @@
 
 ## 实现位置
 
-协议类型位于 `core/protocols.py` 和 `core/types.py`；事务数据位于 `controller/state_model.py::FrameTransaction`；严格校验和提交位于 `controller/depth_aware_track_controller.py`。
+协议类型位于 `core/protocols.py` 和 `core/types.py`；事务数据位于 `controller/state_model.py::FrameTransaction`；严格校验和提交位于 `controller/track_controller.py`。
 
 未来并行化 Runtime 时，必须以 transactionId 和 attemptIndex 作为响应关联键，不能只依赖 viewId。
 

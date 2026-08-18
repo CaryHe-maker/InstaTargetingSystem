@@ -111,7 +111,6 @@ class TrackerBackendTest(unittest.TestCase):
             observations[0].bbox,
             BBoxXYWH(xPx=0.0, yPx=1.0, widthPx=2.0, heightPx=2.0),
         )
-        self.assertEqual(observations[0].depthScore, 0.0)
         self.assertEqual(observations[0].fusedScore, observations[0].appearanceScore)
         self.assertEqual(session.inferred[0][1], ("template-0",))
 

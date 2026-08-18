@@ -27,15 +27,6 @@ class RuntimeHiTWiringTest(unittest.TestCase):
 
         self.assertEqual(factory.count, 1)
 
-    def testRgbDepthCreatesIndependentRgbAndDepthHiTSessions(self) -> None:
-        factory = _SessionFactory()
-        config = loadConfig(REPOSITORY_ROOT / "configs" / "RGBD.yaml")
-
-        runtime = buildRuntime(config, hitSessionFactory=factory)
-        closeBackend(runtime.backend)
-
-        self.assertEqual(factory.count, 2)
-
 
 class _SessionFactory:
     def __init__(self) -> None:

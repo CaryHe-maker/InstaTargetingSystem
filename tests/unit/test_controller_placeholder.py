@@ -6,8 +6,8 @@ import numpy as np
 
 from instatarget.controller import (
     DecisionGate,
-    DepthAwareTrackController,
     SphericalMotionEstimator,
+    TrackControllerImpl,
     TrackStateMachine,
 )
 from instatarget.controller.state_model import TransitionReason
@@ -16,7 +16,6 @@ from instatarget.core.errors import ProtocolError
 from instatarget.core.types import (
     BBoxXYWH,
     BFoV,
-    DepthSummary,
     FrameIndex,
     FramePacket,
     ProjectedObservation,
@@ -29,10 +28,6 @@ from instatarget.geometry import SphericalGeometryImpl, makeSphericalPoint
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _depth(confidence: float = 0.9, validRatio: float = 1.0) -> DepthSummary:
-    return DepthSummary(4.0, 4.1, validRatio, 3.5, 4.8, confidence)
-
-
 def _observation(viewId: int, bfov: BFoV, score: float = 0.95) -> ProjectedObservation:
     return ProjectedObservation(
         viewId=viewId,
@@ -42,9 +37,7 @@ def _observation(viewId: int, bfov: BFoV, score: float = 0.95) -> ProjectedObser
         appearanceScore=score,
         motionScore=score,
         scaleScore=score,
-        depthScore=score,
         fusedScore=score,
-        depthSummary=None,
         localBox=BBoxXYWH(96.0, 88.0, 64.0, 80.0),
     )
 
@@ -56,26 +49,25 @@ class ControllerTest(unittest.TestCase):
             boundarySamplesPerEdge=self.config.geometry.boundarySamplesPerEdge
         )
 
-    def testMotionEstimatorWrapsSphericalDirectionAndKeepsMissingDepth(self) -> None:
+    def testMotionEstimatorWrapsSphericalDirection(self) -> None:
         estimator = SphericalMotionEstimator()
-        estimator.initialize(makeSphericalPoint(math.pi - 0.05, 0.0), _depth(), 0)
+        estimator.initialize(makeSphericalPoint(math.pi - 0.05, 0.0), 0)
         updated = estimator.update(
             makeSphericalPoint(-math.pi + 0.05, 0.0),
-            None,
             1_000_000_000,
             0.9,
         )
         predicted = estimator.predict(2_000_000_000)
 
         self.assertGreater(predicted.confidence, 0.0)
-        self.assertAlmostEqual(updated.rangeDepth, 4.0)
+        self.assertGreater(updated.confidence, 0.0)
         self.assertTrue(-math.pi <= predicted.position[0] <= math.pi)
         with self.assertRaises(ProtocolError):
             estimator.predict(500_000_000)
 
     def testDecisionGateFiltersOutliersAndRequiresMultiViewSupport(self) -> None:
         gate = DecisionGate(
-            DecisionGateConfig(0.25, 0.15, 0.10),
+            DecisionGateConfig(0.25, 0.15),
             self.config.tracking,
         )
         center = makeSphericalPoint(0.0, 0.0)
@@ -128,14 +120,14 @@ class ControllerTest(unittest.TestCase):
             timestampNs=0,
             rgb=np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = TrackControllerImpl(self.geometry, self.config)
         initialBox = BBoxXYWH(150.0, 70.0, 60.0, 80.0)
         initPlan = controller.buildInitialization(frame0, initialBox)
 
         self.assertEqual(initPlan.stateRevision, 0)
         self.assertLess(initPlan.templateBox.widthPx, 256.0)
         self.assertGreaterEqual(initPlan.templateBox.xPx, 0.0)
-        controller.commitInitialization(initPlan, None)
+        controller.commitInitialization(initPlan)
 
         frame1 = FramePacket(
             sequenceId=SequenceId("s"),
@@ -175,9 +167,9 @@ class ControllerTest(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = TrackControllerImpl(self.geometry, self.config)
         initPlan = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 60.0, 80.0))
-        controller.commitInitialization(initPlan, None)
+        controller.commitInitialization(initPlan)
         frame1 = FramePacket(SequenceId("s"), FrameIndex(1), 1_000_000_000, frame0.rgb)
         plan = controller.plan(frame1)
         result = controller.update(plan, ())

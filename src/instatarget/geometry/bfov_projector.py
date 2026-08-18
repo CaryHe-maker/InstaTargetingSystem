@@ -1,4 +1,4 @@
-"""BFoV projection helpers for ERP crops and synchronized depth sampling."""
+"""BFoV projection helpers for RGB ERP crops."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from instatarget.core.errors import GeometryError
-from instatarget.core.types import DepthPlane, FramePacket, LocalView, ViewSpec
+from instatarget.core.types import FramePacket, LocalView, ViewSpec
 from instatarget.geometry.projection_math import (
     localPixelsToUnitVectors,
     unitVectorsToErpPixels,
@@ -26,7 +26,7 @@ class BfovProjector:
         _requireBoundarySamplesPerEdge(self.boundarySamplesPerEdge)
 
     def cropView(self, frame: FramePacket, spec: ViewSpec) -> LocalView:
-        """Crop one local RGB view and an optional synchronized depth view."""
+        """Crop one local RGB view."""
         _requireFrame(frame)
         _requireViewSpec(spec)
         localX, localY = _localPixelGrid(spec.outputWidthPx, spec.outputHeightPx)
@@ -44,8 +44,7 @@ class BfovProjector:
             pixelCenters=True,
         )
         rgb = _sampleRgb(frame.rgb, sampleX, sampleY)
-        depth = _sampleDepth(frame.depth, sampleX, sampleY) if frame.depth is not None else None
-        return LocalView(spec=spec, rgb=rgb, depth=depth)
+        return LocalView(spec=spec, rgb=rgb)
 
     def cropViews(
         self,
@@ -84,37 +83,6 @@ def _sampleRgb(
     bottom = bottomLeft * (1.0 - wx)[..., np.newaxis] + bottomRight * wx[..., np.newaxis]
     sampled = top * (1.0 - wy)[..., np.newaxis] + bottom * wy[..., np.newaxis]
     return np.clip(np.rint(sampled), 0.0, 255.0).astype(np.uint8)
-
-
-def _sampleDepth(
-    depth: DepthPlane,
-    sampleX: NDArray[np.float64],
-    sampleY: NDArray[np.float64],
-) -> DepthPlane:
-    weights = _prepareBilinearWeights(
-        sampleX,
-        sampleY,
-        depth.values.shape[1],
-        depth.values.shape[0],
-    )
-    x0, x1, y0, y1, wx, wy = weights
-    values = np.where(depth.validMask, depth.values, 0.0).astype(np.float64, copy=False)
-    topLeft = values[y0, x0]
-    topRight = values[y0, x1]
-    bottomLeft = values[y1, x0]
-    bottomRight = values[y1, x1]
-    top = topLeft * (1.0 - wx) + topRight * wx
-    bottom = bottomLeft * (1.0 - wx) + bottomRight * wx
-    sampledValues = top * (1.0 - wy) + bottom * wy
-    sampledMask = (
-        depth.validMask[y0, x0]
-        & depth.validMask[y0, x1]
-        & depth.validMask[y1, x0]
-        & depth.validMask[y1, x1]
-    )
-    sampledValues = sampledValues.astype(np.float32, copy=False)
-    sampledValues[~sampledMask] = 0.0
-    return DepthPlane(values=sampledValues, validMask=sampledMask, unit=depth.unit)
 
 
 def _prepareBilinearWeights(

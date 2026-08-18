@@ -14,7 +14,6 @@ from instatarget.core.protocols import SphericalGeometry
 from instatarget.core.types import (
     BBoxXYWH,
     BFoV,
-    DepthSummary,
     ProjectedObservation,
     SphericalPoint,
 )
@@ -28,7 +27,6 @@ if TYPE_CHECKING:
 class ScoredObservation:
     observation: ProjectedObservation
     decisionScore: float
-    depthConsistencyScore: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +40,6 @@ class FrameAggregate:
     sourceViewIds: tuple[int, ...]
     representativeViewId: int
     localBox: BBoxXYWH | None
-    depthSummary: DepthSummary | None
     supported: bool
     clusterCount: int = 1
     agreementScore: float = 1.0
@@ -56,27 +53,17 @@ class DecisionGate:
         self._trackingConfig = trackingConfig
 
     def score(self, observation: ProjectedObservation) -> ScoredObservation:
-        depthAvailable = observation.depthSummary is not None
-        depthScore = (
-            observation.depthScore * observation.depthSummary.confidence
-            if depthAvailable and observation.depthSummary is not None
-            else 0.0
-        )
         weights = [
             max(
                 0.0,
                 1.0
                 - self._gateConfig.motionScoreWeight
-                - self._gateConfig.scaleScoreWeight
-                - (self._gateConfig.depthConsistencyWeight if depthAvailable else 0.0),
+                - self._gateConfig.scaleScoreWeight,
             ),
             self._gateConfig.motionScoreWeight,
             self._gateConfig.scaleScoreWeight,
         ]
         values = [observation.fusedScore, observation.motionScore, observation.scaleScore]
-        if depthAvailable:
-            weights.append(self._gateConfig.depthConsistencyWeight)
-            values.append(depthScore)
         totalWeight = sum(weights)
         if totalWeight <= 0.0:
             raise ProtocolError("decision gate must have a positive effective weight")
@@ -84,7 +71,6 @@ class DecisionGate:
         return ScoredObservation(
             observation=observation,
             decisionScore=decisionScore,
-            depthConsistencyScore=float(np.clip(depthScore, 0.0, 1.0)),
         )
 
     def aggregate(
@@ -206,7 +192,6 @@ def _aggregateCluster(
     bbox = geometry.bfovToBbox(fusedBfov, frameWidthPx, frameHeightPx)
     confidence = float(np.clip(np.dot(weights, [item.decisionScore for item in cluster]), 0.0, 1.0))
     representative = max(cluster, key=lambda item: item.decisionScore).observation
-    depthSummary = _aggregateDepth(cluster, weights)
     viewIds = tuple(sorted({item.observation.viewId for item in cluster}))
     agreementScore = _clusterAgreement(cluster, weights, fusedBfov)
     return FrameAggregate(
@@ -217,7 +202,6 @@ def _aggregateCluster(
         sourceViewIds=viewIds,
         representativeViewId=representative.viewId,
         localBox=representative.localBox,
-        depthSummary=depthSummary,
         supported=len(viewIds) >= minViewsForCommit,
         clusterCount=clusterCount,
         agreementScore=agreementScore,
@@ -249,29 +233,6 @@ def _clusterAgreement(
         for item, weight in zip(cluster, weights, strict=True)
     )
     return float(np.clip(np.exp(-angularResidual / angleScale - scaleResidual), 0.0, 1.0))
-
-
-def _aggregateDepth(
-    cluster: list[ScoredObservation],
-    weights: np.ndarray,
-) -> DepthSummary | None:
-    valid = [
-        (item.observation.depthSummary, weight)
-        for item, weight in zip(cluster, weights, strict=True)
-        if item.observation.depthSummary is not None
-    ]
-    if not valid:
-        return None
-    total = sum(weight for _, weight in valid)
-    values = [
-        sum(summary.medianDepth * weight for summary, weight in valid) / total,
-        sum(summary.meanDepth * weight for summary, weight in valid) / total,
-        sum(summary.validRatio * weight for summary, weight in valid) / total,
-        sum(summary.minDepth * weight for summary, weight in valid) / total,
-        sum(summary.maxDepth * weight for summary, weight in valid) / total,
-        sum(summary.confidence * weight for summary, weight in valid) / total,
-    ]
-    return DepthSummary(*values)
 
 
 def _weightedMedian(values: np.ndarray, weights: np.ndarray) -> float:

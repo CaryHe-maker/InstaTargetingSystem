@@ -7,7 +7,6 @@ from instatarget.core.errors import GeometryError
 from instatarget.core.types import (
     BBoxXYWH,
     BFoV,
-    DepthPlane,
     FrameIndex,
     FramePacket,
     SequenceId,
@@ -57,25 +56,17 @@ class GeometryTest(unittest.TestCase):
         self.assertAlmostEqual(xPx, 4.0)
         self.assertAlmostEqual(yPx, 2.0)
 
-    def testCropViewsPreservesOrderAndSynchronizesDepth(self) -> None:
+    def testCropViewsPreservesOrderAndRgbPixels(self) -> None:
         rgb = np.zeros((5, 5, 3), dtype=np.uint8)
         rgb[..., 0] = np.arange(5, dtype=np.uint8)
         rgb[..., 1] = np.arange(5, dtype=np.uint8)[:, np.newaxis]
         rgb[..., 2] = 7
 
-        validMask = np.ones((5, 5), dtype=np.bool_)
-        validMask[2, 2] = False
-        depth = DepthPlane(
-            values=np.arange(25, dtype=np.float32).reshape(5, 5),
-            validMask=validMask,
-            unit="m",
-        )
         frame = FramePacket(
             sequenceId=SequenceId("sequence"),
             frameIndex=FrameIndex(0),
             timestampNs=0,
             rgb=rgb,
-            depth=depth,
         )
         center = erpPixelToSphericalPoint(2.5, 2.5, 5, 5)
         bfov = BFoV(center=center, horizontalFovRad=0.4, verticalFovRad=0.4)
@@ -86,16 +77,6 @@ class GeometryTest(unittest.TestCase):
 
         self.assertEqual([view.spec.viewId for view in views], [7, 2])
         self.assertTrue(np.array_equal(views[0].rgb[0, 0], rgb[2, 2]))
-        self.assertIsNotNone(views[0].depth)
-        self.assertFalse(bool(views[0].depth.validMask[0, 0]))
-        self.assertEqual(float(views[0].depth.values[0, 0]), 0.0)
-        no_depth_frame = FramePacket(
-            sequenceId=SequenceId("sequence"),
-            frameIndex=FrameIndex(1),
-            timestampNs=1,
-            rgb=rgb,
-        )
-        self.assertIsNone(SphericalGeometryImpl().cropViews(no_depth_frame, [spec1])[0].depth)
 
     def testSeamHelpersSplitAndContainCircularBoxes(self) -> None:
         bbox = BBoxXYWH(xPx=14.0, yPx=1.0, widthPx=4.0, heightPx=2.0)

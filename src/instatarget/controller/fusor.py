@@ -12,7 +12,7 @@ import numpy as np
 from instatarget.controller.state_model import EvaluatedCandidate
 from instatarget.core.errors import ProtocolError
 from instatarget.core.protocols import SphericalGeometry
-from instatarget.core.types import BBoxXYWH, BFoV, DepthSummary, ProjectedObservation
+from instatarget.core.types import BBoxXYWH, BFoV, ProjectedObservation
 from instatarget.geometry.projection_math import erpPixelToSphericalPoint
 
 FUSION_OVERLAP_RATE = 0.70
@@ -161,7 +161,6 @@ class Fusor:
             sourceConfidencePassed=True,
             representativeViewId=representative.viewId,
             representativeLocalBox=representative.localBox,
-            depthSummary=_mergeDepth(first, second),
         )
 
 
@@ -213,7 +212,6 @@ def _singleCandidate(observation: ProjectedObservation) -> EvaluatedCandidate:
         sourceConfidencePassed=True,
         representativeViewId=observation.viewId,
         representativeLocalBox=observation.localBox,
-        depthSummary=observation.depthSummary,
     )
 
 
@@ -418,36 +416,6 @@ def _intersectionBfov(
             pi * min(bbox.heightPx, frameHeightPx) / frameHeightPx,
             float(np.nextafter(pi, 0.0)),
         ),
-    )
-
-
-def _mergeDepth(first: ProjectedObservation, second: ProjectedObservation) -> DepthSummary | None:
-    if first.depthSummary is None:
-        return second.depthSummary
-    if second.depthSummary is None:
-        return first.depthSummary
-    firstWeight = max(_singleScore(first), 1e-6)
-    secondWeight = max(_singleScore(second), 1e-6)
-    total = firstWeight + secondWeight
-    return DepthSummary(
-        medianDepth=(
-            first.depthSummary.medianDepth * firstWeight
-            + second.depthSummary.medianDepth * secondWeight
-        ) / total,
-        meanDepth=(
-            first.depthSummary.meanDepth * firstWeight
-            + second.depthSummary.meanDepth * secondWeight
-        ) / total,
-        validRatio=(
-            first.depthSummary.validRatio * firstWeight
-            + second.depthSummary.validRatio * secondWeight
-        ) / total,
-        minDepth=min(first.depthSummary.minDepth, second.depthSummary.minDepth),
-        maxDepth=max(first.depthSummary.maxDepth, second.depthSummary.maxDepth),
-        confidence=(
-            first.depthSummary.confidence * firstWeight
-            + second.depthSummary.confidence * secondWeight
-        ) / total,
     )
 
 

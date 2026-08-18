@@ -12,7 +12,6 @@ from instatarget.core.config import VisualizationConfig, loadConfig
 from instatarget.core.errors import (
     ConfigError,
     DecodeError,
-    DepthError,
     GeometryError,
     InstaTargetError,
     ModelError,
@@ -70,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
                 visualization=VisualizationConfig(
                     enabled=True,
                     outputRoot=Path(args.mid_visual_root),
-                    stages=frozenset(("local_rgb", "depth_rgb", "backend_box", "geometry_box")),
+                    stages=frozenset(("local_rgb", "backend_box", "geometry_box")),
                 ),
             )
         runtime = buildRuntime(config)
@@ -94,7 +93,6 @@ def main(argv: list[str] | None = None) -> int:
             controller=runtime.controller,
             backend=runtime.backend,
             sink=runtime.sink,
-            depthProcessor=runtime.depthProcessor,
             recorder=runtime.recorder,
             resultRecorder=resultRecorder,
             processingTimer=timeCounter,
@@ -108,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     except DecodeError as error:
         _report(error)
         return EXIT_DECODE
-    except (ModelError, DepthError) as error:
+    except ModelError as error:
         _report(error)
         return EXIT_MODEL
     except OutputError as error:

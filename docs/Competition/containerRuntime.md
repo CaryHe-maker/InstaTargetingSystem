@@ -2,7 +2,19 @@
 
 ## 镜像内容
 
-Dockerfile 打包项目源代码、`configs/RGBonly.yaml`、内置 HiT vendor、模型权重和无参数 `track.py`。运行环境需要兼容 CUDA 的 PyTorch、torchvision、timm、OpenCV 和 PyYAML。
+根目录唯一的 Dockerfile 打包比赛所需源码、`configs/RGBonly.yaml`、内置 HiT vendor、推理权重和无参数 `track.py`。开发工具、测试、文档、数据、可视化、缓存和原始训练 checkpoint 不进入构建上下文。
+
+基础镜像已经提供匹配 CUDA 的 PyTorch 和 torchvision，容器依赖清单不会重复安装它们。构建先清理 Conda/Pip 缓存、头文件、静态库和测试资源，再把有效文件系统复制进 `scratch` 最终阶段，使删除内容不会残留在基础镜像层中。
+
+## 紧凑权重
+
+原始 `models/hit_small.pth` 包含 optimizer、stats 和训练设置，约 130.8 MiB（137 MB）。构建前运行：
+
+```powershell
+.\.venv\Scripts\python.exe docker\compact_checkpoint.py
+```
+
+脚本逐张量验证后生成约 46.1 MiB 的 `models/hit_small_inference.pth`，只保留完全相同的 `net` 状态。Docker 将它复制为容器内的 `/app/models/hit_small.pth`；原训练 checkpoint 不会进入构建上下文。
 
 ## 默认挂载
 
@@ -15,9 +27,12 @@ Dockerfile 打包项目源代码、`configs/RGBonly.yaml`、内置 HiT vendor、
 ## 构建与运行
 
 ```powershell
+.\.venv\Scripts\python.exe docker\compact_checkpoint.py
 docker build -t instatarget:submission .
 docker run --rm --gpus all -v "${PWD}\dataset:/mnt/dataset" -v "${PWD}\result:/mnt/result" instatarget:submission
 ```
+
+构建完成后用 `docker image inspect instatarget:submission --format='{{.Size}}'` 检查总字节数，并用 `docker history instatarget:submission` 检查层大小。提交时不应包含原始 checkpoint、构建缓存或本地数据。
 
 ## 可重复性
 

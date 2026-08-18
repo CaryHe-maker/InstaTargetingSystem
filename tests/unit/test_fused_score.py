@@ -67,8 +67,6 @@ class FusedScoreRemappingTest(unittest.TestCase):
         prediction = MotionState3D(
             position=(0.0, 0.0, 1.0),
             velocity=(0.0, 0.0, 0.0),
-            rangeDepth=0.0,
-            rangeVelocity=0.0,
             confidence=0.9,
             horizontalSizeRad=0.4,
             verticalSizeRad=0.3,
@@ -79,10 +77,10 @@ class FusedScoreRemappingTest(unittest.TestCase):
             scaleCovarianceLog2=((0.01, 0.0), (0.0, 0.01)),
         )
         aligned = scoreMotionConsistency(
-            BFoV(makeSphericalPoint(0.0, 0.0), 0.4, 0.3), None, prediction
+            BFoV(makeSphericalPoint(0.0, 0.0), 0.4, 0.3), prediction
         )
         displaced = scoreMotionConsistency(
-            BFoV(makeSphericalPoint(0.35, 0.0), 0.4, 0.3), None, prediction
+            BFoV(makeSphericalPoint(0.35, 0.0), 0.4, 0.3), prediction
         )
 
         self.assertGreater(aligned.rawScore, displaced.rawScore)
@@ -90,12 +88,9 @@ class FusedScoreRemappingTest(unittest.TestCase):
 
         unreliable = scoreMotionConsistency(
             BFoV(makeSphericalPoint(0.35, 0.0), 0.4, 0.3),
-            None,
             MotionState3D(
                 position=prediction.position,
                 velocity=prediction.velocity,
-                rangeDepth=0.0,
-                rangeVelocity=0.0,
                 confidence=0.9,
             ),
         )
@@ -108,8 +103,6 @@ class FusedScoreRemappingTest(unittest.TestCase):
         prediction = MotionState3D(
             position=(0.0, 0.0, 1.0),
             velocity=(0.0, 0.0, 0.0),
-            rangeDepth=0.0,
-            rangeVelocity=0.0,
             confidence=1.0,
             reliability=0.25,
         )
@@ -134,8 +127,6 @@ class FusedScoreRemappingTest(unittest.TestCase):
         prediction = MotionState3D(
             position=(0.0, 0.0, 1.0),
             velocity=(0.0, 0.0, 0.0),
-            rangeDepth=0.0,
-            rangeVelocity=0.0,
             confidence=1.0,
         )
 
@@ -149,8 +140,6 @@ class FusedScoreRemappingTest(unittest.TestCase):
         predicted = MotionState3D(
             position=(0.0, 0.0, 1.0),
             velocity=(0.0, 0.0, 0.0),
-            rangeDepth=0.0,
-            rangeVelocity=0.0,
             confidence=1.0,
         )
         viewCenter = makeSphericalPoint(pi / 3.0, 0.0)
@@ -193,9 +182,7 @@ def _observation(score: float) -> LocalObservation:
         bbox=BBoxXYWH(10.0, 20.0, 30.0, 40.0),
         modelScore=0.88,
         appearanceScore=0.87,
-        depthScore=0.70,
         fusedScore=score,
-        depthSummary=None,
         latencyNs=1,
     )
 

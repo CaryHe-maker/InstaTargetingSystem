@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from instatarget.controller import (
-    DepthAwareTrackController,
+    TrackControllerImpl,
     calibrateBackendFusedScore,
     calibrateLocalAppearanceProbabilities,
     composeSingleScore,
@@ -31,17 +31,9 @@ from instatarget.core.types import (
 )
 from instatarget.geometry import SphericalGeometryImpl
 from instatarget.io.result_sink import FileResultSink
-from instatarget.tracker import (
-    DepthEncoder,
-    DepthPreprocessor,
-    FusionHead,
-    HiTBackend,
-    PyTorchHiTSession,
-    TrackerBackendImpl,
-)
+from instatarget.tracker import HiTBackend, PyTorchHiTSession, TrackerBackendImpl
 
 if TYPE_CHECKING:
-    from instatarget.core.protocols import DepthProcessor
     from instatarget.tracker.hit_backend import HiTSession
     from instatarget.visualization.recorder import VisualizationRecorder
     from instatarget.visualization.result import ResultVisualizationRecorder
@@ -51,10 +43,9 @@ if TYPE_CHECKING:
 @dataclass(frozen=True, slots=True)
 class RuntimeBundle:
     geometry: SphericalGeometry
-    controller: DepthAwareTrackController
+    controller: TrackControllerImpl
     backend: TrackerBackend
     sink: ResultSinkProtocol
-    depthProcessor: DepthProcessor | None = None
     recorder: VisualizationRecorder | None = None
 
 
@@ -67,34 +58,16 @@ def buildRuntime(
     geometry = SphericalGeometryImpl(
         boundarySamplesPerEdge=config.geometry.boundarySamplesPerEdge,
     )
-    depthProcessor: DepthPreprocessor | None = (
-        DepthPreprocessor(config.depth) if config.depth.enabled else None
-    )
     rgbSession = sessionFactory(config.model)
-    try:
-        depthEncoder = (
-            DepthEncoder(session=sessionFactory(config.model)) if config.depth.enabled else None
-        )
-    except Exception:
-        rgbSession.close()
-        raise
-    backend = TrackerBackendImpl(
-        HiTBackend(rgbSession),
-        depthProcessor=depthProcessor,
-        depthEncoder=depthEncoder,
-        fusionHead=FusionHead(
-            config.fusionHead, depthScoreWeight=config.backendFusion.depthScoreWeight
-        ),
-        depthEnabled=config.depth.enabled,
-    )
-    controller = DepthAwareTrackController(geometry, config)
+    backend = TrackerBackendImpl(HiTBackend(rgbSession))
+    controller = TrackControllerImpl(geometry, config)
     sink = FileResultSink()
     recorder = None
     if config.visualization.enabled:
         from instatarget.visualization.recorder import VisualizationRecorder
 
         recorder = VisualizationRecorder(config.visualization)
-    return RuntimeBundle(geometry, controller, backend, sink, depthProcessor, recorder)
+    return RuntimeBundle(geometry, controller, backend, sink, recorder)
 
 
 def runTracking(
@@ -102,10 +75,9 @@ def runTracking(
     source: FrameSourceProtocol,
     initialBox: BBoxXYWH,
     geometry: SphericalGeometry,
-    controller: DepthAwareTrackController,
+    controller: TrackControllerImpl,
     backend: TrackerBackend,
     sink: ResultSinkProtocol,
-    depthProcessor: DepthProcessor | None = None,
     recorder: VisualizationRecorder | None = None,
     resultRecorder: ResultVisualizationRecorder | None = None,
     processingTimer: TimeCounter | None = None,
@@ -118,10 +90,7 @@ def runTracking(
             initPlan = controller.buildInitialization(frame0, initialBox)
             templateView = geometry.cropViews(frame0, [initPlan.templateView])[0]
             backend.initialize(templateView, initPlan.templateBox)
-            initDepth = (
-                depthProcessor.summarize(frame0, initialBox) if depthProcessor is not None else None
-            )
-            initialResult = controller.commitInitialization(initPlan, initDepth)
+            initialResult = controller.commitInitialization(initPlan)
         finally:
             _stopProcessing(processingTimer)
         sink.write(initialResult)
@@ -130,10 +99,6 @@ def runTracking(
         resultCount = 1
         if recorder is not None:
             recorder.recordLocalRgb(frame0, [templateView])
-            if depthProcessor is not None and frame0.depth is not None:
-                recorder.recordDepthRgb(
-                    frame0, {0: depthProcessor.preprocess(frame0.depth).depthRgb}
-                )
 
         while True:
             _startProcessing(processingTimer)
@@ -174,9 +139,6 @@ def runTracking(
             if frame is None:
                 break
             if recorder is not None:
-                if depthProcessor is not None and frame.depth is not None:
-                    depthRgb = depthProcessor.preprocess(frame.depth).depthRgb
-                    recorder.recordDepthRgb(frame, {0: depthRgb})
                 for views, observations, projected in visualizationBatches:
                     recorder.recordLocalRgb(frame, views)
                     recorder.recordBackendBoxes(frame, views, observations)
@@ -256,9 +218,7 @@ def _projectObservation(
         appearanceScore=observation.appearanceScore,
         motionScore=motion.effectiveProbability,
         scaleScore=scaleScore,
-        depthScore=observation.depthScore,
         fusedScore=singleScore,
-        depthSummary=observation.depthSummary,
         localBox=observation.bbox,
         backendFusedScore=observation.fusedScore,
         appearanceProbability=appearanceProbability,

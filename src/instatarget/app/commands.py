@@ -13,18 +13,15 @@ from instatarget.app.track_airsim360 import main as trackAirSim360Main
 from instatarget.core.errors import InstaTargetError
 from instatarget.data.airsim360_source import AirSim360DataSource
 
-
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 
 def runMain(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run",
-        description="Run one AirSim360 sequence with RGB-only or RGBD HiT.",
+        description="Run one AirSim360 sequence with the RGB-only HiT pipeline.",
     )
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("-RGB_only", dest="mode", action="store_const", const="RGB_only")
-    mode.add_argument("-RGBD", dest="mode", action="store_const", const="RGBD")
+    parser.add_argument("-RGB_only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("data")
     parser.add_argument("output")
     parser.add_argument("instance_id", type=int)
@@ -40,7 +37,7 @@ def runMain(argv: list[str] | None = None) -> int:
     config = (
         _resolveUserPath(args.config)
         if args.config
-        else REPOSITORY_ROOT / "configs" / ("RGBonly.yaml" if args.mode == "RGB_only" else "RGBD.yaml")
+        else REPOSITORY_ROOT / "configs" / "RGBonly.yaml"
     )
     resultRoot = outputRoot / "result"
     resultRoot.mkdir(parents=True, exist_ok=True)

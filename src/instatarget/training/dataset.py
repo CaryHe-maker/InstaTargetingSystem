@@ -28,7 +28,7 @@ class TrainingSample:
 
 
 class AirSim360TrainingDataset:
-    """Iterate aligned RGB/depth/mask frames and derive pseudo boxes.
+    """Iterate aligned RGB/mask frames and derive pseudo boxes.
 
     The object deliberately yields NumPy-backed :class:`TrainingSample`s so a
     PyTorch/ONNX input adapter can be added later without coupling the data

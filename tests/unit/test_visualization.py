@@ -93,20 +93,16 @@ class VisualizationRecorderTest(unittest.TestCase):
             self.assertEqual(artifacts, ())
             self.assertFalse(outputRoot.exists())
 
-    def testWritesLocalAndExistingDepthRgbWithoutChangingPixels(self) -> None:
+    def testWritesLocalRgbWithoutChangingPixels(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             recorder = _recorder(Path(directory))
             frame = _frame()
             view = _view()
-            depthRgb = np.arange(6 * 8 * 3, dtype=np.uint8).reshape(6, 8, 3)
-
             localPaths = recorder.recordLocalRgb(frame, [view])
-            depthPaths = recorder.recordDepthRgb(frame, {view.spec.viewId: depthRgb})
 
             np.testing.assert_array_equal(_readRgbPng(localPaths[0]), view.rgb)
-            np.testing.assert_array_equal(_readRgbPng(depthPaths[0]), depthRgb)
-            self.assertIn("frame_000007", depthPaths[0].as_posix())
-            self.assertIn("depth_rgb", depthPaths[0].as_posix())
+            self.assertIn("frame_000007", localPaths[0].as_posix())
+            self.assertIn("local_rgb", localPaths[0].as_posix())
 
     def testWritesBackendBoxOverLocalRgbInFluorescentGreen(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -225,7 +221,7 @@ def _recorder(
     enabled: bool = True,
     stages: set[str] | None = None,
 ) -> VisualizationRecorder:
-    selectedStages = stages or {"local_rgb", "depth_rgb", "backend_box", "geometry_box"}
+    selectedStages = stages or {"local_rgb", "backend_box", "geometry_box"}
     return VisualizationRecorder(
         VisualizationConfig(
             enabled=enabled,
@@ -280,9 +276,7 @@ def _localObservation(bbox: BBoxXYWH) -> LocalObservation:
         bbox=bbox,
         modelScore=0.9,
         appearanceScore=0.8,
-        depthScore=0.7,
         fusedScore=0.85,
-        depthSummary=None,
         latencyNs=1,
     )
 
@@ -296,9 +290,7 @@ def _projectedObservation(bbox: BBoxXYWH) -> ProjectedObservation:
         appearanceScore=0.8,
         motionScore=0.7,
         scaleScore=0.6,
-        depthScore=0.5,
         fusedScore=0.85,
-        depthSummary=None,
     )
 
 

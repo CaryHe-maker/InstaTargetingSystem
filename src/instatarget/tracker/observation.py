@@ -18,16 +18,12 @@ def buildRgbObservation(
     if latencyNs < 0:
         raise ModelError(f"latencyNs must be non-negative, actual={latencyNs}")
     bbox = clipLocalBox(prediction.bbox, view.spec.outputWidthPx, view.spec.outputHeightPx)
-    # RGB-only has no depth evidence.  Keeping this explicit makes the
-    # degradation path distinguishable from a measured zero depth score.
     return LocalObservation(
         viewId=view.spec.viewId,
         bbox=bbox,
         modelScore=prediction.modelScore,
         appearanceScore=prediction.appearanceScore,
-        depthScore=0.0,
         fusedScore=prediction.appearanceScore,
-        depthSummary=None,
         latencyNs=latencyNs,
     )
 

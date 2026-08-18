@@ -1,4 +1,4 @@
-"""V2 transactional DTC facade for multi-view spherical tracking."""
+"""Transactional controller for multi-view spherical RGB tracking."""
 
 from __future__ import annotations
 
@@ -39,12 +39,13 @@ from instatarget.core.protocols import (
     FrameCommitted,
     MoreViewsRequired,
     SphericalGeometry,
-    TrackController,
+)
+from instatarget.core.protocols import (
+    TrackController as TrackControllerProtocol,
 )
 from instatarget.core.types import (
     BBoxXYWH,
     BFoV,
-    DepthSummary,
     FrameIndex,
     FramePacket,
     InitializationPlan,
@@ -74,7 +75,7 @@ class _PlannedAttempt:
     viewsById: dict[int, PlannedView]
 
 
-class DepthAwareTrackController(TrackController):
+class TrackControllerImpl(TrackControllerProtocol):
     """Single-writer controller with bounded same-frame escalation and atomic commit."""
 
     def __init__(
@@ -141,7 +142,6 @@ class DepthAwareTrackController(TrackController):
         self._initialBox: BBoxXYWH | None = None
         self._currentBox: BBoxXYWH | None = None
         self._currentBfov: BFoV | None = None
-        self._currentDepth: DepthSummary | None = None
         self._pendingTemplate = TemplateDecision(TemplateCommandKind.KEEP)
         self._planned: _PlannedAttempt | None = None
         self._transaction: FrameTransaction | None = None
@@ -201,7 +201,6 @@ class DepthAwareTrackController(TrackController):
     def commitInitialization(
         self,
         plan: InitializationPlan,
-        depthSummary: DepthSummary | None,
     ) -> TrackResult:
         if self._initialPlan != plan:
             raise ProtocolError("initialization response does not match the pending plan")
@@ -210,7 +209,6 @@ class DepthAwareTrackController(TrackController):
         if hasattr(self._motion, "resetFromMeasurement"):
             self._motion.resetFromMeasurement(  # type: ignore[attr-defined]
                 self._currentBfov.center,
-                depthSummary,
                 self._lastFrame.timestampNs,
                 0,
                 1.0,
@@ -220,7 +218,6 @@ class DepthAwareTrackController(TrackController):
         else:
             self._motion.initialize(
                 self._currentBfov.center,
-                depthSummary,
                 self._lastFrame.timestampNs,
             )
         self._stateMachine.initialize()
@@ -229,7 +226,6 @@ class DepthAwareTrackController(TrackController):
         self._stateRevision = 0
         self._lastFrameIndex = 0
         self._mode = TrackMode.TRACKING
-        self._currentDepth = depthSummary
         return TrackResult(
             sequenceId=self._lastFrame.sequenceId,
             frameIndex=FrameIndex(0),
@@ -238,7 +234,6 @@ class DepthAwareTrackController(TrackController):
             confidence=1.0,
             status=TrackStatus.TRACKING,
             valid=True,
-            depthSummary=depthSummary,
             resultSource=ResultSource.INITIAL,
         )
 
@@ -500,7 +495,6 @@ class DepthAwareTrackController(TrackController):
         accepted = decision.acceptMeasurement and hasCandidate
         outputBfov = evaluation.proposedOutputBfov
         outputBox = evaluation.proposedOutputBbox
-        outputDepth = evaluation.depthSummary if hasCandidate else self._currentDepth
         outputConfidence = (
             evaluation.stateScore
             if hasCandidate
@@ -515,7 +509,6 @@ class DepthAwareTrackController(TrackController):
             if decision.resetMotionHistory and hasattr(self._motion, "resetFromMeasurement"):
                 self._motion.resetFromMeasurement(  # type: ignore[attr-defined]
                     outputBfov.center,
-                    outputDepth,
                     planned.frame.timestampNs,
                     int(planned.frame.frameIndex),
                     outputConfidence,
@@ -525,11 +518,10 @@ class DepthAwareTrackController(TrackController):
                 self._reacquireCooldown = self._trackingConfig.reacquireCooldownFrames
                 source = ResultSource.OBSERVED_REACQUIRED
             else:
-                self._recordMeasurement(planned, outputBfov, outputDepth, outputConfidence)
+                self._recordMeasurement(planned, outputBfov, outputConfidence)
                 source = ResultSource.OBSERVED_CONFIRMED
             self._currentBox = outputBox
             self._currentBfov = outputBfov
-            self._currentDepth = outputDepth
         else:
             source = (
                 ResultSource.OBSERVED_WEAK_BLEND if hasCandidate else ResultSource.MOTION_PREDICTED
@@ -547,7 +539,6 @@ class DepthAwareTrackController(TrackController):
                 self._recordMeasurement(
                     planned,
                     evaluation.measuredBfov,
-                    evaluation.depthSummary,
                     max(self._trackingConfig.candidateMinScore, evaluation.stateScore),
                 )
         oldMode = self._mode
@@ -597,23 +588,21 @@ class DepthAwareTrackController(TrackController):
             confidence=outputConfidence,
             status=_publicStatus(self._mode),
             valid=accepted,
-            depthSummary=outputDepth,
             resultSource=source,
         )
 
-    def _recordMeasurement(self, planned, bfov, depth, confidence) -> None:
+    def _recordMeasurement(self, planned, bfov, confidence) -> None:
         if hasattr(self._motion, "recordMeasurement"):
             self._motion.recordMeasurement(  # type: ignore[attr-defined]
                 frameIndex=int(planned.frame.frameIndex),
                 timestampNs=planned.frame.timestampNs,
                 point=bfov.center,
-                depth=depth,
                 confidence=confidence,
                 horizontalSizeRad=bfov.horizontalFovRad,
                 verticalSizeRad=bfov.verticalFovRad,
             )
         else:
-            self._motion.update(bfov.center, depth, planned.frame.timestampNs, confidence)
+            self._motion.update(bfov.center, planned.frame.timestampNs, confidence)
 
     def _predictDetailed(self, frame: FramePacket) -> MotionPrediction:
         if hasattr(self._motion, "predictDetailed"):
@@ -636,15 +625,11 @@ class DepthAwareTrackController(TrackController):
             horizontalSizeRad=self._currentBfov.horizontalFovRad,
             verticalSizeRad=self._currentBfov.verticalFovRad,
             tangentVelocityRadPerSec=(0.0, 0.0),
-            rangeDepth=motion.rangeDepth or None,
-            rangeVelocityPerSec=motion.rangeVelocity,
             angularUncertaintyRad=0.05,
             scaleUncertainty=0.10,
-            rangeUncertainty=None,
             confidence=motion.confidence,
             centerCovarianceRad2=motion.centerCovarianceRad2,
             scaleCovarianceLog2=motion.scaleCovarianceLog2,
-            rangeVariance=motion.rangeVariance,
             reliability=motion.reliability,
         )
 
@@ -716,13 +701,10 @@ def _aggregateAdapter(observation):
         sourceViewIds=observation.sourceViewIds,
         representativeViewId=observation.representativeViewId,
         localBox=observation.representativeLocalBox,
-        depthSummary=observation.depthSummary,
         supported=observation.supported,
         clusterCount=observation.clusterCount,
         agreementScore=observation.agreementScore,
     )
 
 
-TrackerControllerImpl = DepthAwareTrackController
-
-__all__ = ["DepthAwareTrackController", "TrackerControllerImpl"]
+__all__ = ["TrackControllerImpl"]

@@ -4,7 +4,7 @@
 |---|---:|---|
 | `visualization.enabled` | false | 是否创建中间阶段产物 |
 | `visualization.outputRoot` | `../outputs/visualization` | 输出根，相对 YAML 路径解析 |
-| `visualization.stages` | 四阶段全集 | 选择 local_rgb、depth_rgb、backend_box、geometry_box |
+| `visualization.stages` | 三阶段全集 | 选择 local_rgb、backend_box、geometry_box |
 
 最终结果图、InstanceID 文本和工具输出目录由各命令参数决定。绘图颜色、线宽、标签间距位于 `visualization/image.py` 的代码常量，只影响显示，不属于跟踪超参数。
 

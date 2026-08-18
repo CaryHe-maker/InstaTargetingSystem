@@ -1,15 +1,23 @@
 .git
 .venv
-__pycache__
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.vs
 .pytest_cache
 .ruff_cache
 artifacts
+build
 data
 docs
 outputs
 tests
 tools
 third_party
+
+# Only the compact inference checkpoint enters the build context.
+models/*
+!models/hit_small_inference.pth
 
 # Local-only visualization implementation and AirSim360 diagnostic entrypoints.
 src/instatarget/visualization/
@@ -26,4 +34,5 @@ src/instatarget/track.py
 src/instatarget/track_airsim360.py
 
 *.tar
+*.tar.gz
 *.zip

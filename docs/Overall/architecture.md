@@ -4,7 +4,7 @@
 
 一帧进入系统后不会直接送给 HiT。它依次经过四种空间：
 
-1. `FramePacket` 保存 ERP 全景 RGB，以及可选深度和分割数据。
+1. `FramePacket` 保存 ERP 全景 RGB，以及可选分割数据。
 2. Controller 产生若干 `ViewSpec`，每个 ViewSpec 描述球面中心、水平/垂直 FOV 和输出尺寸。
 3. Geometry 将 ViewSpec 裁成 `LocalView`，HiT 在局部透视平面中产生 `LocalObservation`。
 4. Geometry 将局部框边界一次投影到球面，同时拟合紧致 BFoV 和直接 ERP bbox；Runtime 再附加外观概率、运动概率、SingleScore 和投影质量，形成 `ProjectedObservation`。
@@ -21,9 +21,9 @@ Core 位于最底层。Geometry、Tracker、Controller、Data 依赖 Core，但�
 - 更换 HiT 会话实现时，不需要修改状态机和球面几何。
 - 更换数据源或结果格式时，不需要修改候选融合算法。
 
-## 两条主运行路线
+## RGB-only 主运行路线
 
-RGB-only 建立一个 HiT 会话，局部 RGB 直接得到模型框与分数。RGB-D 建立 RGB 和深度两个独立会话；深度先转为三通道伪彩色，再由 FusionHead 合并分数。Tracker 把同一轮的 RGB 视图组成一个 tensor batch；RGB-D 随后把可用深度视图组成独立 depth batch。两条路线从 `ProjectedObservation` 开始完全共用 Controller。
+Runtime 建立一个 HiT 会话，局部 RGB 直接得到模型框与外观分数。Tracker 把同一轮的 RGB 视图组成一个 tensor batch，Runtime 再将局部框回投为 `ProjectedObservation` 交给 Controller。比赛视频、本地 AirSim360 与通用图像序列共用这条线路。
 
 ## 关键实现路径
 
@@ -31,7 +31,7 @@ RGB-only 建立一个 HiT 会话，局部 RGB 直接得到模型框与分数。R
 - 协议边界：`src/instatarget/core/protocols.py`
 - 组合根：`src/instatarget/app/driver.py::buildRuntime`
 - 顺序驱动：`src/instatarget/app/driver.py::runTracking`
-- 状态所有权：`src/instatarget/controller/depth_aware_track_controller.py`
+- 状态所有权：`src/instatarget/controller/track_controller.py`
 - 局部推理：`src/instatarget/tracker/backend.py`
 - 球面投影：`src/instatarget/geometry/spherical_geometry.py`
 - 分数校准与合成：`src/instatarget/controller/fused_score.py`

@@ -9,7 +9,6 @@ from enum import Enum, StrEnum, auto
 from instatarget.core.types import (
     BBoxXYWH,
     BFoV,
-    DepthSummary,
     FrameIndex,
     MotionState3D,
     ProjectedObservation,
@@ -75,8 +74,6 @@ class MotionSample:
     horizontalSizeRad: float
     verticalSizeRad: float
     confidence: float
-    rangeDepth: float | None
-    rangeConfidence: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,15 +87,11 @@ class MotionPrediction:
     horizontalSizeRad: float
     verticalSizeRad: float
     tangentVelocityRadPerSec: tuple[float, float]
-    rangeDepth: float | None
-    rangeVelocityPerSec: float | None
     angularUncertaintyRad: float
     scaleUncertainty: float
-    rangeUncertainty: float | None
     confidence: float
     centerCovarianceRad2: tuple[tuple[float, float], tuple[float, float]]
     scaleCovarianceLog2: tuple[tuple[float, float], tuple[float, float]]
-    rangeVariance: float | None
     reliability: float
     degradedReasons: tuple[str, ...] = ()
     sampleCount: int = 0
@@ -113,18 +106,14 @@ class MotionPrediction:
                 self.tangentVelocityRadPerSec[1],
                 0.0,
             ),
-            rangeDepth=self.rangeDepth or 0.0,
-            rangeVelocity=self.rangeVelocityPerSec or 0.0,
             confidence=self.confidence,
             horizontalSizeRad=self.horizontalSizeRad,
             verticalSizeRad=self.verticalSizeRad,
             angularUncertaintyRad=self.angularUncertaintyRad,
             scaleUncertainty=self.scaleUncertainty,
-            rangeUncertainty=self.rangeUncertainty,
             reliability=self.reliability,
             centerCovarianceRad2=self.centerCovarianceRad2,
             scaleCovarianceLog2=self.scaleCovarianceLog2,
-            rangeVariance=self.rangeVariance,
         )
 
 
@@ -134,7 +123,6 @@ class ConfirmedTargetState:
     bbox: BBoxXYWH
     bfov: BFoV
     confidence: float
-    depthSummary: DepthSummary | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,7 +163,6 @@ class EvaluatedCandidate:
     sourceConfidencePassed: bool
     representativeViewId: int
     representativeLocalBox: BBoxXYWH | None
-    depthSummary: DepthSummary | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +205,6 @@ class StateObservation:
     backendScore: float
     motionScore: float
     scaleScore: float
-    depthConsistencyScore: float | None
     supportScore: float
     agreementScore: float
     stateScore: float
@@ -227,7 +213,6 @@ class StateObservation:
     supported: bool
     escalationRecommended: bool
     reacquired: bool
-    depthSummary: DepthSummary | None
     rejectionReasons: tuple[EvaluationReason, ...] = ()
     rawMotionScore: float | None = None
     motionProbability: float | None = None

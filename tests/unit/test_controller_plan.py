@@ -41,9 +41,7 @@ def _observation(
         appearanceScore=score,
         motionScore=score,
         scaleScore=score,
-        depthScore=0.0,
         fusedScore=score,
-        depthSummary=None,
         localBox=BBoxXYWH(70.0, 70.0, 40.0, 40.0),
         singleScore=score,
     )
@@ -234,7 +232,6 @@ class ControllerPlanTest(unittest.TestCase):
             sourceViewIds=(0, 1),
             representativeViewId=0,
             localBox=box,
-            depthSummary=None,
             supported=True,
         )
 

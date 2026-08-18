@@ -5,8 +5,7 @@
 安装项目命令入口后，也可用以下简写直接执行跟踪或实例扫描：
 
 ```powershell
-run -RGB_only /data/airsim360/nyc_sample /artifacts/easy_user/nyc_sample/RGB_only 14211313
-run -RGBD /data/airsim360/nyc_sample /artifacts/easy_user/nyc_sample/RGBD 14211313
+run /data/airsim360/nyc_sample /artifacts/easy_user/nyc_sample/RGB_only 14211313
 getInstanceID /data/airsim360/nyc_sample /artifacts/easy_user/nyc_sample/InstanceID.txt
 ```
 
@@ -19,14 +18,6 @@ getInstanceID /data/airsim360/nyc_sample /artifacts/easy_user/nyc_sample/Instanc
 ```
 
 该命令逐帧运行 RGB-only 路线，将结果写入指定目录的 `result` 子目录，并生成 `tracking.txt`、`iou.json`、`manifest.json`、`time.json`、`visualResult` 和 `midVisual`。
-
-## RGB-D 一行命令
-
-```powershell
-& ".venv\Scripts\python.exe" "tools\run_airsim360_dataset.py" --dataset-root "data\airsim360\nyc_sample" --config "configs\RGBD.yaml" --target-instance 14211313 --output-dir "artifacts\easy_user\nyc_sample\RGBD"
-```
-
-RGB-D 命令使用 RGB HiT 和深度伪彩色 HiT 两个独立会话。输出结构与 RGB-only 一致，便于逐项比较。
 
 ## 第 0 帧实例清单一行命令
 

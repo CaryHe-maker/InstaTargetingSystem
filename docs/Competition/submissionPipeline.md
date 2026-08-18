@@ -16,7 +16,7 @@
 
 `trackOneSequence()` 复用 Runtime 的 runTracking。第 0 帧由比赛 sink 写给定初始 BFoV，后续帧写 Controller 结果。结束时校验结果行数与视频帧数一致。
 
-## RGB-only 约束
+## RGB-only 线程
 
-`requireRgbOnlyConfig()` 拒绝 depth.enabled=true 的配置。比赛视频没有对齐深度输入，静默启用 RGB-D 会让本地和提交环境行为不一致。
+比赛与本地运行使用同一个 RGB-only AppConfig schema 和单会话 TrackerBackend。比赛入口不包含模态分支，因此本地与提交环境的推理线路一致。
 

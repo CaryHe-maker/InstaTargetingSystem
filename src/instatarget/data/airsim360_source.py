@@ -14,23 +14,19 @@ from instatarget.core.errors import DecodeError, ProtocolError
 from instatarget.core.protocols import AirSim360DataSource as AirSim360DataSourceProtocol
 from instatarget.core.types import (
     AirSim360Record,
-    DepthPlane,
     FrameIndex,
     FramePacket,
     SegmentationPlane,
     SequenceId,
 )
-from instatarget.io.h5_depth_reader import readAirSim360DepthH5
 from instatarget.io.image_reader import readImageArray, readRgbImage
 
 
 @dataclass(slots=True)
 class AirSim360SequenceSource(AirSim360DataSourceProtocol):
-    """Read one AirSim360 sequence by matching RGB, depth and mask files."""
+    """Read one AirSim360 RGB sequence with optional aligned masks."""
 
-    depthUnit: str = "m"
     rgbFolders: tuple[str, ...] = ("rgb", "raw")
-    depthFolders: tuple[str, ...] = ("depth", "Depth")
     semanticFolders: tuple[str, ...] = ("semantic", "segmentation")
     instanceFolders: tuple[str, ...] = ("instance", "instances")
     classListNames: tuple[str, ...] = ("semantic_lists.txt", "semantic_list.txt", "classes.txt")
@@ -82,7 +78,6 @@ class AirSim360SequenceSource(AirSim360DataSourceProtocol):
             return None
         record = self._records[self._cursor]
         rgb = readRgbImage(record.rgbPath)
-        depth = _readDepth(record.depthPath) if record.depthPath is not None else None
         segmentation = _readSegmentation(
             record.semanticPath,
             record.instancePath,
@@ -93,7 +88,6 @@ class AirSim360SequenceSource(AirSim360DataSourceProtocol):
             frameIndex=record.frameIndex,
             timestampNs=int(self._cursor * 33_333_333),
             rgb=rgb,
-            depth=depth,
             segmentation=segmentation,
         )
         self._cursor += 1
@@ -141,7 +135,6 @@ class AirSim360SequenceSource(AirSim360DataSourceProtocol):
                     sequenceId=SequenceId(str(item.get("sequenceId", self._sequenceId))),
                     frameIndex=FrameIndex(int(item["frameIndex"])),
                     rgbPath=str(_resolvePath(sequenceRoot, item.get("rgbPath"))),
-                    depthPath=_optionalPath(sequenceRoot, item.get("depthPath")),
                     semanticPath=_optionalPath(sequenceRoot, item.get("semanticPath")),
                     instancePath=_optionalPath(sequenceRoot, item.get("instancePath")),
                 )
@@ -149,7 +142,6 @@ class AirSim360SequenceSource(AirSim360DataSourceProtocol):
                 if isinstance(item, dict) and "rgbPath" in item and "frameIndex" in item
             ]
         rgbPaths = _collectFrameFiles(_findFolder(sequenceRoot, self.rgbFolders), sequenceRoot)
-        depthPaths = _indexPaths(_findFolder(sequenceRoot, self.depthFolders), sequenceRoot)
         semanticPaths = _indexPaths(_findFolder(sequenceRoot, self.semanticFolders), sequenceRoot)
         instancePaths = _indexPaths(_findFolder(sequenceRoot, self.instanceFolders), sequenceRoot)
         records: list[AirSim360Record] = []
@@ -161,7 +153,6 @@ class AirSim360SequenceSource(AirSim360DataSourceProtocol):
                     sequenceId=SequenceId(self._sequenceId),
                     frameIndex=FrameIndex(index),
                     rgbPath=str(rgbPath),
-                    depthPath=_pickIndexedPath(depthPaths, stem, frameKey),
                     semanticPath=_pickIndexedPath(semanticPaths, stem, frameKey),
                     instancePath=_pickIndexedPath(instancePaths, stem, frameKey),
                 )
@@ -259,34 +250,6 @@ def _optionalPath(root: Path, value: Any) -> str | None:
     if value in {None, ""}:
         return None
     return str(_resolvePath(root, value))
-
-
-def _readDepth(pathText: str | None) -> DepthPlane | None:
-    if pathText is None:
-        return None
-    path = Path(pathText)
-    try:
-        if path.suffix.lower() in {".h5", ".hdf5"}:
-            return readAirSim360DepthH5(path)
-        values = _readDepthArray(path)
-    except DecodeError:
-        raise
-    except OSError as error:
-        raise DecodeError(f"cannot read AirSim360 depth file {path}: {error}") from error
-    mask = np.isfinite(values) & (values >= 0.0)
-    return DepthPlane(values=values.astype(np.float32, copy=False), validMask=mask, unit="m")
-
-
-def _readDepthArray(path: Path) -> np.ndarray:
-    if path.suffix.lower() == ".npy":
-        values = np.load(path).astype(np.float32, copy=False)
-    else:
-        values = readImageArray(path).astype(np.float32, copy=False)
-        if values.ndim == 3:
-            values = values[..., 0]
-    if values.ndim != 2:
-        raise DecodeError(f"AirSim360 depth must have shape [H, W]: {path}")
-    return values
 
 
 def _readSegmentation(

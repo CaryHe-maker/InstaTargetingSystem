@@ -7,10 +7,7 @@ from instatarget.app.competition import (
     formatCompetitionResult,
     listSequences,
     loadInitialBfov,
-    requireRgbOnlyConfig,
 )
-from instatarget.core.config import loadConfig
-from instatarget.core.errors import ConfigError
 from instatarget.core.types import (
     BBoxXYWH,
     BFoV,
@@ -24,20 +21,6 @@ from instatarget.geometry import makeSphericalPoint
 
 
 class CompetitionSubmissionTest(unittest.TestCase):
-    def testSubmissionAcceptsOnlyRgbConfig(self) -> None:
-        repositoryRoot = Path(__file__).resolve().parents[2]
-        rgbOnlyPath = repositoryRoot / "configs" / "RGBonly.yaml"
-        rgbOnly = loadConfig(rgbOnlyPath)
-
-        requireRgbOnlyConfig(rgbOnly)
-        source = rgbOnlyPath.read_text(encoding="utf-8")
-        source = source.replace("depth:\n  enabled: false", "depth:\n  enabled: true")
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "depth-enabled.yaml"
-            path.write_text(source, encoding="utf-8")
-            with self.assertRaises(ConfigError):
-                requireRgbOnlyConfig(loadConfig(path))
-
     def testInitialBfovParsingUsesDegrees(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "init.txt"

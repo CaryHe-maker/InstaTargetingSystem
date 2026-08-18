@@ -10,7 +10,7 @@ Controller 不直接编码模板，而是产生 `TemplateCommand`。当前生产
 
 ## 模板缓存
 
-实际特征存储在 `tracker/template.py::TemplateCache`。TrackerBackend 每次推理只把 anchor 特征传给 RGB HiT；RGB-D 模式的深度 HiT 同样只接收第 0 帧深度 anchor。即使外部兼容调用写入动态槽，动态特征也不会进入模型推理。
+实际特征存储在 `tracker/template.py::TemplateCache`。TrackerBackend 每次推理只把第 0 帧 RGB anchor 特征传给 HiT。即使外部兼容调用写入动态槽，动态特征也不会进入模型推理。
 
 ## 帧事务
 

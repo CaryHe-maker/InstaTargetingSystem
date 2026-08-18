@@ -4,7 +4,6 @@ from instatarget.core.config import AppConfig, VisualizationConfig, loadConfig
 from instatarget.core.errors import (
     ConfigError,
     DecodeError,
-    DepthError,
     GeometryError,
     InstaTargetError,
     ModelError,
@@ -16,7 +15,6 @@ __all__ = [
     "AppConfig",
     "ConfigError",
     "DecodeError",
-    "DepthError",
     "GeometryError",
     "InstaTargetError",
     "ModelError",

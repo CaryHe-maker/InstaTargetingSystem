@@ -4,10 +4,9 @@
 
 ## 输出内容
 
-`midVisual` 按帧和视图写入四类 PNG：
+`midVisual` 按帧和视图写入三类 PNG：
 
 - `local_rgb`：局部 RGB 输入。
-- `depth_rgb`：深度伪彩色输入；RGB-only 没有深度处理阶段，因此不会产生有效深度图。
 - `backend_box`：HiT 局部框，标签为 backend 原始分/外观概率。
 - `geometry_box`：一次边界回投得到的直接 ERP 框，标签为 SingleScore/运动概率/包络膨胀比。
 

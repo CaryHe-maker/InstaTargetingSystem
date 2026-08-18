@@ -7,7 +7,7 @@
 1. CLI 解析配置路径、数据根、目标 instance ID 和输出目录。
 2. `loadConfig()` 严格读取 YAML；未知键和缺失键都会失败。
 3. AirSim360 source 打开序列并读取元数据；伪真值构建器从第 0 帧实例掩码得到初始化框。
-4. `buildRuntime()` 创建 Geometry、Controller、Tracker backend、可选 DepthProcessor、sink 和可选中间可视化 recorder。
+4. `buildRuntime()` 创建 Geometry、Controller、RGB Tracker backend、sink 和可选中间可视化 recorder。
 5. `TimeCounter.start()` 只建立时间产物生命周期，此时还没有累计处理时间。
 
 ## 初始化帧
@@ -17,7 +17,7 @@
 1. 读取并解码第 0 帧。
 2. Controller 将 ERP 初始化框转换为模板视域和局部模板框。
 3. Geometry 裁剪模板 LocalView。
-4. Tracker 编码初始模板；RGB-D 模式同时编码深度模板。
+4. Tracker 编码初始 RGB 模板。
 5. Controller 初始化运动历史和 `TRACKING` 状态，生成第 0 帧 `TrackResult`。
 
 处理区间在结果构造完成后关闭。随后 sink 写第 0 帧、最终结果可视化和中间模板视图，这些都不计入处理时间。
@@ -29,7 +29,7 @@
 1. Source 读取一帧。若为 EOF，本轮不产生结果并结束循环。
 2. `controller.beginFrame()` 根据可靠历史预测中心，建立 `FrameTransaction` 和 Round 1 `SearchPlan`。
 3. Geometry 按计划一次裁剪本轮所有视图。
-4. Tracker 按本轮 view 顺序执行批量局部推理并返回 LocalObservation。PyTorch HiT 每轮做一次 RGB tensor forward；RGB-D 再对有深度的视图做一次 depth tensor forward。
+4. Tracker 按本轮 view 顺序执行批量局部推理并返回 LocalObservation。PyTorch HiT 每轮做一次 RGB tensor forward。
 5. Beta Calibration 生成 `appearanceProbability`，保留 backend 原始融合分。
 6. Geometry 将每个局部框边界一次回投，直接拟合 ERP bbox 和紧致 BFoV，并保留边界/膨胀诊断。
 7. Runtime 按局部 ViewSpec 中心与运动预测中心的大圆夹角生成当前生产运动概率，并按 70/30 合成 SingleScore；协方差归一化候选残差保留为离线诊断路径。

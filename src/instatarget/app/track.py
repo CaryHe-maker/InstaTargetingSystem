@@ -7,7 +7,15 @@ import sys
 
 from instatarget.app.driver import buildRuntime, finalizeSink, openSink, runTracking
 from instatarget.core.config import loadConfig
-from instatarget.core.errors import ConfigError, DecodeError, DepthError, GeometryError, InstaTargetError, ModelError, OutputError, ProtocolError
+from instatarget.core.errors import (
+    ConfigError,
+    DecodeError,
+    GeometryError,
+    InstaTargetError,
+    ModelError,
+    OutputError,
+    ProtocolError,
+)
 from instatarget.core.types import BBoxXYWH
 from instatarget.data.frame_source import FrameSource
 
@@ -47,10 +55,12 @@ def main(argv: list[str] | None = None) -> int:
             controller=runtime.controller,
             backend=runtime.backend,
             sink=runtime.sink,
-            depthProcessor=runtime.depthProcessor,
             recorder=runtime.recorder,
         )
-        finalizeSink(runtime.sink, resultCount if getattr(source, "frameCount", 0) <= 0 else source.frameCount)
+        expectedCount = (
+            resultCount if getattr(source, "frameCount", 0) <= 0 else source.frameCount
+        )
+        finalizeSink(runtime.sink, expectedCount)
         return 0
     except ConfigError as error:
         _report(error)
@@ -58,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     except DecodeError as error:
         _report(error)
         return EXIT_DECODE
-    except (ModelError, DepthError) as error:
+    except ModelError as error:
         _report(error)
         return EXIT_MODEL
     except OutputError as error:

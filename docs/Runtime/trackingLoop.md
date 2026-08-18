@@ -10,7 +10,7 @@
 
 1. `beginFrame()` 产生当前 round 的 SearchPlan。
 2. `cropViews()` 一次裁剪本轮所有视图。
-3. `backend.infer()` 按计划顺序把本轮全部视图交给 backend。PyTorch HiT 会话执行一次 RGB tensor batch；RGB-D 路径随后对有深度的视图执行一次 depth tensor batch。每个 attempt 的 expectedRevision 严格递增，但第二轮 KEEP 保持模板特征内容不变。
+3. `backend.infer()` 按计划顺序把本轮全部视图交给 backend。PyTorch HiT 会话执行一次 RGB tensor batch。每个 attempt 的 expectedRevision 严格递增，但第二轮 KEEP 保持模板特征内容不变。
 4. `calibrateLocalAppearanceProbabilities()` 把 backend 原始 `fusedScore` 校准为独立的 `appearanceProbability`，不覆盖原分；旧 `remapLocalObservationFusedScores()` 仅是兼容别名。
 5. `_projectObservation()` 将局部框边界一次回投，直接生成 ERP bbox、紧致 BFoV、边界与膨胀诊断。
 6. 每个局部图中心与该帧预测中心的大圆夹角生成同帧视图运动分数，再按 70/30 合成 `singleScore`；检测框在局部图内部的位置不改变该视图的运动先验。
@@ -24,5 +24,5 @@ Controller 先完成原子提交，Runtime 再调用 sink 和 result recorder。
 
 ## 复杂度
 
-裁剪、预处理、投影和后处理仍近似随视图数线性增长，但 HiT 模型调用已按轮批处理，不再是每张图一次 forward。正常线程的 TRACKING 与 UNCERTAIN 都是 4+4 张、两个 batch；显式 LOST 组件是 10 张、一个 batch。RGB-D 每轮还会追加一个 depth batch。降低总延迟时应同时统计状态/round 分布、batch size、模型 forward 数、GPU 利用率和峰值显存。
+裁剪、预处理、投影和后处理仍近似随视图数线性增长，但 HiT 模型调用已按轮批处理，不再是每张图一次 forward。正常线程的 TRACKING 与 UNCERTAIN 都是 4+4 张、两个 batch；显式 LOST 组件是 10 张、一个 batch。降低总延迟时应同时统计状态/round 分布、batch size、模型 forward 数、GPU 利用率和峰值显存。
 

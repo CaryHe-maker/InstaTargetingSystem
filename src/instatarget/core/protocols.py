@@ -10,7 +10,6 @@ from instatarget.core.types import (
     AirSim360Record,
     BBoxXYWH,
     BFoV,
-    DepthSummary,
     FramePacket,
     InitializationPlan,
     LocalBoxProjection,
@@ -80,30 +79,12 @@ class SphericalGeometry(Protocol):
 
 
 @runtime_checkable
-class DepthProcessor(Protocol):
-    """Produce target-region summaries without making tracking decisions."""
-
-    def summarize(
-        self,
-        frame: FramePacket,
-        bbox: BBoxXYWH,
-    ) -> DepthSummary | None: ...
-
-    def summarizeLocal(
-        self,
-        view: LocalView,
-        localBox: BBoxXYWH,
-    ) -> DepthSummary | None: ...
-
-
-@runtime_checkable
 class MotionEstimator(Protocol):
     """Maintain and predict the controller-owned spherical motion state."""
 
     def initialize(
         self,
         point: SphericalPoint,
-        depth: DepthSummary | None,
         timestampNs: int,
     ) -> MotionState3D: ...
 
@@ -112,7 +93,6 @@ class MotionEstimator(Protocol):
     def update(
         self,
         point: SphericalPoint,
-        depth: DepthSummary | None,
         timestampNs: int,
         observationConfidence: float,
     ) -> MotionState3D: ...
@@ -120,7 +100,7 @@ class MotionEstimator(Protocol):
 
 @runtime_checkable
 class TrackerBackend(Protocol):
-    """Own the local RGB/depth tracker and all device-side resources."""
+    """Own the local RGB tracker and all device-side resources."""
 
     def initialize(
         self,
@@ -150,7 +130,6 @@ class TrackController(Protocol):
     def commitInitialization(
         self,
         plan: InitializationPlan,
-        depthSummary: DepthSummary | None,
     ) -> TrackResult: ...
 
     def plan(self, frame: FramePacket) -> SearchPlan: ...
@@ -221,7 +200,6 @@ class PseudoTrackBuilder(Protocol):
 __all__ = [
     "AirSim360DataSource",
     "AirSim360Record",
-    "DepthProcessor",
     "FrameSource",
     "MotionEstimator",
     "FrameCommitted",

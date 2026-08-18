@@ -1,4 +1,4 @@
-"""DTC controller components."""
+"""Controller components for spherical RGB tracking."""
 
 from instatarget.controller.classifier import (
     CLASSIFY_RADIUS_RAD,
@@ -7,10 +7,6 @@ from instatarget.controller.classifier import (
     classify,
 )
 from instatarget.controller.decision_gate import DecisionGate, FrameAggregate, ScoredObservation
-from instatarget.controller.depth_aware_track_controller import (
-    DepthAwareTrackController,
-    TrackerControllerImpl,
-)
 from instatarget.controller.fused_score import (
     FUSED_SCORE_BETA_PARAMETERS,
     MotionScore,
@@ -47,13 +43,13 @@ from instatarget.controller.state_model import (
     TrackMode,
 )
 from instatarget.controller.template_policy import TemplateDecision, TemplatePolicy
+from instatarget.controller.track_controller import TrackControllerImpl
 
 __all__ = [
     "DecisionGate",
     "CLASSIFY_RADIUS_RAD",
     "Classifier",
     "ClusterCenter",
-    "DepthAwareTrackController",
     "FUSED_SCORE_BETA_PARAMETERS",
     "FUSION_AGREEMENT_BONUS_WEIGHT",
     "FUSION_MAX_SCORE_GAIN",
@@ -92,5 +88,5 @@ __all__ = [
     "TemplatePolicy",
     "TrackStateMachine",
     "TrackMode",
-    "TrackerControllerImpl",
+    "TrackControllerImpl",
 ]

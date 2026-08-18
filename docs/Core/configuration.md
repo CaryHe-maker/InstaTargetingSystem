@@ -8,7 +8,7 @@
 
 ## 配置组归属
 
-- `model/depth/backendFusion/fusionHead`：Tracker。
+- `model`：Tracker。
 - `geometry`：Geometry 和视域输出尺寸。
 - `evaluator/motion/tracking/recovery`：Controller。
 - `runtime`：Runtime 的未来队列容量。
@@ -22,12 +22,11 @@
 - schema 仍要求 `firstRoundFusionOverlap < overlapThreshold`，但两项当前只为配置兼容；生产 Fusor 使用固定 0.70 常量。
 - 状态阈值不再来自 YAML 标量；状态机根据最近 10 个 `StateScore` 动态计算 UT/LT。
 - `tracking.maxAttemptsPerFrame` 固定为 2；当前校验硬性要求 `tracking.maxViewsPerFrameTotal >= 12`，两份生产配置也都取 12。正常线程每帧最多使用 8 张（TRACKING/UNCERTAIN 的 4+4）；保留的显式 LOST planner 使用 10 张（6 张 cubemap 和 4 张 Type1）。不能仅按当前可达路线把配置降到 8。
-- `fusionHead` 权重非负且至少一个为正。
-- DecisionGate 三项权重总和不超过 1；生产 StateEvaluator 当前忽略整组 DecisionGate。
+- DecisionGate 两项权重总和不超过 1；生产 StateEvaluator 当前忽略整组 DecisionGate。
 
 外观 Beta 参数、运动残差组合权重和 70/30 SingleScore 当前是 `controller/fused_score.py` 中的冻结代码常量，不属于 YAML。`decisionGate.*Weight` 只服务旧兼容聚合，不控制生产路径的 SingleScore。
 
 ## 修改流程
 
-增加参数时同时修改配置数据类、严格字段集合、解析构造、`RGBonly.yaml`、`RGBD.yaml`、配置测试和对应算法文档。若参数已经不影响生产路径，应明确标为兼容参数，而不是让读者误以为它仍在调节算法。
+增加参数时同时修改配置数据类、严格字段集合、解析构造、`RGBonly.yaml`、配置测试和对应算法文档。若参数已经不影响生产路径，应明确标为兼容参数，而不是让读者误以为它仍在调节算法。
 

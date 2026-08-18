@@ -16,8 +16,8 @@ from instatarget.app.driver import (
     openSink,
     runTracking,
 )
-from instatarget.core.config import AppConfig, loadConfig
-from instatarget.core.errors import ConfigError, DecodeError, OutputError, ProtocolError
+from instatarget.core.config import loadConfig
+from instatarget.core.errors import DecodeError, OutputError, ProtocolError
 from instatarget.core.types import BFoV, FrameIndex, FramePacket, SequenceId, TrackResult
 from instatarget.geometry import makeSphericalPoint
 
@@ -236,7 +236,6 @@ def trackOneSequence(
         raise DecodeError(f"sequence has no .mp4 video: {sequencePath}")
     initialBfov = loadInitialBfov(sequencePath / "init.txt")
     config = loadConfig(configPath)
-    requireRgbOnlyConfig(config)
     runtime = buildRuntime(config)
     source = OpenCvVideoSource(sequencePath.name)
     sink = BfovResultSink(initialBfov)
@@ -256,7 +255,6 @@ def trackOneSequence(
             controller=runtime.controller,
             backend=runtime.backend,
             sink=sink,
-            depthProcessor=runtime.depthProcessor,
             recorder=runtime.recorder,
         )
         finalizeSink(sink, resultCount)
@@ -296,14 +294,6 @@ def runCompetition(
     return 0
 
 
-def requireRgbOnlyConfig(config: AppConfig) -> None:
-    """Reject depth-enabled settings on the official RGB-only path."""
-    if config.depth.enabled:
-        raise ConfigError("competition submission requires depth.enabled=false")
-    if config.backendFusion.depthScoreWeight != 0.0:
-        raise ConfigError("competition submission requires depthScoreWeight=0")
-
-
 def _bgrToRgb(frame: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(frame[:, :, ::-1])
 
@@ -316,7 +306,6 @@ __all__ = [
     "findVideo",
     "listSequences",
     "loadInitialBfov",
-    "requireRgbOnlyConfig",
     "runCompetition",
     "trackOneSequence",
 ]

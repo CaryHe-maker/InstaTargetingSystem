@@ -1,6 +1,6 @@
 # Controller 参数索引
 
-当前值来自 `configs/RGBonly.yaml` 和 `configs/RGBD.yaml`。两份配置的 Controller 参数一致。
+当前值来自唯一生产配置 `configs/RGBonly.yaml`。
 
 ## StateEvaluator
 
@@ -43,7 +43,7 @@
 
 ## 分数常量
 
-当前 SingleScore 权重 0.70/0.30、运动尺度权重 0.35、深度权重 0.15、最大 d2=25、中心测量标准差 0.025 rad 和 log 尺度测量标准差 0.08 位于 `controller/fused_score.py`。它们尚未进入严格 YAML schema；替换前必须完成独立校准并联动重标 `tracking.candidateMinScore` 与来源最低分。
+当前 SingleScore 权重 0.70/0.30、运动尺度权重 0.35、最大 d2=25、中心测量标准差 0.025 rad 和 log 尺度测量标准差 0.08 位于 `controller/fused_score.py`。它们尚未进入严格 YAML schema；替换前必须完成独立校准并联动重标 `tracking.candidateMinScore` 与来源最低分。
 
 Fusor 的置信度常量位于 `controller/fusor.py`：`FUSION_AGREEMENT_BONUS_WEIGHT=0.15` 控制 IoU 一致性奖励，`FUSION_MAX_SCORE_GAIN=0.03` 限制融合分数相对最高来源的增益，`FUSION_SCORE_CAP=0.99` 是融合分数硬上限。这三个常量当前不进入 YAML 配置。
 

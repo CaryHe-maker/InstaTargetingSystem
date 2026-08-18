@@ -11,7 +11,6 @@ import numpy as np
 from instatarget.core.errors import ProtocolError
 from instatarget.core.types import (
     BFoV,
-    DepthSummary,
     LocalObservation,
     MotionState3D,
     SphericalPoint,
@@ -23,7 +22,6 @@ FUSED_SCORE_BETA_PARAMETERS = (14.30532301, 1.52758886, -2.21085783)
 APPEARANCE_WEIGHT = 0.70
 MOTION_WEIGHT = 0.30
 MOTION_SCALE_WEIGHT = 0.35
-MOTION_DEPTH_WEIGHT = 0.15
 MOTION_MAX_D2 = 25.0
 MOTION_CENTER_MEASUREMENT_STD_RAD = 0.025
 MOTION_SCALE_MEASUREMENT_STD_LOG = 0.08
@@ -91,10 +89,9 @@ def calibrateMotionScore(rawScore: float) -> float:
 
 def scoreMotionConsistency(
     candidate: BFoV,
-    depthSummary: DepthSummary | None,
     prediction: MotionState3D | None,
 ) -> MotionScore:
-    """Map covariance-normalized center, scale, and depth residuals to a probability."""
+    """Map covariance-normalized center and scale residuals to a probability."""
     if prediction is None:
         return MotionScore(0.5, 0.5, 0.5, 0.0, 0.0)
 
@@ -145,24 +142,7 @@ def scoreMotionConsistency(
         scaleCovariance += np.eye(2) * MOTION_SCALE_MEASUREMENT_STD_LOG**2
         scaleD2 = _quadraticDistance(scaleResidual, scaleCovariance)
 
-    depthD2 = 0.0
-    if (
-        depthSummary is not None
-        and depthSummary.medianDepth > 0.0
-        and prediction.rangeDepth > 0.0
-        and prediction.rangeVariance is not None
-    ):
-        depthResidual = log(depthSummary.medianDepth / prediction.rangeDepth)
-        predictionLogVariance = prediction.rangeVariance / prediction.rangeDepth**2
-        measurementStd = 0.10 + 0.25 * (1.0 - depthSummary.validRatio)
-        depthD2 = depthResidual**2 / max(
-            predictionLogVariance + measurementStd**2,
-            1e-9,
-        )
-
     squaredDistance = centerD2 + MOTION_SCALE_WEIGHT * scaleD2
-    if depthSummary is not None and prediction.rangeDepth > 0.0:
-        squaredDistance += MOTION_DEPTH_WEIGHT * depthD2
     rawScore = exp(-0.5 * min(float(squaredDistance), MOTION_MAX_D2))
     probability = calibrateMotionScore(rawScore)
     reliability = float(np.clip(prediction.reliability, 0.0, 1.0))

@@ -1,6 +1,6 @@
 # 用户文档
 
-从 [EasyUser.md](EasyUser.md) 开始：其中包含 RGB-only、RGB-D 和第 0 帧实例清单的单行命令。
+从 [EasyUser.md](EasyUser.md) 开始：其中包含 RGB-only 跟踪和第 0 帧实例清单的单行命令。
 
 | 文档 | 内容 |
 |---|---|

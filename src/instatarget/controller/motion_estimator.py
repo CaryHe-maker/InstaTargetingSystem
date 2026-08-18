@@ -10,7 +10,7 @@ import numpy as np
 from instatarget.controller.state_model import MotionPrediction, MotionSample
 from instatarget.core.errors import ProtocolError
 from instatarget.core.protocols import MotionEstimator as MotionEstimatorProtocol
-from instatarget.core.types import DepthSummary, MotionState3D, SphericalPoint
+from instatarget.core.types import MotionState3D, SphericalPoint
 from instatarget.geometry.projection_math import makeSphericalPoint
 
 
@@ -65,7 +65,6 @@ class SphericalMotionEstimator(MotionEstimatorProtocol):
     def initialize(
         self,
         point: SphericalPoint,
-        depth: DepthSummary | None,
         timestampNs: int,
     ) -> MotionState3D:
         _requireTimestamp(timestampNs)
@@ -78,8 +77,6 @@ class SphericalMotionEstimator(MotionEstimatorProtocol):
                 horizontalSizeRad=0.0,
                 verticalSizeRad=0.0,
                 confidence=1.0,
-                rangeDepth=_validDepth(depth),
-                rangeConfidence=depth.confidence if depth is not None else 0.0,
             )
         )
         self._initialized = True
@@ -89,7 +86,6 @@ class SphericalMotionEstimator(MotionEstimatorProtocol):
     def resetFromMeasurement(
         self,
         point: SphericalPoint,
-        depth: DepthSummary | None,
         timestampNs: int,
         frameIndex: int,
         confidence: float,
@@ -109,8 +105,6 @@ class SphericalMotionEstimator(MotionEstimatorProtocol):
                 horizontalSizeRad=max(0.0, horizontalSizeRad),
                 verticalSizeRad=max(0.0, verticalSizeRad),
                 confidence=confidence,
-                rangeDepth=_validDepth(depth),
-                rangeConfidence=depth.confidence if depth is not None else 0.0,
             )
         )
         self._initialized = True
@@ -134,11 +128,6 @@ class SphericalMotionEstimator(MotionEstimatorProtocol):
         width, height, scaleLogVelocity = self._fitScale()
         width = max(0.0, width * np.exp(scaleLogVelocity[0] * dt))
         height = max(0.0, height * np.exp(scaleLogVelocity[1] * dt))
-        rangeDepth, rangeLogVelocity = self._fitRange()
-        rangeVelocity = 0.0
-        if rangeDepth is not None:
-            rangeDepth = max(0.0, rangeDepth * np.exp(rangeLogVelocity * dt))
-            rangeVelocity = rangeDepth * rangeLogVelocity
         uncertainty = max(
             0.01,
             residual + self._processNoiseRadPerSec * dt + 0.02 * len(self._samples) ** -0.5,
@@ -147,10 +136,7 @@ class SphericalMotionEstimator(MotionEstimatorProtocol):
         degraded: list[str] = []
         if len(self._samples) < self._minSamplesForVelocity:
             degraded.append("insufficient_motion_samples")
-        if rangeDepth is None:
-            degraded.append("missing_depth")
         scaleUncertainty = 0.25 if len(self._samples) < 2 else 0.10
-        rangeUncertainty = 0.5 * rangeDepth if rangeDepth is not None else None
         # One confirmed point is already useful as a position/scale anchor even though it
         # cannot define velocity.  Grow reliability continuously with history maturity instead
         # of switching from the neutral 0.5 fallback to a fully active model at sample N.
@@ -170,11 +156,8 @@ class SphericalMotionEstimator(MotionEstimatorProtocol):
             horizontalSizeRad=width,
             verticalSizeRad=height,
             tangentVelocityRadPerSec=(float(velocity[0]), float(velocity[1])),
-            rangeDepth=rangeDepth,
-            rangeVelocityPerSec=rangeVelocity if rangeDepth is not None else None,
             angularUncertaintyRad=float(uncertainty),
             scaleUncertainty=scaleUncertainty,
-            rangeUncertainty=rangeUncertainty,
             confidence=confidence,
             centerCovarianceRad2=(
                 (float(uncertainty * uncertainty), 0.0),
@@ -183,11 +166,6 @@ class SphericalMotionEstimator(MotionEstimatorProtocol):
             scaleCovarianceLog2=(
                 (float(scaleUncertainty * scaleUncertainty), 0.0),
                 (0.0, float(scaleUncertainty * scaleUncertainty)),
-            ),
-            rangeVariance=(
-                float(rangeUncertainty * rangeUncertainty)
-                if rangeUncertainty is not None
-                else None
             ),
             reliability=reliability,
             degradedReasons=tuple(degraded),
@@ -199,7 +177,6 @@ class SphericalMotionEstimator(MotionEstimatorProtocol):
     def update(
         self,
         point: SphericalPoint,
-        depth: DepthSummary | None,
         timestampNs: int,
         observationConfidence: float,
     ) -> MotionState3D:
@@ -217,8 +194,6 @@ class SphericalMotionEstimator(MotionEstimatorProtocol):
                 horizontalSizeRad=self._samples[-1].horizontalSizeRad,
                 verticalSizeRad=self._samples[-1].verticalSizeRad,
                 confidence=observationConfidence,
-                rangeDepth=_validDepth(depth),
-                rangeConfidence=depth.confidence if depth is not None else 0.0,
             )
         )
         self._timestampNs = int(timestampNs)
@@ -230,7 +205,6 @@ class SphericalMotionEstimator(MotionEstimatorProtocol):
         frameIndex: int,
         timestampNs: int,
         point: SphericalPoint,
-        depth: DepthSummary | None,
         confidence: float,
         horizontalSizeRad: float,
         verticalSizeRad: float,
@@ -248,8 +222,6 @@ class SphericalMotionEstimator(MotionEstimatorProtocol):
                 horizontalSizeRad=max(0.0, horizontalSizeRad),
                 verticalSizeRad=max(0.0, verticalSizeRad),
                 confidence=confidence,
-                rangeDepth=_validDepth(depth),
-                rangeConfidence=depth.confidence if depth is not None else 0.0,
             )
         )
         self._timestampNs = int(timestampNs)
@@ -324,32 +296,12 @@ class SphericalMotionEstimator(MotionEstimatorProtocol):
             values.append((float(np.exp(solution[0])), rate))
         return values[0][0], values[1][0], (values[0][1], values[1][1])
 
-    def _fitRange(self) -> tuple[float | None, float]:
-        samples = [s for s in self._samples if s.rangeDepth is not None and s.rangeConfidence > 0.0]
-        if not samples:
-            return None, 0.0
-        if len(samples) < 2:
-            return samples[-1].rangeDepth, 0.0
-        times = np.asarray(
-            [(s.timestampNs - samples[-1].timestampNs) / 1e9 for s in samples], dtype=np.float64
-        )
-        design = np.column_stack((np.ones(len(times)), times))
-        y = np.log(np.asarray([s.rangeDepth for s in samples], dtype=np.float64))
-        solution = np.linalg.lstsq(design, y, rcond=None)[0]
-        return float(np.exp(solution[0])), float(solution[1])
-
     def _legacyState(self, prediction: MotionPrediction) -> MotionState3D:
         return prediction.motionState
 
     def _requireInitialized(self) -> None:
         if not self._initialized or not self._samples:
             raise ProtocolError("motion estimator has not been initialized")
-
-
-def _validDepth(depth: DepthSummary | None) -> float | None:
-    if depth is None or depth.validRatio <= 0.0 or depth.confidence <= 0.0:
-        return None
-    return float(depth.medianDepth)
 
 
 def _advanceOnSphere(point: SphericalPoint, velocity: np.ndarray, dt: float) -> SphericalPoint:

@@ -7,9 +7,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
-from numpy.typing import NDArray
-
 from instatarget.core.config import VisualizationConfig
 from instatarget.core.errors import ProtocolError
 from instatarget.core.types import FramePacket, LocalObservation, LocalView, ProjectedObservation
@@ -17,7 +14,6 @@ from instatarget.visualization.image import drawBoxRgb
 from instatarget.visualization.png import writeRgbPng
 
 LOCAL_RGB_STAGE = "local_rgb"
-DEPTH_RGB_STAGE = "depth_rgb"
 BACKEND_BOX_STAGE = "backend_box"
 GEOMETRY_BOX_STAGE = "geometry_box"
 
@@ -40,20 +36,6 @@ class VisualizationRecorder:
         return tuple(
             writeRgbPng(self._artifactPath(frame, LOCAL_RGB_STAGE, view.spec.viewId), view.rgb)
             for view in views
-        )
-
-    def recordDepthRgb(
-        self,
-        frame: FramePacket,
-        depthRgbByViewId: Mapping[int, NDArray[np.uint8]],
-    ) -> tuple[Path, ...]:
-        """Write already-converted depth RGB images without transforming them."""
-        if not self._active(DEPTH_RGB_STAGE):
-            return ()
-        _requireViewIds(depthRgbByViewId)
-        return tuple(
-            writeRgbPng(self._artifactPath(frame, DEPTH_RGB_STAGE, viewId), depthRgb)
-            for viewId, depthRgb in sorted(depthRgbByViewId.items())
         )
 
     def recordBackendBoxes(
@@ -162,15 +144,6 @@ def _requireUniqueObservationIds(
     viewIds = [observation.viewId for observation in observations]
     if len(viewIds) != len(set(viewIds)):
         raise ProtocolError("visualization observation viewIds must be unique")
-
-
-def _requireViewIds(depthRgbByViewId: Mapping[int, NDArray[np.uint8]]) -> None:
-    invalidViewId = any(
-        isinstance(viewId, bool) or not isinstance(viewId, int) or viewId < 0
-        for viewId in depthRgbByViewId
-    )
-    if invalidViewId:
-        raise ProtocolError("visualization depth RGB viewIds must be non-negative integers")
 
 
 def _requireView(viewById: Mapping[int, LocalView], viewId: int) -> LocalView:

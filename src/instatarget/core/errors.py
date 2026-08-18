@@ -17,10 +17,6 @@ class GeometryError(InstaTargetError):
     """Raised when a spherical geometry operation cannot be completed."""
 
 
-class DepthError(InstaTargetError):
-    """Raised when depth data or depth processing is invalid."""
-
-
 class ModelError(InstaTargetError):
     """Raised when a tracker model cannot load or infer."""
 

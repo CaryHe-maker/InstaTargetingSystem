@@ -9,7 +9,7 @@
 | Core | 公共类型、协议、配置和异常 |
 | Runtime | 组件装配、逐帧线程和资源生命周期 |
 | Controller | 运动预测、视域规划、候选评估和状态机 |
-| Tracker | HiT 推理、深度处理、RGB-D 融合和模板缓存 |
+| Tracker | RGB HiT 推理和模板缓存 |
 | Geometry | ERP、球面、BFoV 和局部透视坐标转换 |
 | Data | 帧源、AirSim360 解析、伪真值和结果落盘 |
 | Visualization | 中间视图、最终结果、实例 ID 和计时产物 |

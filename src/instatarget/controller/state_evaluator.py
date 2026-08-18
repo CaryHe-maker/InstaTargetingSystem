@@ -139,7 +139,6 @@ class StateEvaluator:
             backendScore=_backendScore(representative),
             motionScore=representative.motionScore if representative is not None else 0.0,
             scaleScore=representative.scaleScore if representative is not None else 0.0,
-            depthConsistencyScore=representative.depthScore if representative is not None else None,
             supportScore=min(1.0, len(best.sourceViewIds) / 2.0) if best is not None else 0.0,
             agreementScore=(
                 best.overlapRate
@@ -155,7 +154,6 @@ class StateEvaluator:
                 and plan.attemptIndex == 0
             ),
             reacquired=state.mode is TrackMode.LOST and accepted,
-            depthSummary=best.depthSummary if best is not None else None,
             rejectionReasons=tuple(reasons),
             rawMotionScore=representative.rawMotionScore if representative is not None else None,
             motionProbability=(

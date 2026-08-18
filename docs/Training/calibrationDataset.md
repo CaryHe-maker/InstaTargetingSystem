@@ -4,7 +4,7 @@
 
 ## 样本收集
 
-在冻结模型权重和 Tracker 融合设置后运行独立校准序列，保存每个候选的 `backendFusedScore`、`appearanceProbability`、中心/尺度/深度残差、预测协方差、`rawMotionScore`、reliability、SingleScore、球面/ERP 真值误差、状态、round、目标纬度、view role、`normalizedRadius`、`edgeMargin` 和 `envelopeInflation`。标签应依据局部预测回投后的真实命中标准生成，而不是依据最终 Controller 是否输出。
+在冻结模型权重后运行独立校准序列，保存每个候选的 `backendFusedScore`、`appearanceProbability`、中心/尺度残差、预测协方差、`rawMotionScore`、reliability、SingleScore、球面/ERP 真值误差、状态、round、目标纬度、view role、`normalizedRadius`、`edgeMargin` 和 `envelopeInflation`。标签应依据局部预测回投后的真实命中标准生成，而不是依据最终 Controller 是否输出。
 
 ## 数据划分
 

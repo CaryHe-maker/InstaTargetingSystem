@@ -39,7 +39,6 @@ class DriverSmokeTest(unittest.TestCase):
                 controller=runtime.controller,
                 backend=runtime.backend,
                 sink=_CheckingSink(runtime.sink, timer),
-                depthProcessor=runtime.depthProcessor,
                 recorder=_CheckingRecorder(runtime.recorder, timer),
                 resultRecorder=resultRecorder,
                 processingTimer=timer,
@@ -127,10 +126,6 @@ class _CheckingRecorder:
     def recordLocalRgb(self, *args, **kwargs):
         self._outsideProcessing()
         return self._call("recordLocalRgb", *args, **kwargs)
-
-    def recordDepthRgb(self, *args, **kwargs):
-        self._outsideProcessing()
-        return self._call("recordDepthRgb", *args, **kwargs)
 
     def recordBackendBoxes(self, *args, **kwargs):
         self._outsideProcessing()

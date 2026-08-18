@@ -10,7 +10,7 @@ from typing import NewType
 import numpy as np
 from numpy.typing import NDArray
 
-from instatarget.core.errors import DepthError, ProtocolError
+from instatarget.core.errors import ProtocolError
 
 FrameIndex = NewType("FrameIndex", int)
 SequenceId = NewType("SequenceId", str)
@@ -98,34 +98,6 @@ class BFoV:
 
 
 @dataclass(frozen=True, slots=True)
-class DepthPlane:
-    """A depth array and its explicit validity mask."""
-
-    values: NDArray[np.float32]
-    validMask: NDArray[np.bool_]
-    unit: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.values, np.ndarray) or self.values.dtype != np.float32:
-            raise DepthError("depth values must be a float32 NumPy array")
-        if self.values.ndim != 2:
-            raise DepthError(f"depth values must have shape [H, W], actual={self.values.shape}")
-        if not isinstance(self.validMask, np.ndarray) or self.validMask.dtype != np.bool_:
-            raise DepthError("depth validMask must be a bool NumPy array")
-        if self.validMask.shape != self.values.shape:
-            raise DepthError(
-                "depth values and validMask must have identical shapes, "
-                f"actual={self.values.shape} and {self.validMask.shape}"
-            )
-        if not self.unit.strip():
-            raise DepthError("depth unit must be a non-empty string")
-        if not np.isfinite(self.values[self.validMask]).all():
-            raise DepthError("valid depth values must be finite")
-        if (self.values[self.validMask] < 0.0).any():
-            raise DepthError("valid depth values must be non-negative")
-
-
-@dataclass(frozen=True, slots=True)
 class SegmentationPlane:
     """Optional semantic and instance maps aligned with an ERP frame."""
 
@@ -154,13 +126,12 @@ class SegmentationPlane:
 
 @dataclass(frozen=True, slots=True)
 class FramePacket:
-    """One aligned ERP frame and all modalities available for it."""
+    """One RGB ERP frame with optional aligned segmentation."""
 
     sequenceId: SequenceId
     frameIndex: FrameIndex
     timestampNs: int
     rgb: NDArray[np.uint8]
-    depth: DepthPlane | None = None
     segmentation: SegmentationPlane | None = None
 
     def __post_init__(self) -> None:
@@ -177,10 +148,6 @@ class FramePacket:
         if self.rgb.shape[0] == 0 or self.rgb.shape[1] == 0:
             raise ProtocolError("rgb frame dimensions must be positive")
         frameShape = self.rgb.shape[:2]
-        if self.depth is not None and self.depth.values.shape != frameShape:
-            raise ProtocolError(
-                f"depth must align with rgb, actual={self.depth.values.shape} and {frameShape}"
-            )
         if self.segmentation is not None:
             for plane in (self.segmentation.semantic, self.segmentation.instance):
                 if plane is not None and plane.shape != frameShape:
@@ -190,52 +157,16 @@ class FramePacket:
 
 
 @dataclass(frozen=True, slots=True)
-class DepthSummary:
-    """Robust statistics for the depth values inside a target region."""
-
-    medianDepth: float
-    meanDepth: float
-    validRatio: float
-    minDepth: float
-    maxDepth: float
-    confidence: float
-
-    def __post_init__(self) -> None:
-        _requireFinite(
-            "depth summary",
-            self.medianDepth,
-            self.meanDepth,
-            self.validRatio,
-            self.minDepth,
-            self.maxDepth,
-            self.confidence,
-        )
-        _requireProbability("validRatio", self.validRatio)
-        _requireProbability("depth confidence", self.confidence)
-        if min(self.medianDepth, self.meanDepth, self.minDepth, self.maxDepth) < 0.0:
-            raise DepthError("depth summary values must be non-negative")
-        if self.minDepth > self.maxDepth:
-            raise DepthError("minDepth must not exceed maxDepth")
-        if not self.minDepth <= self.medianDepth <= self.maxDepth:
-            raise DepthError("medianDepth must be within [minDepth, maxDepth]")
-        if not self.minDepth <= self.meanDepth <= self.maxDepth:
-            raise DepthError("meanDepth must be within [minDepth, maxDepth]")
-
-
-@dataclass(frozen=True, slots=True)
 class MotionState3D:
     """Predicted spherical direction, extent, uncertainty, and confidence."""
 
     position: tuple[float, float, float]
     velocity: tuple[float, float, float]
-    rangeDepth: float
-    rangeVelocity: float
     confidence: float
     horizontalSizeRad: float = 0.0
     verticalSizeRad: float = 0.0
     angularUncertaintyRad: float = 0.0
     scaleUncertainty: float = 0.0
-    rangeUncertainty: float | None = None
     reliability: float = 0.0
     centerCovarianceRad2: tuple[tuple[float, float], tuple[float, float]] = (
         (0.0025, 0.0),
@@ -245,7 +176,6 @@ class MotionState3D:
         (0.04, 0.0),
         (0.0, 0.04),
     )
-    rangeVariance: float | None = None
 
     def __post_init__(self) -> None:
         if len(self.position) != 3 or len(self.velocity) != 3:
@@ -254,8 +184,6 @@ class MotionState3D:
             "motion state",
             *self.position,
             *self.velocity,
-            self.rangeDepth,
-            self.rangeVelocity,
             self.confidence,
             self.horizontalSizeRad,
             self.verticalSizeRad,
@@ -263,24 +191,17 @@ class MotionState3D:
             self.scaleUncertainty,
             self.reliability,
         )
-        if self.rangeUncertainty is not None:
-            _requireFinite("motion range uncertainty", self.rangeUncertainty)
         _requireCovariance2x2("centerCovarianceRad2", self.centerCovarianceRad2)
         _requireCovariance2x2("scaleCovarianceLog2", self.scaleCovarianceLog2)
-        if self.rangeVariance is not None:
-            _requireFinite("motion range variance", self.rangeVariance)
         if min(
-            self.rangeDepth,
             self.horizontalSizeRad,
             self.verticalSizeRad,
             self.angularUncertaintyRad,
             self.scaleUncertainty,
-            self.rangeUncertainty or 0.0,
             self.centerCovarianceRad2[0][0],
             self.centerCovarianceRad2[1][1],
             self.scaleCovarianceLog2[0][0],
             self.scaleCovarianceLog2[1][1],
-            self.rangeVariance or 0.0,
         ) < 0.0:
             raise ProtocolError("motion sizes and uncertainties must be non-negative")
         _requireProbability("motion confidence", self.confidence)
@@ -314,7 +235,6 @@ class TrackResult:
     confidence: float
     status: TrackStatus
     valid: bool
-    depthSummary: DepthSummary | None = None
     resultSource: ResultSource = ResultSource.OBSERVED_CONFIRMED
 
     def __post_init__(self) -> None:
@@ -343,11 +263,10 @@ class ViewSpec:
 
 @dataclass(frozen=True, slots=True)
 class LocalView:
-    """A perspective RGB crop and an optional synchronized depth crop."""
+    """A perspective RGB crop."""
 
     spec: ViewSpec
     rgb: NDArray[np.uint8]
-    depth: DepthPlane | None = None
 
     def __post_init__(self) -> None:
         expectedShape = (self.spec.outputHeightPx, self.spec.outputWidthPx)
@@ -357,8 +276,6 @@ class LocalView:
             raise ProtocolError(
                 f"local rgb shape must be {(*expectedShape, 3)}, actual={self.rgb.shape}"
             )
-        if self.depth is not None and self.depth.values.shape != expectedShape:
-            raise ProtocolError("local depth must align with the local rgb view")
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,9 +284,7 @@ class LocalObservation:
     bbox: BBoxXYWH
     modelScore: float
     appearanceScore: float
-    depthScore: float
     fusedScore: float
-    depthSummary: DepthSummary | None
     latencyNs: int
     appearanceProbability: float | None = None
 
@@ -379,7 +294,6 @@ class LocalObservation:
         for name, value in (
             ("modelScore", self.modelScore),
             ("appearanceScore", self.appearanceScore),
-            ("depthScore", self.depthScore),
             ("fusedScore", self.fusedScore),
         ):
             _requireProbability(name, value)
@@ -497,9 +411,7 @@ class ProjectedObservation:
     appearanceScore: float
     motionScore: float
     scaleScore: float
-    depthScore: float
     fusedScore: float
-    depthSummary: DepthSummary | None
     localBox: BBoxXYWH | None = None
     backendFusedScore: float | None = None
     appearanceProbability: float | None = None
@@ -520,7 +432,6 @@ class ProjectedObservation:
             ("appearanceScore", self.appearanceScore),
             ("motionScore", self.motionScore),
             ("scaleScore", self.scaleScore),
-            ("depthScore", self.depthScore),
             ("fusedScore", self.fusedScore),
             ("motionReliability", self.motionReliability),
         ):
@@ -551,7 +462,6 @@ class AirSim360Record:
     sequenceId: SequenceId
     frameIndex: FrameIndex
     rgbPath: str
-    depthPath: str | None
     semanticPath: str | None
     instancePath: str | None
 
@@ -580,7 +490,6 @@ class InitResponse:
     sequenceId: SequenceId
     frameIndex: FrameIndex
     stateRevision: int
-    depthSummary: DepthSummary | None
 
     def __post_init__(self) -> None:
         if not str(self.sequenceId) or int(self.frameIndex) < 0 or self.stateRevision < 0:
@@ -606,7 +515,6 @@ class InferResponse:
     frameIndex: FrameIndex
     stateRevision: int
     observations: tuple[LocalObservation, ...]
-    depthSummaries: dict[int, DepthSummary]
     transactionId: int = 0
     attemptIndex: int = 0
     recoveryEpochId: int = 0
@@ -617,8 +525,6 @@ class InferResponse:
         observationIds = tuple(observation.viewId for observation in self.observations)
         if len(observationIds) != len(set(observationIds)):
             raise ProtocolError("inference response observation viewIds must be unique")
-        if any(viewId < 0 for viewId in self.depthSummaries):
-            raise ProtocolError("inference response depth summary viewIds must be non-negative")
         if self.transactionId < 0 or self.attemptIndex < 0 or self.recoveryEpochId < 0:
             raise ProtocolError("inference response transaction identity must be non-negative")
 

@@ -6,9 +6,9 @@ import numpy as np
 
 from instatarget.controller import (
     DecisionGate,
-    DepthAwareTrackController,
     RecoveryPlanner,
     SphericalMotionEstimator,
+    TrackControllerImpl,
     scoreMotionConsistency,
 )
 from instatarget.controller.state_model import TrackMode
@@ -39,9 +39,7 @@ def _candidate(viewId: int, yawRad: float, score: float = 0.9) -> ProjectedObser
         appearanceScore=score,
         motionScore=score,
         scaleScore=score,
-        depthScore=0.0,
         fusedScore=score,
-        depthSummary=None,
         localBox=BBoxXYWH(80.0, 80.0, 30.0, 30.0),
     )
 
@@ -62,9 +60,7 @@ def _boxedCandidate(
         appearanceScore=score,
         motionScore=score,
         scaleScore=score,
-        depthScore=0.0,
         fusedScore=score,
-        depthSummary=None,
         localBox=BBoxXYWH(50.0, 50.0, 80.0, 80.0),
     )
 
@@ -85,9 +81,7 @@ def _scoredCandidate(
         appearanceScore=appearanceProbability,
         motionScore=singleScore,
         scaleScore=1.0,
-        depthScore=0.0,
         fusedScore=singleScore,
-        depthSummary=None,
         localBox=BBoxXYWH(50.0, 50.0, 40.0, 40.0),
         backendFusedScore=appearanceProbability,
         appearanceProbability=appearanceProbability,
@@ -103,7 +97,7 @@ class ControllerV2Test(unittest.TestCase):
         )
 
     def testDisjointCandidatesAreNotMergedIntoOneUnionBox(self) -> None:
-        gate = DecisionGate(DecisionGateConfig(0.25, 0.15, 0.10), self.config.tracking)
+        gate = DecisionGate(DecisionGateConfig(0.25, 0.15), self.config.tracking)
         aggregate = gate.aggregate(
             (_candidate(0, 0.0), _candidate(1, 2.2)),
             self.geometry,
@@ -123,9 +117,9 @@ class ControllerV2Test(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = TrackControllerImpl(self.geometry, self.config)
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
-        controller.commitInitialization(init, None)
+        controller.commitInitialization(init)
         frame1 = FramePacket(
             SequenceId("v2"),
             FrameIndex(1),
@@ -154,9 +148,9 @@ class ControllerV2Test(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = TrackControllerImpl(self.geometry, self.config)
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
-        controller.commitInitialization(init, None)
+        controller.commitInitialization(init)
         frame1 = FramePacket(
             SequenceId("cumulative-round2"),
             FrameIndex(1),
@@ -214,9 +208,9 @@ class ControllerV2Test(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = TrackControllerImpl(self.geometry, self.config)
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
-        controller.commitInitialization(init, None)
+        controller.commitInitialization(init)
 
         frame1 = FramePacket(
             SequenceId("cumulative-round3"),
@@ -239,9 +233,9 @@ class ControllerV2Test(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = TrackControllerImpl(self.geometry, self.config)
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
-        controller.commitInitialization(init, None)
+        controller.commitInitialization(init)
 
         frame1 = FramePacket(
             SequenceId("appearance-round3"),
@@ -288,26 +282,23 @@ class ControllerV2Test(unittest.TestCase):
 
     def testMotionHistoryContainsMeasurementsNotPredictions(self) -> None:
         estimator = SphericalMotionEstimator(windowLength=3)
-        estimator.initialize(makeSphericalPoint(math.pi - 0.05, 0.0), None, 0)
+        estimator.initialize(makeSphericalPoint(math.pi - 0.05, 0.0), 0)
         estimator.predict(500_000_000)
         self.assertEqual(len(estimator.samples), 1)
         estimator.update(
             makeSphericalPoint(-math.pi + 0.05, 0.0),
-            None,
             1_000_000_000,
             0.9,
         )
         self.assertEqual(len(estimator.samples), 2)
         prediction = estimator.predictDetailed(2_000_000_000)
         self.assertGreater(prediction.angularUncertaintyRad, 0.0)
-        self.assertIn("missing_depth", prediction.degradedReasons)
 
     def testMotionPredictionHasStableTangentBasisAtPole(self) -> None:
         estimator = SphericalMotionEstimator(windowLength=3)
-        estimator.initialize(makeSphericalPoint(0.0, math.pi / 2.0 - 0.10), None, 0)
+        estimator.initialize(makeSphericalPoint(0.0, math.pi / 2.0 - 0.10), 0)
         estimator.update(
             makeSphericalPoint(0.0, math.pi / 2.0),
-            None,
             1_000_000_000,
             0.9,
         )
@@ -320,7 +311,6 @@ class ControllerV2Test(unittest.TestCase):
         estimator = SphericalMotionEstimator(windowLength=3)
         estimator.resetFromMeasurement(
             makeSphericalPoint(0.0, 0.0),
-            None,
             0,
             0,
             1.0,
@@ -331,7 +321,6 @@ class ControllerV2Test(unittest.TestCase):
             frameIndex=1,
             timestampNs=1_000_000_000,
             point=makeSphericalPoint(0.0, 0.0),
-            depth=None,
             confidence=1.0,
             horizontalSizeRad=0.20,
             verticalSizeRad=0.40,
@@ -346,7 +335,6 @@ class ControllerV2Test(unittest.TestCase):
         estimator = SphericalMotionEstimator(windowLength=3, minSamplesForVelocity=2)
         estimator.resetFromMeasurement(
             makeSphericalPoint(0.0, 0.0),
-            None,
             0,
             0,
             1.0,
@@ -357,7 +345,6 @@ class ControllerV2Test(unittest.TestCase):
         prediction = estimator.predictDetailed(1_000_000_000)
         motionScore = scoreMotionConsistency(
             BFoV(makeSphericalPoint(0.0, 0.0), 0.40, 0.30),
-            None,
             prediction.motionState,
         )
 
@@ -375,13 +362,13 @@ class ControllerV2Test(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(
+        controller = TrackControllerImpl(
             self.geometry,
             self.config,
             motionEstimator=estimator,
         )
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
-        controller.commitInitialization(init, None)
+        controller.commitInitialization(init)
 
         frame1 = FramePacket(
             SequenceId("motion-bootstrap"),
@@ -411,7 +398,6 @@ class ControllerV2Test(unittest.TestCase):
         prediction = estimator.predictDetailed(frame2.timestampNs)
         motionScore = scoreMotionConsistency(
             BFoV(estimator.samples[-1].center, 0.35, 0.25),
-            None,
             prediction.motionState,
         )
 
@@ -521,9 +507,9 @@ class ControllerV2Test(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = TrackControllerImpl(self.geometry, self.config)
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
-        controller.commitInitialization(init, None)
+        controller.commitInitialization(init)
         frame1 = FramePacket(SequenceId("floor"), FrameIndex(1), 1_000_000_000, frame0.rgb)
         first = controller.beginFrame(frame1)
         lowPair = (_boxedCandidate(0, 0.0, 0.79), _boxedCandidate(1, 0.0, 0.79))
@@ -553,9 +539,9 @@ class ControllerV2Test(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = TrackControllerImpl(self.geometry, self.config)
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
-        controller.commitInitialization(init, None)
+        controller.commitInitialization(init)
         frame1 = FramePacket(SequenceId("overlap"), FrameIndex(1), 1_000_000_000, frame0.rgb)
         first = controller.beginFrame(frame1)
         pair = (_boxedCandidate(0, 0.0, 0.85), _boxedCandidate(1, 29.0, 0.85))
@@ -581,9 +567,9 @@ class ControllerV2Test(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = TrackControllerImpl(self.geometry, self.config)
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
-        controller.commitInitialization(init, None)
+        controller.commitInitialization(init)
 
         for frameIndex in range(1, 4):
             frame = FramePacket(
@@ -634,9 +620,9 @@ class ControllerV2Test(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = TrackControllerImpl(self.geometry, self.config)
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
-        controller.commitInitialization(init, None)
+        controller.commitInitialization(init)
         frame1 = FramePacket(
             SequenceId("wide-fusion"), FrameIndex(1), 1_000_000_000, frame0.rgb
         )
@@ -662,9 +648,9 @@ class ControllerV2Test(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = TrackControllerImpl(self.geometry, self.config)
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
-        controller.commitInitialization(init, None)
+        controller.commitInitialization(init)
         frame1 = FramePacket(
             SequenceId("seam-intersection"),
             FrameIndex(1),
@@ -692,9 +678,9 @@ class ControllerV2Test(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = TrackControllerImpl(self.geometry, self.config)
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
-        controller.commitInitialization(init, None)
+        controller.commitInitialization(init)
 
         frame1 = FramePacket(SequenceId("routes"), FrameIndex(1), 1_000_000_000, frame0.rgb)
         first = controller.beginFrame(frame1)
@@ -763,9 +749,9 @@ class ControllerV2Test(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = TrackControllerImpl(self.geometry, self.config)
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
-        controller.commitInitialization(init, None)
+        controller.commitInitialization(init)
         controller._mode = TrackMode.LOST
 
         frame1 = FramePacket(SequenceId("recover"), FrameIndex(1), 1_000_000_000, frame0.rgb)
@@ -797,9 +783,9 @@ class ControllerV2Test(unittest.TestCase):
             0,
             np.zeros((180, 360, 3), dtype=np.uint8),
         )
-        controller = DepthAwareTrackController(self.geometry, self.config)
+        controller = TrackControllerImpl(self.geometry, self.config)
         init = controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
-        controller.commitInitialization(init, None)
+        controller.commitInitialization(init)
 
         for frameIndex in range(1, 5):
             frame = FramePacket(

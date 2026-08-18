@@ -4,7 +4,7 @@ Visualization 只读取帧、视图、观测和结果生成诊断产物，不参
 
 | 文件 | 职责 |
 |---|---|
-| `recorder.py` | 四阶段中间产物 |
+| `recorder.py` | 三阶段中间产物 |
 | `result.py` | 最终 ERP 结果图 |
 | `image.py` | 框、标签和跨缝绘制 |
 | `instance_ids.py` | 实例分组与清单 |
