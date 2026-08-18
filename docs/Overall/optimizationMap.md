@@ -2,7 +2,7 @@
 
 ## 想提高找回率
 
-先检查 Controller 的视域覆盖和 StateEvaluator，而不是直接放大 HiT 框。相关文档是 `Controller/viewPlanning.md`、`Controller/stateEvaluator.md` 和 `Controller/stateMachine.md`。当前有效门限是 `tracking.candidateMinScore` 与 `evaluator.fusionSourceMinConfidence`；Fusor overlap 固定为代码常量 0.70。视图预算为 TRACKING 8、UNCERTAIN 8、LOST 10，当前没有单独的 UNCERTAIN patience 参数。
+先检查 Controller 的视域覆盖和 StateEvaluator，而不是直接放大 HiT 框。相关文档是 `Controller/viewPlanning.md`、`Controller/stateEvaluator.md` 和 `Controller/stateMachine.md`。当前有效门限是 `tracking.candidateMinScore` 与 `evaluator.fusionSourceMinConfidence`；Fusor overlap 固定为代码常量 0.70，三种状态统一使用上一可信框面积驱动的自适应裁剪。视图预算为 TRACKING 8、UNCERTAIN 8、LOST 10，当前没有单独的 UNCERTAIN patience 参数。
 
 ## 想降低误检
 

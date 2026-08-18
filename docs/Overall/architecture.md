@@ -8,7 +8,7 @@
 2. Controller 产生若干 `ViewSpec`，每个 ViewSpec 描述球面中心、水平/垂直 FOV 和输出尺寸。
 3. Geometry 将 ViewSpec 裁成 `LocalView`，HiT 在局部透视平面中产生 `LocalObservation`。
 4. Geometry 将局部框边界一次投影到球面，同时拟合紧致 BFoV 和直接 ERP bbox；Runtime 再附加外观概率、运动概率、SingleScore 和投影质量，形成 `ProjectedObservation`。
-5. Controller 只在统一的 ERP/球面语义中比较候选，并且只使用 `singleScore` 排序和融合。
+5. Controller 只在统一的 ERP/球面语义中比较候选，并且只使用 `singleScore` 排序和融合；三种状态的最佳融合框都以上一可信框面积执行同一套自适应裁剪。
 
 最终的 `TrackResult` 同时携带 ERP `bbox` 和球面 `bfov`，使本地评估与比赛提交共用同一次跟踪结果。
 

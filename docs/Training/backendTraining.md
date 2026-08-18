@@ -6,7 +6,7 @@
 
 ## 建议的数据对
 
-从同一目标的可靠帧构造 template/search 对。template 应来自较稳定、遮挡较少帧；search 应覆盖运动、尺度、透视边缘和经线跨越。局部裁剪必须调用生产 Geometry，并保持 120 度搜索视域策略或明确训练不同 FOV 的目的。
+从同一目标的可靠帧构造 template/search 对。template 应来自较稳定、遮挡较少帧；search 应覆盖运动、尺度、透视边缘和经线跨越。局部裁剪必须调用生产 Geometry，并覆盖 TRACKING 的 30°–120°动态 Type1 与 UNCERTAIN/LOST 的固定 120°视域；若训练分布刻意不同，必须明确目的并单独验证。
 
 ## 建议损失组成
 

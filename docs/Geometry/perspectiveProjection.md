@@ -16,7 +16,7 @@ ERP 浮点坐标的左右邻居在水平轴取模，上下邻居在有效 y 范�
 
 ## 尺寸与畸变
 
-`viewWidthPx/viewHeightPx` 决定 HiT 输入细节与计算量，FOV 决定角覆盖。固定 120 度投影在边缘有明显透视拉伸，这是扩大目标可见率的代价；优化时应比较中心区与边缘区召回，而不是只看平均分辨率。
+`viewWidthPx/viewHeightPx` 决定 HiT 输入细节与计算量，FOV 决定角覆盖。UNCERTAIN/LOST 使用的固定 120°投影在边缘有明显透视拉伸，这是扩大目标可见率的代价；TRACKING 的 Type1 会随预测目标角尺寸在 30°–120°之间变化。优化时应按状态和实际 FOV 比较中心区与边缘区召回，而不是只看平均分辨率。
 
 局部候选同时记录 `normalizedRadius` 和 `edgeMargin`。它们当前用于诊断和可视化，不直接修改 SingleScore；后续若加入窄 FOV refinement，应优先用这些稳定字段触发，而不是按某帧候选临时归一化。
 

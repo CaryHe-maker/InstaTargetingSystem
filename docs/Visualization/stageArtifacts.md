@@ -4,7 +4,7 @@
 
 ## local_rgb
 
-保存 Geometry 实际送入 HiT 的局部 RGB。用于检查视域中心、120 度覆盖、透视拉伸和目标是否出现。若此处没有目标，后端低分通常不是模型问题。
+保存 Geometry 实际送入 HiT 的局部 RGB。用于检查视域中心、实际 FOV 覆盖、透视拉伸和目标是否出现；TRACKING 为 30°–120°动态 Type1，UNCERTAIN/LOST 使用固定 120°视图。若此处没有目标，后端低分通常不是模型问题。
 
 ## depth_rgb
 

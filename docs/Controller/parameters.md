@@ -47,6 +47,8 @@
 
 Fusor 的置信度常量位于 `controller/fusor.py`：`FUSION_AGREEMENT_BONUS_WEIGHT=0.15` 控制 IoU 一致性奖励，`FUSION_MAX_SCORE_GAIN=0.03` 限制融合分数相对最高来源的增益，`FUSION_SCORE_CAP=0.99` 是融合分数硬上限。这三个常量当前不进入 YAML 配置。
 
+融合框几何也不由 YAML 或状态参数选择。三种状态都使用 `REFERENCE_ADAPTIVE`：Controller 传入上一可信 ERP 框面积，Fusor 在最大交叉框、居中放大交叉框与最小合并框之间按面积关系裁剪。参考面积不小于合并框时直接返回合并框，不放大。
+
 ## 回退包络和兼容参数
 
 | 参数 | 当前值 | 状态 |
@@ -57,7 +59,7 @@ Fusor 的置信度常量位于 `controller/fusor.py`：`FUSION_AGREEMENT_BONUS_W
 | `tracking.scaleClusterTolerance` | 0.50 | 旧尺度聚类容差 |
 | `tracking.guardYawStepDeg` | 120 | 旧 guard 视图步长 |
 | `tracking.minViewsForCommit` | 2 | 旧聚合最少视图数 |
-| `tracking.uncertainFovScale` | 1.25 | 当前固定 120 度搜索不使用 |
+| `tracking.uncertainFovScale` | 1.25 | schema 兼容；UNCERTAIN 直接固定为 120°，当前不读取此倍率 |
 
 除 `candidateMinScore` 外，本节其余 tracking 字段为回退包络或旧聚合兼容项。RecoveryConfig 中的 `maxViewsPerFrame=12`、`globalSearchInterval=5`、`ringRadii=[1,1.75,2.5]`、`viewsPerRing=[4,8,12]`、`cubeMapOverlapRatio=0.10`、`maxCoveredCells=256` 保留恢复内存/旧环搜配置；当前实际 LOST 路径固定生成 6 张旋转 cubemap 加 4 张 Type1（10 张），不运行环搜。`decisionGate.*` 也只受 schema 校验，生产 StateEvaluator 会忽略整组配置。
 

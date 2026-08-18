@@ -10,7 +10,7 @@ BFoV 是球面相机视域：中心 SphericalPoint、水平/垂直 FOV 和 roll�
 
 ## ViewSpec
 
-ViewSpec 在 BFoV 之外增加 viewId 和局部输出宽高，是一次实际裁剪请求。当前搜索视图固定 120×120 度、256×256 像素；模板初始化视图同样通过 ViewSpec 表达。
+ViewSpec 在 BFoV 之外增加 viewId 和局部输出宽高，是一次实际裁剪请求。当前局部输出固定为 256×256 像素，但搜索 FOV 由状态决定：TRACKING 的 Type1 按预测目标角尺寸在每个轴上取 3 倍并限制到 30°–120°，UNCERTAIN 的 Type1 和 LOST 的 cubemap/Type1 固定为 120°×120°。模板初始化视图同样通过 ViewSpec 表达。
 
 ## LocalView
 

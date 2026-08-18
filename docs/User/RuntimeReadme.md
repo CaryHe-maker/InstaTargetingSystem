@@ -18,6 +18,8 @@
 
 同一轮视图会作为一个 tensor batch 推理：TRACKING 为 4+4 两轮，UNCERTAIN 为 4+4 两轮，LOST 为单轮 10 张。RGB-D 每轮先执行 RGB batch，再执行 depth batch；第二轮依赖第一轮 Fusor 中心，因此不能与第一轮合并。
 
+三种状态使用同一个 Fuse 输出规则：以上一可信框面积为参考，在最大交叉框和最小合并框之间自适应裁剪；参考面积不小于合并框时直接输出合并框，不进行额外放大。
+
 ## Docker
 
 Dockerfile 使用 `pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime`，复制经过 `.dockerignore` 筛选的比赛源码、RGB-only 配置、内置 HiT 运行时、权重和 `track.py`。容器通过 `DATASET_DIR`、`RESULT_DIR`、`CONFIG_PATH` 和 `HIT_ROOT` 指定输入、输出、配置和模型源。
