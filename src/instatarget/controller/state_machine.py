@@ -34,6 +34,8 @@ class TrackStateMachine:
         self._scoreGroup = ScoreGroup()
         self._uncertainFrames = 0
         self._recoveryFrames = 0
+        self._lostFailureCount = 0
+        self._lostCounterFreezeFrames = 0
 
     @property
     def status(self) -> TrackStatus | None:
@@ -59,6 +61,8 @@ class TrackStateMachine:
         self._scoreGroup = ScoreGroup()
         self._uncertainFrames = 0
         self._recoveryFrames = 0
+        self._lostFailureCount = 0
+        self._lostCounterFreezeFrames = 0
         return StateUpdate(TrackStatus.TRACKING, 0, 0, True, False, TransitionReason.INITIALIZED)
 
     def transition(
@@ -105,15 +109,48 @@ class TrackStateMachine:
                 if nextMode is TrackMode.UNCERTAIN
                 else TransitionReason.HARD_MISS
             )
+        action = "COMMIT"
+        if mode is TrackMode.LOST:
+            self._lostFailureCount = 0
+            self._consumeLostCounterFreeze()
+        elif nextMode is TrackMode.LOST:
+            if self._lostCounterFreezeFrames > 0:
+                self._consumeLostCounterFreeze()
+                nextMode = TrackMode.UNCERTAIN
+                reason = TransitionReason.WEAK_MEASUREMENT
+            elif self._lostFailureCount == 0:
+                self._lostFailureCount = 1
+                nextMode = TrackMode.UNCERTAIN
+                reason = TransitionReason.WEAK_MEASUREMENT
+                action = "DEFER_LOST"
+            else:
+                self._lostFailureCount = 0
+                nextMode = TrackMode.UNCERTAIN
+                action = "ROLLBACK_LOST"
+        else:
+            self._lostFailureCount = 0
+            self._consumeLostCounterFreeze()
+
         reset = mode is TrackMode.LOST and measurementAccepted
         return TransitionDecision(
-            "COMMIT",
+            action,
             nextMode,
             reason,
             measurementAccepted,
             resetMotionHistory=reset,
             resetRecoveryEpoch=reset,
         )
+
+    def beginLostReplay(self, freezeFrames: int = 2) -> None:
+        """Reset failure patience while replaying the two invalidated frames."""
+        if freezeFrames < 0:
+            raise ValueError("freezeFrames must be non-negative")
+        self._lostFailureCount = 0
+        self._lostCounterFreezeFrames = freezeFrames
+
+    def _consumeLostCounterFreeze(self) -> None:
+        if self._lostCounterFreezeFrames > 0:
+            self._lostCounterFreezeFrames -= 1
 
     def recordScore(self, stateScore: float) -> None:
         self._scoreGroup.append(stateScore)

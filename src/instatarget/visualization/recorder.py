@@ -32,13 +32,17 @@ class VisualizationRecorder:
         self,
         frame: FramePacket,
         views: Sequence[LocalView],
+        *,
+        passIndex: int = 1,
     ) -> tuple[Path, ...]:
         """Write the raw RGB crop for each local view."""
         if not self._active(LOCAL_RGB_STAGE):
             return ()
         _requireUniqueViewIds(views)
         return tuple(
-            writeRgbPng(self._artifactPath(frame, LOCAL_RGB_STAGE, view.spec.viewId), view.rgb)
+            writeRgbPng(
+                self._artifactPath(frame, LOCAL_RGB_STAGE, view.spec.viewId, passIndex), view.rgb
+            )
             for view in views
         )
 
@@ -46,13 +50,15 @@ class VisualizationRecorder:
         self,
         frame: FramePacket,
         depthRgbByViewId: Mapping[int, NDArray[np.uint8]],
+        *,
+        passIndex: int = 1,
     ) -> tuple[Path, ...]:
         """Write already-converted depth RGB images without transforming them."""
         if not self._active(DEPTH_RGB_STAGE):
             return ()
         _requireViewIds(depthRgbByViewId)
         return tuple(
-            writeRgbPng(self._artifactPath(frame, DEPTH_RGB_STAGE, viewId), depthRgb)
+            writeRgbPng(self._artifactPath(frame, DEPTH_RGB_STAGE, viewId, passIndex), depthRgb)
             for viewId, depthRgb in sorted(depthRgbByViewId.items())
         )
 
@@ -61,6 +67,8 @@ class VisualizationRecorder:
         frame: FramePacket,
         views: Sequence[LocalView],
         observations: Sequence[LocalObservation],
+        *,
+        passIndex: int = 1,
     ) -> tuple[Path, ...]:
         """Write each backend-local target box over its source local RGB view."""
         if not self._active(BACKEND_BOX_STAGE):
@@ -80,7 +88,9 @@ class VisualizationRecorder:
             )
             artifacts.append(
                 writeRgbPng(
-                    self._artifactPath(frame, BACKEND_BOX_STAGE, observation.viewId),
+                    self._artifactPath(
+                        frame, BACKEND_BOX_STAGE, observation.viewId, passIndex
+                    ),
                     annotatedRgb,
                 )
             )
@@ -90,6 +100,8 @@ class VisualizationRecorder:
         self,
         frame: FramePacket,
         observations: Sequence[ProjectedObservation],
+        *,
+        passIndex: int = 1,
     ) -> tuple[Path, ...]:
         """Write each geometry-projected target box over the original ERP RGB frame."""
         if not self._active(GEOMETRY_BOX_STAGE):
@@ -97,7 +109,9 @@ class VisualizationRecorder:
         _requireUniqueObservationIds(observations)
         return tuple(
             writeRgbPng(
-                self._artifactPath(frame, GEOMETRY_BOX_STAGE, observation.viewId),
+                self._artifactPath(
+                    frame, GEOMETRY_BOX_STAGE, observation.viewId, passIndex
+                ),
                 drawBoxRgb(
                     frame.rgb,
                     observation.bbox,
@@ -116,14 +130,21 @@ class VisualizationRecorder:
     def _active(self, stage: str) -> bool:
         return self.config.enabled and stage in self.config.stages
 
-    def _artifactPath(self, frame: FramePacket, stage: str, viewId: int) -> Path:
+    def _artifactPath(
+        self, frame: FramePacket, stage: str, viewId: int, passIndex: int = 1
+    ) -> Path:
+        if passIndex < 1:
+            raise ValueError("passIndex must be positive")
         sequenceName = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(frame.sequenceId)).strip("._")
         if not sequenceName:
             sequenceName = "sequence"
+        frameName = f"frame_{int(frame.frameIndex):06d}"
+        if passIndex > 1:
+            frameName += f"_{passIndex}"
         return (
             self.config.outputRoot
             / sequenceName
-            / f"frame_{int(frame.frameIndex):06d}"
+            / frameName
             / stage
             / f"view_{viewId:04d}.png"
         )

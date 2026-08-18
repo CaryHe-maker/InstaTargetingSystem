@@ -23,8 +23,12 @@ class ResultVisualizationRecorder:
         *,
         stateScore: float | None = None,
         roundCount: int | None = None,
+        passIndex: int = 1,
     ) -> Path:
-        outputPath = self.outputRoot / f"frame_{int(frame.frameIndex):06d}.png"
+        if passIndex < 1:
+            raise ValueError("passIndex must be positive")
+        suffix = "" if passIndex == 1 else f"_{passIndex}"
+        outputPath = self.outputRoot / f"frame_{int(frame.frameIndex):06d}{suffix}.png"
         scoreLabel = "stateScore=N/A" if stateScore is None else f"stateScore={stateScore:.4f}"
         roundsLabel = "rounds=N/A" if roundCount is None else f"rounds={roundCount}"
         label = f"state={result.status.name}/{roundsLabel}/{scoreLabel}"

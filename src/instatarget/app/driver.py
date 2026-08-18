@@ -28,6 +28,7 @@ from instatarget.core.types import (
     LocalView,
     MotionState3D,
     ProjectedObservation,
+    TrackResult,
 )
 from instatarget.geometry import SphericalGeometryImpl
 from instatarget.io.result_sink import FileResultSink
@@ -56,6 +57,22 @@ class RuntimeBundle:
     sink: ResultSinkProtocol
     depthProcessor: DepthProcessor | None = None
     recorder: VisualizationRecorder | None = None
+
+
+@dataclass(slots=True)
+class _ProcessedFrame:
+    frame: FramePacket
+    result: TrackResult
+    visualizationBatches: list[
+        tuple[
+            tuple[LocalView, ...],
+            tuple[LocalObservation, ...],
+            tuple[ProjectedObservation, ...],
+        ]
+    ]
+    stateScore: float | None
+    roundCount: int | None
+    passIndex: int
 
 
 def buildRuntime(
@@ -135,73 +152,71 @@ def runTracking(
                     frame0, {0: depthProcessor.preprocess(frame0.depth).depthRgb}
                 )
 
+        pendingResults: list[_ProcessedFrame] = []
+        passCounts: dict[int, int] = {}
+
         while True:
             _startProcessing(processingTimer)
+            framesForVisualization: list[_ProcessedFrame] = []
             try:
                 frame = source.read()
                 if frame is not None:
-                    plan = controller.beginFrame(frame)
-                    visualizationBatches: list[
-                        tuple[
-                            tuple[LocalView, ...],
-                            tuple[LocalObservation, ...],
-                            tuple[ProjectedObservation, ...],
-                        ]
-                    ] = []
-                    while True:
-                        views = tuple(geometry.cropViews(frame, plan.views))
-                        rawObservations = tuple(backend.infer(views, plan.templateCommand))
-                        observations = calibrateLocalAppearanceProbabilities(rawObservations)
-                        projected = tuple(
-                            _projectObservation(
-                                frame=frame,
-                                view=view,
-                                observation=observation,
-                                predictedMotion=plan.predictedMotion,
-                                geometry=geometry,
+                    processed = _processFrame(frame, geometry, controller, backend, passCounts)
+                    framesForVisualization.append(processed)
+                    pendingResults.append(processed)
+                    while controller.rollbackRequestedFrameIndex is not None:
+                        rollbackFrameIndex = controller.rollbackForLostReplay()
+                        try:
+                            replayStart = next(
+                                index
+                                for index, item in enumerate(pendingResults)
+                                if int(item.frame.frameIndex) == rollbackFrameIndex
                             )
-                            for view, observation in zip(views, observations, strict=True)
-                        )
-                        visualizationBatches.append((views, observations, projected))
-                        step = controller.consume(plan, projected)
-                        if isinstance(step, MoreViewsRequired):
-                            plan = step.plan
-                            continue
-                        result = step.result
-                        break
+                        except StopIteration as error:
+                            raise DecodeError(
+                                f"LOST replay frame is not buffered: {rollbackFrameIndex}"
+                            ) from error
+                        replayFrames = [item.frame for item in pendingResults[replayStart:]]
+                        pendingResults = pendingResults[:replayStart]
+                        for replayFrame in replayFrames:
+                            replayed = _processFrame(
+                                replayFrame, geometry, controller, backend, passCounts
+                            )
+                            framesForVisualization.append(replayed)
+                            pendingResults.append(replayed)
             finally:
                 _stopProcessing(processingTimer)
             if frame is None:
                 break
             if recorder is not None:
-                if depthProcessor is not None and frame.depth is not None:
-                    depthRgb = depthProcessor.preprocess(frame.depth).depthRgb
-                    recorder.recordDepthRgb(frame, {0: depthRgb})
-                for views, observations, projected in visualizationBatches:
-                    recorder.recordLocalRgb(frame, views)
-                    recorder.recordBackendBoxes(frame, views, observations)
-                    recorder.recordGeometryBoxes(frame, projected)
-            sink.write(result)
+                for item in framesForVisualization:
+                    if depthProcessor is not None and item.frame.depth is not None:
+                        depthRgb = depthProcessor.preprocess(item.frame.depth).depthRgb
+                        recorder.recordDepthRgb(
+                            item.frame, {0: depthRgb}, passIndex=item.passIndex
+                        )
+                    for views, observations, projected in item.visualizationBatches:
+                        recorder.recordLocalRgb(item.frame, views, passIndex=item.passIndex)
+                        recorder.recordBackendBoxes(
+                            item.frame, views, observations, passIndex=item.passIndex
+                        )
+                        recorder.recordGeometryBoxes(
+                            item.frame, projected, passIndex=item.passIndex
+                        )
             if resultRecorder is not None:
-                stateObservation = controller.lastStateObservation
-                stateScore = (
-                    stateObservation.stateScore
-                    if stateObservation is not None
-                    and stateObservation.frameIndex == frame.frameIndex
-                    else None
-                )
-                roundCount = (
-                    stateObservation.attemptIndex + 1
-                    if stateObservation is not None
-                    and stateObservation.frameIndex == frame.frameIndex
-                    else None
-                )
-                resultRecorder.record(
-                    frame,
-                    result,
-                    stateScore=stateScore,
-                    roundCount=roundCount,
-                )
+                for item in framesForVisualization:
+                    resultRecorder.record(
+                        item.frame,
+                        item.result,
+                        stateScore=item.stateScore,
+                        roundCount=item.roundCount,
+                        passIndex=item.passIndex,
+                    )
+            while len(pendingResults) > 2:
+                sink.write(pendingResults.pop(0).result)
+                resultCount += 1
+        while pendingResults:
+            sink.write(pendingResults.pop(0).result)
             resultCount += 1
         return resultCount
     except Exception:
@@ -215,6 +230,61 @@ def runTracking(
 
 def finalizeSink(sink: ResultSinkProtocol, expectedFrameCount: int) -> None:
     sink.finalize(expectedFrameCount)
+
+
+def _processFrame(
+    frame: FramePacket,
+    geometry: SphericalGeometry,
+    controller: DepthAwareTrackController,
+    backend: TrackerBackend,
+    passCounts: dict[int, int],
+) -> _ProcessedFrame:
+    frameIndex = int(frame.frameIndex)
+    passCounts[frameIndex] = passCounts.get(frameIndex, 0) + 1
+    plan = controller.beginFrame(frame)
+    visualizationBatches: list[
+        tuple[tuple[LocalView, ...], tuple[LocalObservation, ...], tuple[ProjectedObservation, ...]]
+    ] = []
+    while True:
+        views = tuple(geometry.cropViews(frame, plan.views))
+        rawObservations = tuple(backend.infer(views, plan.templateCommand))
+        observations = calibrateLocalAppearanceProbabilities(rawObservations)
+        projected = tuple(
+            _projectObservation(
+                frame=frame,
+                view=view,
+                observation=observation,
+                predictedMotion=plan.predictedMotion,
+                geometry=geometry,
+            )
+            for view, observation in zip(views, observations, strict=True)
+        )
+        visualizationBatches.append((views, observations, projected))
+        step = controller.consume(plan, projected)
+        if isinstance(step, MoreViewsRequired):
+            plan = step.plan
+            continue
+        result = step.result
+        break
+    stateObservation = controller.lastStateObservation
+    stateScore = (
+        stateObservation.stateScore
+        if stateObservation is not None and stateObservation.frameIndex == frame.frameIndex
+        else None
+    )
+    roundCount = (
+        stateObservation.attemptIndex + 1
+        if stateObservation is not None and stateObservation.frameIndex == frame.frameIndex
+        else None
+    )
+    return _ProcessedFrame(
+        frame=frame,
+        result=result,
+        visualizationBatches=visualizationBatches,
+        stateScore=stateScore,
+        roundCount=roundCount,
+        passIndex=passCounts[frameIndex],
+    )
 
 
 def openSink(sink: ResultSinkProtocol, destination: str) -> None:

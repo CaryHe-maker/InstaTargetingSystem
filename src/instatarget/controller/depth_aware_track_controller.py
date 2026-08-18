@@ -74,6 +74,12 @@ class _PlannedAttempt:
     viewsById: dict[int, PlannedView]
 
 
+@dataclass(frozen=True, slots=True)
+class _ControllerSnapshot:
+    frameIndex: int
+    state: dict[str, object]
+
+
 class DepthAwareTrackController(TrackController):
     """Single-writer controller with bounded same-frame escalation and atomic commit."""
 
@@ -148,6 +154,9 @@ class DepthAwareTrackController(TrackController):
         self._initialPlan: InitializationPlan | None = None
         self._lastStateObservation: StateObservation | None = None
         self._lastTransition: TransitionDecision | None = None
+        self._rollbackSnapshots: dict[int, _ControllerSnapshot] = {}
+        self._firstLostFailureFrameIndex: int | None = None
+        self._rollbackRequestedFrameIndex: int | None = None
 
     @property
     def status(self) -> TrackStatus | None:
@@ -166,6 +175,42 @@ class DepthAwareTrackController(TrackController):
     @property
     def lastTransition(self) -> TransitionDecision | None:
         return self._lastTransition
+
+    @property
+    def rollbackRequestedFrameIndex(self) -> int | None:
+        return self._rollbackRequestedFrameIndex
+
+    def rollbackForLostReplay(self) -> int:
+        frameIndex = self._rollbackRequestedFrameIndex
+        if frameIndex is None:
+            raise ProtocolError("no LOST replay has been requested")
+        try:
+            snapshot = self._rollbackSnapshots[frameIndex]
+        except KeyError as error:
+            raise ProtocolError("LOST replay snapshot is no longer available") from error
+
+        backendRevision = self._backendRevision
+        transactionId = self._transactionId
+        stateId = self._stateId
+        for name, value in snapshot.state.items():
+            setattr(self, name, value if name == "_lastFrame" else deepcopy(value))
+        self._backendRevision = backendRevision
+        self._transactionId = transactionId
+        self._stateId = stateId
+        self._mode = TrackMode.UNCERTAIN
+        self._entryReason = TransitionReason.HARD_MISS
+        self._modeAgeFrames = 0
+        self._stableFrames = 0
+        self._weakFrames = 0
+        self._recoveryFrames = 0
+        self._recovery.reset(FrameIndex(frameIndex))
+        self._stateMachine.beginLostReplay(2)
+        self._firstLostFailureFrameIndex = None
+        self._rollbackRequestedFrameIndex = None
+        self._rollbackSnapshots = {
+            index: saved for index, saved in self._rollbackSnapshots.items() if index < frameIndex
+        }
+        return frameIndex
 
     def buildInitialization(self, frame: FramePacket, initialBox: BBoxXYWH) -> InitializationPlan:
         if self._initialized or self._initialPlan is not None:
@@ -247,9 +292,12 @@ class DepthAwareTrackController(TrackController):
 
     def plan(self, frame: FramePacket) -> SearchPlan:
         self._requireInitialized()
+        if self._rollbackRequestedFrameIndex is not None:
+            raise ProtocolError("pending LOST replay must be handled before planning a new frame")
         if self._planned is not None or self._transaction is not None:
             raise ProtocolError("a frame transaction is already awaiting update")
         self._requireFrameOrder(frame)
+        self._saveRollbackSnapshot(int(frame.frameIndex))
         if self._currentBox is None or self._currentBfov is None:
             raise ProtocolError("controller target state is incomplete")
         prediction = self._predictDetailed(frame)
@@ -404,11 +452,57 @@ class DepthAwareTrackController(TrackController):
             evaluation.stateScore,
             measurementAccepted=evaluation.measurementAccepted,
         )
+        if decision.action == "DEFER_LOST":
+            self._firstLostFailureFrameIndex = int(planned.frame.frameIndex)
+        elif decision.action == "ROLLBACK_LOST":
+            self._rollbackRequestedFrameIndex = (
+                self._firstLostFailureFrameIndex or int(planned.frame.frameIndex) - 1
+            )
+            self._firstLostFailureFrameIndex = None
+        else:
+            self._firstLostFailureFrameIndex = None
         result = self._commit(planned, evaluation, decision)
         self._stateMachine.recordScore(evaluation.stateScore)
         self._lastStateObservation = evaluation
         self._lastTransition = decision
         return FrameCommitted(result)
+
+    def _saveRollbackSnapshot(self, frameIndex: int) -> None:
+        fields = (
+            "_lastFrameIndex",
+            "_stateRevision",
+            "_mode",
+            "_entryReason",
+            "_modeAgeFrames",
+            "_weakFrames",
+            "_recoveryFrames",
+            "_stableFrames",
+            "_reacquireCooldown",
+            "_lastFrame",
+            "_currentBox",
+            "_currentBfov",
+            "_currentDepth",
+            "_pendingTemplate",
+            "_planned",
+            "_transaction",
+            "_lastStateObservation",
+            "_lastTransition",
+            "_motion",
+            "_stateMachine",
+            "_recovery",
+            "_firstLostFailureFrameIndex",
+            "_rollbackRequestedFrameIndex",
+        )
+        state = {
+            name: getattr(self, name) if name == "_lastFrame" else deepcopy(getattr(self, name))
+            for name in fields
+        }
+        self._rollbackSnapshots[frameIndex] = _ControllerSnapshot(frameIndex, state)
+        self._rollbackSnapshots = {
+            index: snapshot
+            for index, snapshot in self._rollbackSnapshots.items()
+            if index >= frameIndex - 2
+        }
 
     def _buildAttempt(
         self,
