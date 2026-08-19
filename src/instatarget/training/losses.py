@@ -51,7 +51,8 @@ def computeTrainingLoss(
         giou = alignedGeneralizedBoxIou(positivePred, positiveTarget)
         giouLoss = _weightedMean(1.0 - giou, positiveWeights)
         qualityTargets = torch.zeros_like(qualityLogit)
-        qualityTargets[present] = alignedBoxIou(positivePred, positiveTarget).detach()
+        positiveIou = alignedBoxIou(positivePred, positiveTarget).detach()
+        qualityTargets[present] = positiveIou.to(qualityTargets)
     else:
         zero = predBoxes.sum() * 0.0
         l1Loss = zero

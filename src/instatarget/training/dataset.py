@@ -29,6 +29,7 @@ from instatarget.data.registry import DatasetSource, openDataset
 from instatarget.geometry.projection_math import (
     cameraBasis,
     erpPixelToSphericalPoint,
+    localPixelsToUnitVectors,
     makeSphericalPoint,
 )
 from instatarget.geometry.spherical_geometry import SphericalGeometryImpl
@@ -67,6 +68,7 @@ class ManifestRecord:
     labelSource: str
     labelQuality: float
     split: str
+    bfov: BFoV | None = None
     difficultType: str = "normal"
 
     def __post_init__(self) -> None:
@@ -80,8 +82,12 @@ class ManifestRecord:
             raise ConfigError("manifest labelSource must be non-empty")
         if not 0.0 <= self.labelQuality <= 1.0:
             raise ConfigError("manifest labelQuality must be in [0, 1]")
-        if self.visible and self.bbox is None:
-            raise ConfigError("visible manifest records require a bbox")
+        if self.visible and self.bbox is None and self.bfov is None:
+            raise ConfigError("visible manifest records require a bbox or BFoV")
+        if self.visible and self.labelSource == "official_bfov" and self.bfov is None:
+            raise ConfigError(
+                "official BFoV record is missing its original BFoV; rebuild the manifest"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,7 +257,7 @@ class ManifestPairDataset:
                 if item.visible
                 and not item.occluded
                 and not item.truncated
-                and item.bbox is not None
+                and (item.bbox is not None or item.bfov is not None)
             )
             for key, items in self._groups.items()
         }
@@ -287,11 +293,7 @@ class ManifestPairDataset:
         decoder = self._getDecoder()
         templateFrame = decoder.read(templateRecord)
         searchFrame = decoder.read(searchRecord)
-        assert templateRecord.bbox is not None
-
-        templateBfov = self._geometry.bboxToBfov(
-            templateRecord.bbox, templateRecord.width, templateRecord.height
-        )
+        templateBfov = _recordBfov(templateRecord, self._geometry)
         templateSpec = _contextSpec(
             0,
             templateBfov,
@@ -302,12 +304,11 @@ class ManifestPairDataset:
         templateRgb = self._geometry.cropViews(templateFrame, (templateSpec,))[0].rgb
 
         forcedNegative = bool(rng.random() < self.config.negativeSampleRatio)
-        isPositive = searchRecord.visible and searchRecord.bbox is not None and not forcedNegative
+        hasTargetGeometry = searchRecord.bfov is not None or searchRecord.bbox is not None
+        isPositive = searchRecord.visible and hasTargetGeometry and not forcedNegative
         targetBfov = (
-            self._geometry.bboxToBfov(
-                searchRecord.bbox, searchRecord.width, searchRecord.height
-            )
-            if searchRecord.bbox is not None
+            _recordBfov(searchRecord, self._geometry)
+            if hasTargetGeometry
             else templateBfov
         )
         fovDeg = float(rng.uniform(self.config.minFovDeg, self.config.maxFovDeg))
@@ -343,13 +344,17 @@ class ManifestPairDataset:
             templateRgb = self.augmenter(templateRgb, rng)
             searchRgb = self.augmenter(searchRgb, rng)
         localBox = (
-            _erpBoxToNormalizedLocal(
-                searchRecord.bbox,
-                searchSpec,
-                searchRecord.width,
-                searchRecord.height,
+            (
+                _bfovToNormalizedLocal(searchRecord.bfov, searchSpec)
+                if searchRecord.bfov is not None
+                else _erpBoxToNormalizedLocal(
+                    searchRecord.bbox,
+                    searchSpec,
+                    searchRecord.width,
+                    searchRecord.height,
+                )
             )
-            if isPositive and searchRecord.bbox is not None
+            if isPositive
             else None
         )
         present = localBox is not None
@@ -419,6 +424,30 @@ def _parseRecord(raw: Mapping[str, Any], root: Path) -> ManifestRecord:
         if len(values) != 4:
             raise ConfigError("manifest bbox must contain four values")
         bbox = BBoxXYWH(*(float(value) for value in values))
+    bfovRaw = raw.get("bfov")
+    if isinstance(bfovRaw, str):
+        bfovRaw = json.loads(bfovRaw) if bfovRaw.strip() else None
+    bfov = None
+    if bfovRaw is not None:
+        if isinstance(bfovRaw, Mapping):
+            bfovValues = [
+                bfovRaw[name]
+                for name in ("yawDeg", "pitchDeg", "horizontalFovDeg", "verticalFovDeg")
+            ]
+        elif isinstance(bfovRaw, Sequence) and not isinstance(bfovRaw, (str, bytes)):
+            bfovValues = list(bfovRaw)
+        else:
+            raise ConfigError("manifest bfov must be null, four degrees, or a mapping")
+        if len(bfovValues) != 4:
+            raise ConfigError("manifest bfov must contain four degree values")
+        yawDeg, pitchDeg, horizontalDeg, verticalDeg = (
+            float(value) for value in bfovValues
+        )
+        bfov = BFoV(
+            center=makeSphericalPoint(yawDeg * pi / 180.0, pitchDeg * pi / 180.0),
+            horizontalFovRad=horizontalDeg * pi / 180.0,
+            verticalFovRad=verticalDeg * pi / 180.0,
+        )
     return ManifestRecord(
         sequenceId=str(raw["sequenceId"]),
         videoPath=videoPath,
@@ -434,6 +463,7 @@ def _parseRecord(raw: Mapping[str, Any], root: Path) -> ManifestRecord:
         labelSource=str(raw["labelSource"]),
         labelQuality=float(raw["labelQuality"]),
         split=str(raw["split"]),
+        bfov=bfov,
         difficultType=str(raw.get("difficultType", "normal")),
     )
 
@@ -474,12 +504,36 @@ def _contextSpec(
     )
 
 
+def _recordBfov(record: ManifestRecord, geometry: SphericalGeometryImpl) -> BFoV:
+    if record.bfov is not None:
+        return record.bfov
+    if record.bbox is None:
+        raise ConfigError(
+            f"visible manifest record has no target geometry: "
+            f"{record.sequenceId}/{record.frameIndex}"
+        )
+    return geometry.bboxToBfov(record.bbox, record.width, record.height)
+
+
+def _bfovToNormalizedLocal(
+    target: BFoV,
+    spec: ViewSpec,
+) -> NDArray[np.float32] | None:
+    edge = np.linspace(0.0, 1.0, 33, dtype=np.float64)
+    xs = np.concatenate((edge, np.ones_like(edge), 1.0 - edge, np.zeros_like(edge)))
+    ys = np.concatenate((np.zeros_like(edge), edge, np.ones_like(edge), 1.0 - edge))
+    vectors = localPixelsToUnitVectors(xs, ys, target, 1, 1)
+    return _vectorsToNormalizedLocal(vectors, spec)
+
+
 def _erpBoxToNormalizedLocal(
-    bbox: BBoxXYWH,
+    bbox: BBoxXYWH | None,
     spec: ViewSpec,
     frameWidth: int,
     frameHeight: int,
 ) -> NDArray[np.float32] | None:
+    if bbox is None:
+        return None
     edge = np.linspace(0.0, 1.0, 33, dtype=np.float64)
     xs = np.concatenate(
         (
@@ -512,6 +566,13 @@ def _erpBoxToNormalizedLocal(
         ],
         dtype=np.float64,
     )
+    return _vectorsToNormalizedLocal(vectors, spec)
+
+
+def _vectorsToNormalizedLocal(
+    vectors: NDArray[np.float64],
+    spec: ViewSpec,
+) -> NDArray[np.float32] | None:
     forward, right, up = cameraBasis(spec.bfov)
     depth = vectors @ forward
     visible = depth > 1e-8

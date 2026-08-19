@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
+from math import pi
 from pathlib import Path
 
 import torch
@@ -9,12 +10,15 @@ from torch import nn
 
 from instatarget.core.config import TrainingLossConfig, loadTrainingConfig
 from instatarget.core.errors import ConfigError
-from instatarget.core.types import BBoxXYWH
+from instatarget.core.types import BBoxXYWH, BFoV
+from instatarget.geometry.projection_math import makeSphericalPoint
 from instatarget.geometry.spherical_geometry import SphericalGeometryImpl
 from instatarget.training.dataset import (
     ManifestPairDataset,
+    _bfovToNormalizedLocal,
     _contextSpec,
     _erpBoxToNormalizedLocal,
+    loadManifest,
 )
 from instatarget.training.losses import computeTrainingLoss
 from instatarget.training.manifest_builder import SequenceFiles, assignSequenceSplits
@@ -35,6 +39,24 @@ def _lossConfig() -> TrainingLossConfig:
 
 
 class TrainingLossTest(unittest.TestCase):
+    def testBfloat16LogitsAcceptFloat32IouTargets(self) -> None:
+        outputs = {
+            "predBoxes": torch.tensor([[[0.5, 0.5, 0.2, 0.2]]]),
+            "presenceLogit": torch.tensor([0.3], dtype=torch.bfloat16),
+            "qualityLogit": torch.tensor([0.4], dtype=torch.bfloat16),
+        }
+        targets = {
+            "boxes": torch.tensor([[0.5, 0.5, 0.2, 0.2]]),
+            "present": torch.tensor([True]),
+            "labelQuality": torch.ones(1),
+        }
+
+        losses = computeTrainingLoss(outputs, targets, _lossConfig())
+
+        self.assertTrue(torch.isfinite(losses["total"]))
+        self.assertEqual(losses["qualityTargetMean"].dtype, torch.bfloat16)
+        self.assertAlmostEqual(float(losses["qualityTargetMean"]), 1.0)
+
     def testNegativeBatchMasksAllBoxLosses(self) -> None:
         outputs = {
             "predBoxes": torch.tensor(
@@ -80,6 +102,45 @@ class TrainingLossTest(unittest.TestCase):
 
 
 class ManifestAndGeometryTest(unittest.TestCase):
+    def testOfficialBfovManifestRequiresOriginalBfovField(self) -> None:
+        record = {
+            "sequenceId": "train_sim/seq_0001",
+            "videoPath": "video.mp4",
+            "frameIndex": 0,
+            "timestamp": 0.0,
+            "targetInstanceId": 0,
+            "bbox": [10, 10, 20, 20],
+            "visible": True,
+            "occluded": False,
+            "truncated": False,
+            "width": 360,
+            "height": 180,
+            "labelSource": "official_bfov",
+            "labelQuality": 1.0,
+            "split": "train",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "old_manifest.jsonl"
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "rebuild the manifest"):
+                loadManifest(path)
+
+    def testOriginalBfovAvoidsInflatedErpEnvelopeRoundTrip(self) -> None:
+        target = BFoV(
+            center=makeSphericalPoint(-17.768 * pi / 180.0, -29.766 * pi / 180.0),
+            horizontalFovRad=65.901 * pi / 180.0,
+            verticalFovRad=123.862 * pi / 180.0,
+        )
+        spec = _contextSpec(0, target, 256, contextFactor=2.0, maxFovDeg=120.0)
+
+        local = _bfovToNormalizedLocal(target, spec)
+
+        self.assertIsNotNone(local)
+        assert local is not None
+        self.assertTrue(((local >= 0.0) & (local <= 1.0)).all())
+        self.assertAlmostEqual(float(local[3]), 1.0)
+
     def testSequenceSplitAssignmentIsDeterministicAndComplete(self) -> None:
         sequences = tuple(
             SequenceFiles(
@@ -115,6 +176,24 @@ class ManifestAndGeometryTest(unittest.TestCase):
             path.write_text(source, encoding="utf-8")
             with self.assertRaises(ConfigError):
                 loadTrainingConfig(path)
+
+    def testStageThreeConfigStartsFromStageTwoBestCheckpoint(self) -> None:
+        config = loadTrainingConfig(REPOSITORY_ROOT / "configs" / "train_stage3.yaml")
+
+        self.assertEqual(config.model.stage, 3)
+        self.assertEqual(config.model.initialWeights.name, "best.pth")
+        self.assertEqual(config.model.initialWeights.parent.name, "stage2")
+        self.assertEqual(config.runtime.checkpointDir.name, "stage3")
+        self.assertEqual(config.optimization.batchSize, 8)
+        self.assertEqual(config.optimization.gradientAccumulation, 4)
+        self.assertGreater(
+            config.optimization.headsLearningRate,
+            config.optimization.neckLearningRate,
+        )
+        self.assertGreater(
+            config.optimization.neckLearningRate,
+            config.optimization.backboneLearningRate,
+        )
 
     def testManifestRejectsSequenceSplitLeakage(self) -> None:
         config = loadTrainingConfig(REPOSITORY_ROOT / "configs" / "train_backend.yaml")

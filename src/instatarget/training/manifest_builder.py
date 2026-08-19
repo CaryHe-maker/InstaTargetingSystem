@@ -157,6 +157,16 @@ def buildManifest(
                     "timestamp": frameIndex / fps,
                     "targetInstanceId": 0,
                     "bbox": bbox,
+                    "bfov": (
+                        {
+                            "yawDeg": yawDeg,
+                            "pitchDeg": pitchDeg,
+                            "horizontalFovDeg": horizontalDeg,
+                            "verticalFovDeg": verticalDeg,
+                        }
+                        if labelValid
+                        else None
+                    ),
                     "visible": visible,
                     "occluded": targetAbsent,
                     "truncated": False,
