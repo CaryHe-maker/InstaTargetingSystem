@@ -4,6 +4,7 @@ from pathlib import Path
 
 from instatarget.app.competition import (
     BfovResultSink,
+    _loadCompetitionConfig,
     formatCompetitionResult,
     listSequences,
     loadInitialBfov,
@@ -21,6 +22,20 @@ from instatarget.geometry import makeSphericalPoint
 
 
 class CompetitionSubmissionTest(unittest.TestCase):
+    def testCompetitionAlwaysDisablesVisualization(self) -> None:
+        repositoryRoot = Path(__file__).resolve().parents[2]
+        source = repositoryRoot / "configs" / "RGBonly.yaml"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "visualization-enabled.yaml"
+            payload = source.read_text(encoding="utf-8").replace(
+                "  enabled: false", "  enabled: true"
+            )
+            path.write_text(payload, encoding="utf-8")
+
+            config = _loadCompetitionConfig(path)
+
+        self.assertFalse(config.visualization.enabled)
+
     def testInitialBfovParsingUsesDegrees(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "init.txt"

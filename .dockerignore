@@ -19,8 +19,7 @@ third_party
 models/*
 !models/hit_small_inference.pth
 
-# Local-only visualization implementation and AirSim360 diagnostic entrypoints.
-src/instatarget/visualization/
+# Local-only AirSim360 diagnostic entrypoints and development modules.
 src/instatarget/app/commands.py
 src/instatarget/app/track.py
 src/instatarget/app/track_airsim360.py

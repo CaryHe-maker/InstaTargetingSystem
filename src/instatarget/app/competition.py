@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
@@ -235,7 +236,7 @@ def trackOneSequence(
     if video is None:
         raise DecodeError(f"sequence has no .mp4 video: {sequencePath}")
     initialBfov = loadInitialBfov(sequencePath / "init.txt")
-    config = loadConfig(configPath)
+    config = _loadCompetitionConfig(configPath)
     runtime = buildRuntime(config)
     source = OpenCvVideoSource(sequencePath.name)
     sink = BfovResultSink(initialBfov)
@@ -292,6 +293,14 @@ def runCompetition(
     elapsed = max(time.monotonic() - start, 1e-9)
     print(f"[competition] completed {totalFrames} frames ({totalFrames / elapsed:.1f} FPS)")
     return 0
+
+
+def _loadCompetitionConfig(path: str | Path):
+    config = loadConfig(path)
+    return replace(
+        config,
+        visualization=replace(config.visualization, enabled=False),
+    )
 
 
 def _bgrToRgb(frame: np.ndarray) -> np.ndarray:
