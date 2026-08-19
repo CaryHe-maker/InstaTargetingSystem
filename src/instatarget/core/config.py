@@ -236,6 +236,308 @@ class AppConfig:
     sourcePath: Path
 
 
+@dataclass(frozen=True, slots=True)
+class TrainingDataConfig:
+    manifest: Path
+    trainSplit: str
+    validationSplit: str
+    templateSizePx: int
+    searchSizePx: int
+    minFrameGap: int
+    maxFrameGap: int
+    minFovDeg: float
+    maxFovDeg: float
+    negativeSampleRatio: float
+    minimumLabelQuality: float
+    decoderCacheSize: int
+
+    def __post_init__(self) -> None:
+        if self.trainSplit == self.validationSplit:
+            raise ConfigError("training data splits must be distinct")
+        if self.templateSizePx <= 0 or self.searchSizePx <= 0:
+            raise ConfigError("training image sizes must be positive")
+        if self.minFrameGap < 0 or self.maxFrameGap < self.minFrameGap:
+            raise ConfigError("training frame gap range is invalid")
+        if not 0.0 < self.minFovDeg <= self.maxFovDeg <= 120.0:
+            raise ConfigError("training FOV must satisfy 0 < min <= max <= 120")
+        _requireProbability("data.negativeSampleRatio", self.negativeSampleRatio)
+        _requireProbability("data.minimumLabelQuality", self.minimumLabelQuality)
+        if self.decoderCacheSize <= 0:
+            raise ConfigError("data.decoderCacheSize must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingModelConfig:
+    variant: str
+    initialWeights: Path
+    stage: int
+    hiddenDim: int
+    dropout: float
+
+    def __post_init__(self) -> None:
+        if self.variant != "hit_small":
+            raise ConfigError("training currently supports only model.variant=hit_small")
+        if self.stage not in {1, 2, 3, 4}:
+            raise ConfigError("model.stage must be one of 1, 2, 3, 4")
+        if self.hiddenDim <= 0:
+            raise ConfigError("model.hiddenDim must be positive")
+        _requireProbability("model.dropout", self.dropout)
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingOptimizationConfig:
+    batchSize: int
+    gradientAccumulation: int
+    epochs: int
+    maxSteps: int
+    headsLearningRate: float
+    neckLearningRate: float
+    backboneLearningRate: float
+    weightDecay: float
+    warmupSteps: int
+    scheduler: str
+    precision: str
+    gradientClipNorm: float
+    seed: int
+    workers: int
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("batchSize", self.batchSize),
+            ("gradientAccumulation", self.gradientAccumulation),
+            ("epochs", self.epochs),
+        ):
+            if value <= 0:
+                raise ConfigError(f"optimization.{name} must be positive")
+        if self.maxSteps < 0 or self.warmupSteps < 0 or self.workers < 0:
+            raise ConfigError("optimization steps and workers must be non-negative")
+        for name, value in (
+            ("headsLearningRate", self.headsLearningRate),
+            ("neckLearningRate", self.neckLearningRate),
+            ("backboneLearningRate", self.backboneLearningRate),
+            ("weightDecay", self.weightDecay),
+            ("gradientClipNorm", self.gradientClipNorm),
+        ):
+            if not isfinite(value) or value < 0.0:
+                raise ConfigError(f"optimization.{name} must be finite and non-negative")
+        if min(self.headsLearningRate, self.neckLearningRate) <= 0.0:
+            raise ConfigError("head and neck learning rates must be positive")
+        if self.scheduler not in {"cosine", "constant"}:
+            raise ConfigError("optimization.scheduler must be cosine or constant")
+        if self.precision not in {"fp32", "fp16", "bf16"}:
+            raise ConfigError("optimization.precision must be fp32, fp16, or bf16")
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingLossConfig:
+    presenceWeight: float
+    l1Weight: float
+    giouWeight: float
+    qualityWeight: float
+    qualityNegativeWeight: float
+    presenceFocalGamma: float
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("presenceWeight", self.presenceWeight),
+            ("l1Weight", self.l1Weight),
+            ("giouWeight", self.giouWeight),
+            ("qualityWeight", self.qualityWeight),
+            ("presenceFocalGamma", self.presenceFocalGamma),
+        ):
+            if not isfinite(value) or value < 0.0:
+                raise ConfigError(f"loss.{name} must be finite and non-negative")
+        _requireProbability("loss.qualityNegativeWeight", self.qualityNegativeWeight)
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingRuntimeConfig:
+    checkpointDir: Path
+    resume: Path | None
+    validateEverySteps: int
+    earlyStoppingPatience: int
+    logEverySteps: int
+
+    def __post_init__(self) -> None:
+        if min(
+            self.validateEverySteps,
+            self.earlyStoppingPatience,
+            self.logEverySteps,
+        ) <= 0:
+            raise ConfigError("training runtime intervals must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingConfig:
+    schemaVersion: int
+    data: TrainingDataConfig
+    model: TrainingModelConfig
+    optimization: TrainingOptimizationConfig
+    loss: TrainingLossConfig
+    runtime: TrainingRuntimeConfig
+    sourcePath: Path
+
+
+def loadTrainingConfig(path: str | Path) -> TrainingConfig:
+    """Load the independent, strict training configuration schema."""
+    configPath = Path(path).expanduser().resolve()
+    try:
+        import yaml
+    except ModuleNotFoundError as error:
+        raise ConfigError("PyYAML is required to load configuration files") from error
+    try:
+        with configPath.open("r", encoding="utf-8") as stream:
+            raw = yaml.safe_load(stream)
+    except OSError as error:
+        raise ConfigError(f"cannot read config file {configPath}: {error}") from error
+    except yaml.YAMLError as error:
+        raise ConfigError(f"invalid YAML in {configPath}: {error}") from error
+
+    root = _requireMapping("training config", raw)
+    _requireKeys(
+        "training config",
+        root,
+        {"schemaVersion", "data", "model", "optimization", "loss", "runtime"},
+    )
+    schemaVersion = _requireInt("schemaVersion", root["schemaVersion"])
+    if schemaVersion != SUPPORTED_SCHEMA_VERSION:
+        raise ConfigError(f"unsupported training schemaVersion: {schemaVersion}")
+    data = _section(
+        root,
+        "data",
+        {
+            "manifest", "trainSplit", "validationSplit", "templateSizePx",
+            "searchSizePx", "minFrameGap", "maxFrameGap", "minFovDeg",
+            "maxFovDeg", "negativeSampleRatio", "minimumLabelQuality",
+            "decoderCacheSize",
+        },
+    )
+    model = _section(
+        root, "model", {"variant", "initialWeights", "stage", "hiddenDim", "dropout"}
+    )
+    optimization = _section(
+        root,
+        "optimization",
+        {
+            "batchSize", "gradientAccumulation", "epochs", "maxSteps",
+            "headsLearningRate", "neckLearningRate", "backboneLearningRate",
+            "weightDecay", "warmupSteps", "scheduler", "precision",
+            "gradientClipNorm", "seed", "workers",
+        },
+    )
+    loss = _section(
+        root,
+        "loss",
+        {
+            "presenceWeight", "l1Weight", "giouWeight", "qualityWeight",
+            "qualityNegativeWeight", "presenceFocalGamma",
+        },
+    )
+    runtime = _section(
+        root,
+        "runtime",
+        {
+            "checkpointDir", "resume", "validateEverySteps",
+            "earlyStoppingPatience", "logEverySteps",
+        },
+    )
+
+    def resolvePath(value: object, name: str) -> Path:
+        candidate = Path(_requireStr(name, value)).expanduser()
+        return (
+            candidate.resolve()
+            if candidate.is_absolute()
+            else (configPath.parent / candidate).resolve()
+        )
+
+    resumeValue = _requireStr("runtime.resume", runtime["resume"])
+    resumePath = (
+        None
+        if resumeValue.lower() == "none"
+        else resolvePath(resumeValue, "runtime.resume")
+    )
+    return TrainingConfig(
+        schemaVersion=schemaVersion,
+        data=TrainingDataConfig(
+            manifest=resolvePath(data["manifest"], "data.manifest"),
+            trainSplit=_requireStr("data.trainSplit", data["trainSplit"]),
+            validationSplit=_requireStr("data.validationSplit", data["validationSplit"]),
+            templateSizePx=_requireInt("data.templateSizePx", data["templateSizePx"]),
+            searchSizePx=_requireInt("data.searchSizePx", data["searchSizePx"]),
+            minFrameGap=_requireInt("data.minFrameGap", data["minFrameGap"]),
+            maxFrameGap=_requireInt("data.maxFrameGap", data["maxFrameGap"]),
+            minFovDeg=_requireFloat("data.minFovDeg", data["minFovDeg"]),
+            maxFovDeg=_requireFloat("data.maxFovDeg", data["maxFovDeg"]),
+            negativeSampleRatio=_requireFloat(
+                "data.negativeSampleRatio", data["negativeSampleRatio"]
+            ),
+            minimumLabelQuality=_requireFloat(
+                "data.minimumLabelQuality", data["minimumLabelQuality"]
+            ),
+            decoderCacheSize=_requireInt("data.decoderCacheSize", data["decoderCacheSize"]),
+        ),
+        model=TrainingModelConfig(
+            variant=_requireStr("model.variant", model["variant"]),
+            initialWeights=resolvePath(model["initialWeights"], "model.initialWeights"),
+            stage=_requireInt("model.stage", model["stage"]),
+            hiddenDim=_requireInt("model.hiddenDim", model["hiddenDim"]),
+            dropout=_requireFloat("model.dropout", model["dropout"]),
+        ),
+        optimization=TrainingOptimizationConfig(
+            batchSize=_requireInt("optimization.batchSize", optimization["batchSize"]),
+            gradientAccumulation=_requireInt(
+                "optimization.gradientAccumulation", optimization["gradientAccumulation"]
+            ),
+            epochs=_requireInt("optimization.epochs", optimization["epochs"]),
+            maxSteps=_requireInt("optimization.maxSteps", optimization["maxSteps"]),
+            headsLearningRate=_requireFloat(
+                "optimization.headsLearningRate", optimization["headsLearningRate"]
+            ),
+            neckLearningRate=_requireFloat(
+                "optimization.neckLearningRate", optimization["neckLearningRate"]
+            ),
+            backboneLearningRate=_requireFloat(
+                "optimization.backboneLearningRate", optimization["backboneLearningRate"]
+            ),
+            weightDecay=_requireFloat(
+                "optimization.weightDecay", optimization["weightDecay"]
+            ),
+            warmupSteps=_requireInt("optimization.warmupSteps", optimization["warmupSteps"]),
+            scheduler=_requireStr("optimization.scheduler", optimization["scheduler"]),
+            precision=_requireStr("optimization.precision", optimization["precision"]),
+            gradientClipNorm=_requireFloat(
+                "optimization.gradientClipNorm", optimization["gradientClipNorm"]
+            ),
+            seed=_requireInt("optimization.seed", optimization["seed"]),
+            workers=_requireInt("optimization.workers", optimization["workers"]),
+        ),
+        loss=TrainingLossConfig(
+            presenceWeight=_requireFloat("loss.presenceWeight", loss["presenceWeight"]),
+            l1Weight=_requireFloat("loss.l1Weight", loss["l1Weight"]),
+            giouWeight=_requireFloat("loss.giouWeight", loss["giouWeight"]),
+            qualityWeight=_requireFloat("loss.qualityWeight", loss["qualityWeight"]),
+            qualityNegativeWeight=_requireFloat(
+                "loss.qualityNegativeWeight", loss["qualityNegativeWeight"]
+            ),
+            presenceFocalGamma=_requireFloat(
+                "loss.presenceFocalGamma", loss["presenceFocalGamma"]
+            ),
+        ),
+        runtime=TrainingRuntimeConfig(
+            checkpointDir=resolvePath(runtime["checkpointDir"], "runtime.checkpointDir"),
+            resume=resumePath,
+            validateEverySteps=_requireInt(
+                "runtime.validateEverySteps", runtime["validateEverySteps"]
+            ),
+            earlyStoppingPatience=_requireInt(
+                "runtime.earlyStoppingPatience", runtime["earlyStoppingPatience"]
+            ),
+            logEverySteps=_requireInt("runtime.logEverySteps", runtime["logEverySteps"]),
+        ),
+        sourcePath=configPath,
+    )
+
+
 def loadConfig(path: str | Path) -> AppConfig:
     """Load a YAML configuration and reject unknown or missing fields."""
     configPath = Path(path).expanduser().resolve()

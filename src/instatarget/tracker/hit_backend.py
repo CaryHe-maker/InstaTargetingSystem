@@ -26,6 +26,12 @@ class HiTPrediction:
     bbox: BBoxXYWH
     modelScore: float
     appearanceScore: float
+    presenceLogit: float | None = None
+    qualityLogit: float | None = None
+    presenceProbability: float | None = None
+    qualityProbability: float | None = None
+    predictedIoU: float | None = None
+    cornerScore: float | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -33,6 +39,20 @@ class HiTPrediction:
             ("appearanceScore", self.appearanceScore),
         ):
             if not np.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ModelError(f"{name} must be finite and in [0, 1], actual={value}")
+        for name, value in (
+            ("presenceLogit", self.presenceLogit),
+            ("qualityLogit", self.qualityLogit),
+        ):
+            if value is not None and not np.isfinite(value):
+                raise ModelError(f"{name} must be finite, actual={value}")
+        for name, value in (
+            ("presenceProbability", self.presenceProbability),
+            ("qualityProbability", self.qualityProbability),
+            ("predictedIoU", self.predictedIoU),
+            ("cornerScore", self.cornerScore),
+        ):
+            if value is not None and (not np.isfinite(value) or not 0.0 <= value <= 1.0):
                 raise ModelError(f"{name} must be finite and in [0, 1], actual={value}")
 
 

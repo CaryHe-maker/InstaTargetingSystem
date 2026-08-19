@@ -1,6 +1,12 @@
 """Stable contracts shared by InstaTargetingSystem modules."""
 
-from instatarget.core.config import AppConfig, VisualizationConfig, loadConfig
+from instatarget.core.config import (
+    AppConfig,
+    TrainingConfig,
+    VisualizationConfig,
+    loadConfig,
+    loadTrainingConfig,
+)
 from instatarget.core.errors import (
     ConfigError,
     DecodeError,
@@ -20,6 +26,8 @@ __all__ = [
     "ModelError",
     "OutputError",
     "ProtocolError",
+    "TrainingConfig",
     "VisualizationConfig",
     "loadConfig",
+    "loadTrainingConfig",
 ]

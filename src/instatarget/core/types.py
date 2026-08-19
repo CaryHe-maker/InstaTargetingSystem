@@ -287,6 +287,12 @@ class LocalObservation:
     fusedScore: float
     latencyNs: int
     appearanceProbability: float | None = None
+    presenceLogit: float | None = None
+    qualityLogit: float | None = None
+    presenceProbability: float | None = None
+    qualityProbability: float | None = None
+    predictedIoU: float | None = None
+    cornerScore: float | None = None
 
     def __post_init__(self) -> None:
         if self.viewId < 0 or self.latencyNs < 0:
@@ -299,6 +305,20 @@ class LocalObservation:
             _requireProbability(name, value)
         if self.appearanceProbability is not None:
             _requireProbability("appearanceProbability", self.appearanceProbability)
+        for name, value in (
+            ("presenceLogit", self.presenceLogit),
+            ("qualityLogit", self.qualityLogit),
+        ):
+            if value is not None:
+                _requireFinite(name, value)
+        for name, value in (
+            ("presenceProbability", self.presenceProbability),
+            ("qualityProbability", self.qualityProbability),
+            ("predictedIoU", self.predictedIoU),
+            ("cornerScore", self.cornerScore),
+        ):
+            if value is not None:
+                _requireProbability(name, value)
 
 
 @dataclass(frozen=True, slots=True)

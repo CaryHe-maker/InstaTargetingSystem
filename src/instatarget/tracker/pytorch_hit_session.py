@@ -48,7 +48,7 @@ class PyTorchHiTSession:
         if not self._weights.is_file():
             raise ModelError(f"HiT checkpoint does not exist: {self._weights}")
         self._device = self._torch.device("cuda")
-        self._model, self._heatmaps = self._loadModel()
+        self._model, self._hasLearnedConfidence = self._loadModel()
         self._mean = self._torch.tensor(
             [0.485, 0.456, 0.406], device=self._device, dtype=self._torch.float32
         ).view(1, 3, 1, 1)
@@ -95,21 +95,30 @@ class PyTorchHiTSession:
         resized = np.stack([_resizeRgb(rgb, _SEARCH_SIZE) for rgb in images])
         search = self._preprocessBatch(resized)
         batchTemplate = template.expand(batchSize, -1, -1, -1)
-        self._heatmaps.clear()
-        boxes = self._forward(search, batchTemplate, useFp16=self._precision == "fp16")
-        fp16Invalid = not bool(self._torch.isfinite(boxes).all()) or not _heatmapsAreFinite(
-            self._heatmaps, self._torch
-        )
+        output = self._forward(search, batchTemplate, useFp16=self._precision == "fp16")
+        fp16Invalid = not _outputsAreFinite(output, self._torch)
         if self._precision == "fp16" and fp16Invalid:
-            self._heatmaps.clear()
-            boxes = self._forward(search, batchTemplate, useFp16=False)
+            output = self._forward(search, batchTemplate, useFp16=False)
+        boxes = output["predBoxes"]
         if boxes.numel() == 0 or boxes.shape[0] != batchSize:
             raise ModelError(
                 "HiT returned an invalid prediction batch: "
                 f"expected={batchSize}, actual={tuple(boxes.shape)}"
             )
         boxRows = boxes.reshape(batchSize, -1, 4).float().mean(dim=1).tolist()
-        certainties = _heatmapCertainties(self._heatmaps, self._torch, batchSize)
+        certainties = _heatmapCertainties(
+            (output["cornerHeatmapTl"], output["cornerHeatmapBr"]),
+            self._torch,
+            batchSize,
+        )
+        if self._hasLearnedConfidence:
+            presenceLogits = output["presenceLogit"].float().reshape(-1).tolist()
+            qualityLogits = output["qualityLogit"].float().reshape(-1).tolist()
+            presenceProbabilities = output["presenceProbability"].float().reshape(-1).tolist()
+            qualityProbabilities = output["qualityProbability"].float().reshape(-1).tolist()
+        else:
+            presenceLogits = qualityLogits = [None] * batchSize
+            presenceProbabilities = qualityProbabilities = [None] * batchSize
         return tuple(
             HiTPrediction(
                 bbox=_normalizedBoxToPixels(
@@ -117,29 +126,59 @@ class PyTorchHiTSession:
                     imageWidth=rgb.shape[1],
                     imageHeight=rgb.shape[0],
                 ),
-                modelScore=certainty,
-                appearanceScore=certainty,
+                modelScore=(
+                    float(presenceProbability * qualityProbability)
+                    if presenceProbability is not None and qualityProbability is not None
+                    else certainty
+                ),
+                appearanceScore=(
+                    float(presenceProbability * qualityProbability)
+                    if presenceProbability is not None and qualityProbability is not None
+                    else certainty
+                ),
+                presenceLogit=presenceLogit,
+                qualityLogit=qualityLogit,
+                presenceProbability=presenceProbability,
+                qualityProbability=qualityProbability,
+                predictedIoU=qualityProbability,
+                cornerScore=certainty,
             )
-            for rgb, boxRow, certainty in zip(images, boxRows, certainties, strict=True)
+            for (
+                rgb,
+                boxRow,
+                certainty,
+                presenceLogit,
+                qualityLogit,
+                presenceProbability,
+                qualityProbability,
+            ) in zip(
+                images,
+                boxRows,
+                certainties,
+                presenceLogits,
+                qualityLogits,
+                presenceProbabilities,
+                qualityProbabilities,
+                strict=True,
+            )
         )
 
     def close(self) -> None:
         if self._closed:
             return
-        for hook in getattr(self, "_heatmapHooks", ()):
-            hook.remove()
         self._model = None
-        self._heatmaps.clear()
         self._closed = True
         self._torch.cuda.empty_cache()
 
-    def _loadModel(self) -> tuple[Any, list[Any]]:
+    def _loadModel(self) -> tuple[Any, bool]:
         _activateVendorTree(self._hitRoot)
         try:
             import lib.models.HiT.backbone as backboneModule
             from lib.config.HiT.config import cfg, update_config_from_file
             from lib.models.HiT import build_hit
             from lib.models.HiT.levit_utils import replace_batchnorm
+
+            from instatarget.training.model import HiTTrainingModel
         except Exception as error:
             raise ModelError(
                 f"cannot import bundled HiT runtime from {self._hitRoot}: {error}"
@@ -153,27 +192,25 @@ class PyTorchHiTSession:
         try:
             model = build_hit(cfg)
             checkpoint = _loadCheckpoint(self._torch, self._weights)
-            state = checkpoint.get("net") if isinstance(checkpoint, dict) else None
-            if not isinstance(state, dict):
-                raise ModelError("HiT checkpoint has no 'net' state dictionary")
-            model.load_state_dict(state, strict=True)
+            learnedConfidence = isinstance(checkpoint.get("model"), dict)
+            if learnedConfidence:
+                wrapped = HiTTrainingModel(model)
+                wrapped.load_state_dict(checkpoint["model"], strict=True)
+                runtimeModel = wrapped
+            else:
+                state = checkpoint.get("net") if isinstance(checkpoint, dict) else None
+                if not isinstance(state, dict):
+                    raise ModelError("HiT checkpoint has no 'model' or legacy 'net' state")
+                model.load_state_dict(state, strict=True)
+                runtimeModel = model
             replace_batchnorm(model.backbone.body)
-            model = model.to(self._device).eval()
+            runtimeModel = runtimeModel.to(self._device).eval()
         except ModelError:
             raise
         except Exception as error:
             raise ModelError(f"cannot construct HiT-Small from {self._weights}: {error}") from error
 
-        heatmaps: list[Any] = []
-
-        def captureHeatmap(_module: Any, _inputs: Any, output: Any) -> None:
-            heatmaps.append(output.detach())
-
-        self._heatmapHooks = (
-            model.box_head.conv5_tl.register_forward_hook(captureHeatmap),
-            model.box_head.conv5_br.register_forward_hook(captureHeatmap),
-        )
-        return model, heatmaps
+        return runtimeModel, learnedConfidence
 
     def _preprocess(self, rgb: NDArray[np.uint8]) -> Any:
         return self._preprocessBatch(np.ascontiguousarray(rgb)[None, ...])
@@ -185,21 +222,29 @@ class PyTorchHiTSession:
         tensor = tensor.permute(0, 3, 1, 2).div_(255.0)
         return (tensor - self._mean) / self._std
 
-    def _forward(self, search: Any, template: Any, *, useFp16: bool) -> Any:
+    def _forward(self, search: Any, template: Any, *, useFp16: bool) -> dict[str, Any]:
         autocast = (
             self._torch.autocast(device_type="cuda", dtype=self._torch.float16)
             if useFp16
             else nullcontext()
         )
         with self._torch.inference_mode(), autocast:
-            features = self._model.forward_backbone(
-                [search, template], first_score=None, threshold=0.9
-            )
-            output, _, _ = self._model.forward_head(features)
-        boxes = output.get("pred_boxes")
+            if self._hasLearnedConfidence:
+                output = self._model(template, search)
+            else:
+                features = self._model.forward_backbone(
+                    [search, template], first_score=None, threshold=0.9
+                )
+                raw, _, _ = self._model.forward_head(features)
+                output = {
+                    "predBoxes": raw["pred_boxes"],
+                    "cornerHeatmapTl": raw["corner_heatmap_tl"],
+                    "cornerHeatmapBr": raw["corner_heatmap_br"],
+                }
+        boxes = output.get("predBoxes")
         if boxes is None or boxes.numel() == 0:
             raise ModelError("HiT returned no predicted boxes")
-        return boxes
+        return output
 
     def _requireOpen(self) -> None:
         if self._closed:
@@ -291,11 +336,11 @@ def _normalizedBoxToPixels(
 
 
 def _heatmapCertainties(
-    heatmaps: list[Any], torch: ModuleType, batchSize: int
+    heatmaps: Sequence[Any], torch: ModuleType, batchSize: int
 ) -> tuple[float, ...]:
     if len(heatmaps) != 2:
         raise ModelError("HiT corner head did not expose both confidence heatmaps")
-    if not _heatmapsAreFinite(heatmaps, torch):
+    if not all(bool(torch.isfinite(item).all()) for item in heatmaps):
         raise ModelError("HiT corner head returned a non-finite confidence heatmap")
     concentrations = []
     for heatmap in heatmaps:
@@ -314,8 +359,9 @@ def _heatmapCertainties(
     return tuple(float(value) for value in certainties.tolist())
 
 
-def _heatmapsAreFinite(heatmaps: list[Any], torch: ModuleType) -> bool:
-    return len(heatmaps) == 2 and all(bool(torch.isfinite(item).all()) for item in heatmaps)
+def _outputsAreFinite(output: dict[str, Any], torch: ModuleType) -> bool:
+    required = ("predBoxes", "cornerHeatmapTl", "cornerHeatmapBr")
+    return all(name in output and bool(torch.isfinite(output[name]).all()) for name in required)
 
 
 def _requireRgb(rgb: NDArray[np.uint8]) -> None:

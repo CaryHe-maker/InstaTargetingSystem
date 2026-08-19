@@ -25,6 +25,12 @@ def buildRgbObservation(
         appearanceScore=prediction.appearanceScore,
         fusedScore=prediction.appearanceScore,
         latencyNs=latencyNs,
+        presenceLogit=prediction.presenceLogit,
+        qualityLogit=prediction.qualityLogit,
+        presenceProbability=prediction.presenceProbability,
+        qualityProbability=prediction.qualityProbability,
+        predictedIoU=prediction.predictedIoU,
+        cornerScore=prediction.cornerScore,
     )
 
 

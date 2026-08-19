@@ -36,12 +36,13 @@ dev = [
 [project.scripts]
 run = "instatarget.app.commands:runMain"
 getInstanceID = "instatarget.app.commands:getInstanceIdMain"
+trainBackend = "instatarget.training.train_backend:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"instatarget.vendor.hit" = ["LICENSE", "configs/*.yaml"]
+"instatarget.vendor.hit" = ["LICENSE", "configs/*.yaml", "lib/**/*.py"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -105,6 +105,13 @@ checkpoints/
 *.plan
 *.trt
 
+# The bundled HiT implementation is source code, not a model artifact.
+!src/instatarget/vendor/hit/
+!src/instatarget/vendor/hit/lib/
+!src/instatarget/vendor/hit/lib/**
+src/instatarget/vendor/hit/lib/**/__pycache__/
+src/instatarget/vendor/hit/lib/**/*.pyc
+
 # Vendored reference implementations
 third_party/
 
