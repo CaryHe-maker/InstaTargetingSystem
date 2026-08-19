@@ -25,7 +25,7 @@ optimization:
   batchSize: 8
   gradientAccumulation: 4
   epochs: 50
-  maxSteps: 0
+  maxSteps: 1000
   headsLearningRate: 0.0005
   neckLearningRate: 0.0001
   backboneLearningRate: 0.00001
@@ -46,7 +46,7 @@ loss:
   presenceFocalGamma: 0.0
 
 runtime:
-  checkpointDir: ../checkpoints/hit_small
+  checkpointDir: E:/InstaTargetingSystemTraining/checkpoints/stage1
   resume: none
   validateEverySteps: 1000
   earlyStoppingPatience: 10
