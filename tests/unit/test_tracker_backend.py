@@ -7,7 +7,11 @@ from instatarget.core.types import (
     BBoxXYWH,
     BFoV,
     FrameIndex,
+    InferenceRole,
     LocalView,
+    RoutedInferenceTask,
+    SequenceId,
+    TaskKey,
     TemplateCommand,
     TemplateCommandKind,
     ViewSpec,
@@ -129,6 +133,50 @@ class TrackerBackendTest(unittest.TestCase):
 
         self.assertEqual(session.batchInferred, [(20, 30, 40, 50)])
         self.assertEqual([item.viewId for item in observations], [1, 2, 3, 4])
+
+    def testMixedFrameTasksUseOneBatchAndRetainTaskIdentity(self) -> None:
+        session = FakeHiTSession()
+        backend = TrackerBackendImpl(HiTBackend(session))
+        backend.initialize(
+            _view(0, 10),
+            BBoxXYWH(xPx=0.0, yPx=0.0, widthPx=2.0, heightPx=2.0),
+        )
+        tasks = (
+            RoutedInferenceTask(
+                TaskKey(
+                    SequenceId("sequence"),
+                    FrameIndex(1),
+                    1,
+                    1,
+                    4,
+                    InferenceRole.ROUND2_SHAPE,
+                ),
+                _view(1, 20),
+            ),
+            RoutedInferenceTask(
+                TaskKey(
+                    SequenceId("sequence"),
+                    FrameIndex(2),
+                    0,
+                    2,
+                    4,
+                    InferenceRole.SPECULATIVE_ROUND1_DIRECTION,
+                ),
+                _view(2, 30),
+            ),
+        )
+
+        outputs = backend.inferTasks(
+            tasks,
+            _command(TemplateCommandKind.KEEP, 1, 1),
+        )
+
+        self.assertEqual(session.batchInferred, [(20, 30)])
+        self.assertEqual(tuple(item.key for item in outputs), tuple(item.key for item in tasks))
+        reordered = backend.routeTasks(tuple(reversed(outputs)), tuple(item.key for item in tasks))
+        self.assertEqual(tuple(item.key for item in reordered), tuple(item.key for item in tasks))
+        with self.assertRaises(ProtocolError):
+            backend.routeTasks(outputs, (tasks[0].key, tasks[0].key))
 
     def testTemplateCommandsUsePreviousViewsAndRevisionIsAtomic(self) -> None:
         session = FakeHiTSession()

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from instatarget.controller import (
+    SpeculativePipeline,
     TrackControllerImpl,
     calibrateBackendFusedScore,
     calibrateLocalAppearanceProbabilities,
@@ -47,6 +48,7 @@ class RuntimeBundle:
     backend: TrackerBackend
     sink: ResultSinkProtocol
     recorder: VisualizationRecorder | None = None
+    speculativePipeline: SpeculativePipeline | None = None
 
 
 def buildRuntime(
@@ -67,7 +69,8 @@ def buildRuntime(
         from instatarget.visualization.recorder import VisualizationRecorder
 
         recorder = VisualizationRecorder(config.visualization)
-    return RuntimeBundle(geometry, controller, backend, sink, recorder)
+    speculativePipeline = SpeculativePipeline(config.speculativePipeline)
+    return RuntimeBundle(geometry, controller, backend, sink, recorder, speculativePipeline)
 
 
 def runTracking(

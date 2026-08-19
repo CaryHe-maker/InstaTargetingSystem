@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum, auto
+from enum import Enum, StrEnum, auto
 from math import isfinite, sqrt
 from typing import NewType
 
@@ -278,6 +278,47 @@ class LocalView:
             )
 
 
+class InferenceRole(StrEnum):
+    ROUND1_DIRECTION = "round1_direction"
+    ROUND2_SHAPE = "round2_shape"
+    SPECULATIVE_ROUND1_DIRECTION = "speculative_round1_direction"
+
+
+@dataclass(frozen=True, slots=True)
+class TaskKey:
+    """Immutable identity used to route outputs from mixed-frame inference batches."""
+
+    sequenceId: SequenceId
+    frameIndex: FrameIndex
+    attemptIndex: int
+    viewId: int
+    generation: int
+    role: InferenceRole
+
+    def __post_init__(self) -> None:
+        if not str(self.sequenceId):
+            raise ProtocolError("task sequenceId must be non-empty")
+        if not isinstance(self.role, InferenceRole):
+            raise ProtocolError("task role must be an InferenceRole")
+        if min(
+            int(self.frameIndex),
+            self.attemptIndex,
+            self.viewId,
+            self.generation,
+        ) < 0:
+            raise ProtocolError("task identity components must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
+class RoutedInferenceTask:
+    key: TaskKey
+    view: LocalView
+
+    def __post_init__(self) -> None:
+        if self.key.viewId != self.view.spec.viewId:
+            raise ProtocolError("task key viewId must match its LocalView")
+
+
 @dataclass(frozen=True, slots=True)
 class LocalObservation:
     viewId: int
@@ -319,6 +360,16 @@ class LocalObservation:
         ):
             if value is not None:
                 _requireProbability(name, value)
+
+
+@dataclass(frozen=True, slots=True)
+class RoutedLocalObservation:
+    key: TaskKey
+    observation: LocalObservation
+
+    def __post_init__(self) -> None:
+        if self.key.viewId != self.observation.viewId:
+            raise ProtocolError("task key viewId must match its LocalObservation")
 
 
 @dataclass(frozen=True, slots=True)

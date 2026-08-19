@@ -27,6 +27,11 @@ class CoreConfigTest(unittest.TestCase):
         self.assertEqual(config.motion.minSamplesForVelocity, 2)
         self.assertAlmostEqual(config.motion.processNoiseRadPerSec, 0.04)
         self.assertEqual(config.model.precision, "fp32")
+        self.assertFalse(config.speculativePipeline.enabled)
+        self.assertFalse(config.speculativePipeline.batchMergeEnabled)
+        self.assertAlmostEqual(config.speculativePipeline.centerGapRatio, 0.50)
+        self.assertAlmostEqual(config.speculativePipeline.logScaleGap, 0.25)
+        self.assertEqual(config.speculativePipeline.maxSpeculativeAgeFrames, 1)
         self.assertEqual(config.model.weights, REPOSITORY_ROOT / "models" / "hit_small.pth")
         self.assertFalse(config.visualization.enabled)
         self.assertEqual(
@@ -74,6 +79,16 @@ class CoreConfigTest(unittest.TestCase):
     def testLoadConfigRejectsUnknownVisualizationStage(self) -> None:
         source = (REPOSITORY_ROOT / "configs" / "RGBonly.yaml").read_text(encoding="utf-8")
         source = source.replace("    - geometry_box", "    - geometry_box\n    - unknown")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "invalid.yaml"
+            path.write_text(source, encoding="utf-8")
+            with self.assertRaises(ConfigError):
+                loadConfig(path)
+
+    def testLoadConfigRejectsBatchMergeWhenSpeculationIsDisabled(self) -> None:
+        source = (REPOSITORY_ROOT / "configs" / "RGBonly.yaml").read_text(encoding="utf-8")
+        source = source.replace("  batchMergeEnabled: false", "  batchMergeEnabled: true")
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "invalid.yaml"

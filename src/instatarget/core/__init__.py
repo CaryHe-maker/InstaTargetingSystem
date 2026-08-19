@@ -2,6 +2,7 @@
 
 from instatarget.core.config import (
     AppConfig,
+    SpeculativePipelineConfig,
     TrainingConfig,
     VisualizationConfig,
     loadConfig,
@@ -26,6 +27,7 @@ __all__ = [
     "ModelError",
     "OutputError",
     "ProtocolError",
+    "SpeculativePipelineConfig",
     "TrainingConfig",
     "VisualizationConfig",
     "loadConfig",

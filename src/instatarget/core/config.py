@@ -208,6 +208,38 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SpeculativePipelineConfig:
+    """Provisional runtime controls for the disabled-by-default pipeline."""
+
+    enabled: bool = False
+    batchMergeEnabled: bool = False
+    maxRollbackRate: float = 0.20
+    centerGapRatio: float = 0.50
+    logScaleGap: float = 0.25
+    minimumDirectionConfidence: float = 0.80
+    maxSpeculativeAgeFrames: int = 1
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("maxRollbackRate", self.maxRollbackRate),
+            ("minimumDirectionConfidence", self.minimumDirectionConfidence),
+        ):
+            _requireProbability(f"speculativePipeline.{name}", value)
+        for name, value in (
+            ("centerGapRatio", self.centerGapRatio),
+            ("logScaleGap", self.logScaleGap),
+        ):
+            if not isfinite(value) or value <= 0.0:
+                raise ConfigError(f"speculativePipeline.{name} must be positive and finite")
+        if self.maxSpeculativeAgeFrames != 1:
+            raise ConfigError("speculativePipeline.maxSpeculativeAgeFrames must be 1")
+        if self.batchMergeEnabled and not self.enabled:
+            raise ConfigError(
+                "speculativePipeline.batchMergeEnabled requires speculativePipeline.enabled"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class VisualizationConfig:
     enabled: bool
     outputRoot: Path
@@ -232,6 +264,7 @@ class AppConfig:
     tracking: TrackingConfig
     recovery: RecoveryConfig
     runtime: RuntimeConfig
+    speculativePipeline: SpeculativePipelineConfig
     visualization: VisualizationConfig
     sourcePath: Path
 
@@ -568,6 +601,7 @@ def loadConfig(path: str | Path) -> AppConfig:
             "tracking",
             "recovery",
             "runtime",
+            "speculativePipeline",
             "visualization",
         },
     )
@@ -655,6 +689,19 @@ def loadConfig(path: str | Path) -> AppConfig:
             "inferRequestQueueCapacity",
             "inferResponseQueueCapacity",
             "resultQueueCapacity",
+        },
+    )
+    speculativeRaw = _section(
+        root,
+        "speculativePipeline",
+        {
+            "enabled",
+            "batchMergeEnabled",
+            "maxRollbackRate",
+            "centerGapRatio",
+            "logScaleGap",
+            "minimumDirectionConfidence",
+            "maxSpeculativeAgeFrames",
         },
     )
     visualizationRaw = _section(root, "visualization", {"enabled", "outputRoot", "stages"})
@@ -805,6 +852,33 @@ def loadConfig(path: str | Path) -> AppConfig:
             ),
             resultQueueCapacity=_requireInt(
                 "runtime.resultQueueCapacity", runtimeRaw["resultQueueCapacity"]
+            ),
+        ),
+        speculativePipeline=SpeculativePipelineConfig(
+            enabled=_requireBool("speculativePipeline.enabled", speculativeRaw["enabled"]),
+            batchMergeEnabled=_requireBool(
+                "speculativePipeline.batchMergeEnabled",
+                speculativeRaw["batchMergeEnabled"],
+            ),
+            maxRollbackRate=_requireFloat(
+                "speculativePipeline.maxRollbackRate",
+                speculativeRaw["maxRollbackRate"],
+            ),
+            centerGapRatio=_requireFloat(
+                "speculativePipeline.centerGapRatio",
+                speculativeRaw["centerGapRatio"],
+            ),
+            logScaleGap=_requireFloat(
+                "speculativePipeline.logScaleGap",
+                speculativeRaw["logScaleGap"],
+            ),
+            minimumDirectionConfidence=_requireFloat(
+                "speculativePipeline.minimumDirectionConfidence",
+                speculativeRaw["minimumDirectionConfidence"],
+            ),
+            maxSpeculativeAgeFrames=_requireInt(
+                "speculativePipeline.maxSpeculativeAgeFrames",
+                speculativeRaw["maxSpeculativeAgeFrames"],
             ),
         ),
         visualization=VisualizationConfig(

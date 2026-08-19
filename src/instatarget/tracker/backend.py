@@ -7,7 +7,15 @@ from time import perf_counter_ns
 
 from instatarget.core.errors import ProtocolError
 from instatarget.core.protocols import TrackerBackend as TrackerBackendProtocol
-from instatarget.core.types import BBoxXYWH, LocalObservation, LocalView, TemplateCommand
+from instatarget.core.types import (
+    BBoxXYWH,
+    LocalObservation,
+    LocalView,
+    RoutedInferenceTask,
+    RoutedLocalObservation,
+    TaskKey,
+    TemplateCommand,
+)
 from instatarget.tracker.hit_backend import HiTBackend
 from instatarget.tracker.observation import buildRgbObservation
 from instatarget.tracker.template import TemplateCache
@@ -43,11 +51,61 @@ class TrackerBackendImpl(TrackerBackendProtocol):
         views: Sequence[LocalView],
         command: TemplateCommand,
     ) -> Sequence[LocalObservation]:
+        _validateViewSequence(views)
+        observations = self._inferViews(views, command)
+        self._rememberViews(views, int(command.frameIndex))
+        return observations
+
+    def inferTasks(
+        self,
+        tasks: Sequence[RoutedInferenceTask],
+        command: TemplateCommand,
+    ) -> Sequence[RoutedLocalObservation]:
+        """Infer one mixed batch and bind every output to its immutable task identity."""
+        taskKeys = tuple(task.key for task in tasks)
+        if not tasks:
+            return ()
+        if len(taskKeys) != len(set(taskKeys)):
+            raise ProtocolError("routed inference tasks must have unique TaskKeys")
+        if any(task.key.sequenceId != taskKeys[0].sequenceId for task in tasks[1:]):
+            raise ProtocolError("one routed batch cannot cross sequence boundaries")
+        commandFrame = int(command.frameIndex)
+        taskFrames = {int(task.key.frameIndex) for task in tasks}
+        if any(frame not in {commandFrame, commandFrame + 1} for frame in taskFrames):
+            raise ProtocolError("routed tasks may only contain the command frame and its successor")
+        views = tuple(task.view for task in tasks)
+        _validateViewSequence(views)
+        observations = self._inferViews(views, command)
+        formalViews = tuple(task.view for task in tasks if int(task.key.frameIndex) == commandFrame)
+        self._rememberViews(formalViews, commandFrame)
+        return tuple(
+            RoutedLocalObservation(task.key, observation)
+            for task, observation in zip(tasks, observations, strict=True)
+        )
+
+    @staticmethod
+    def routeTasks(
+        outputs: Sequence[RoutedLocalObservation],
+        expectedKeys: Sequence[TaskKey],
+    ) -> tuple[RoutedLocalObservation, ...]:
+        """Restore deterministic TaskKey order and reject duplicates or missing slots."""
+        expected = tuple(expectedKeys)
+        if len(expected) != len(set(expected)):
+            raise ProtocolError("expected routed inference keys must be unique")
+        byKey = {item.key: item for item in outputs}
+        if len(byKey) != len(outputs) or set(byKey) != set(expected):
+            raise ProtocolError("routed inference output keys do not match requested TaskKeys")
+        return tuple(byKey[key] for key in expected)
+
+    def _inferViews(
+        self,
+        views: Sequence[LocalView],
+        command: TemplateCommand,
+    ) -> tuple[LocalObservation, ...]:
         if self._closed:
             raise ProtocolError("tracker backend is closed")
         if not self._initialized:
             raise ProtocolError("tracker backend has not been initialized")
-        _validateViewSequence(views)
         self._templates.apply(self._hitBackend, command, self._previousViews)
         snapshot = self._templates.snapshot()
         inferenceStartedNs = perf_counter_ns()
@@ -58,18 +116,20 @@ class TrackerBackendImpl(TrackerBackendProtocol):
         sharedInferenceNs = (
             (perf_counter_ns() - inferenceStartedNs) // len(views) if views else 0
         )
-        observations = tuple(
+        return tuple(
             buildRgbObservation(view, prediction, sharedInferenceNs)
             for view, prediction in zip(views, predictions, strict=True)
         )
+
+    def _rememberViews(self, views: Sequence[LocalView], frameIndex: int) -> None:
+        if not views:
+            return
         currentViews = {view.spec.viewId: _copyView(view) for view in views}
-        currentFrameIndex = int(command.frameIndex)
-        if self._previousViewsFrameIndex == currentFrameIndex:
+        if self._previousViewsFrameIndex == frameIndex:
             self._previousViews.update(currentViews)
         else:
             self._previousViews = currentViews
-        self._previousViewsFrameIndex = currentFrameIndex
-        return observations
+        self._previousViewsFrameIndex = frameIndex
 
     def close(self) -> None:
         if self._closed:

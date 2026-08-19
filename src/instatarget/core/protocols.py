@@ -17,6 +17,8 @@ from instatarget.core.types import (
     LocalView,
     MotionState3D,
     ProjectedObservation,
+    RoutedInferenceTask,
+    RoutedLocalObservation,
     SearchPlan,
     SphericalPoint,
     TemplateCommand,
@@ -113,6 +115,12 @@ class TrackerBackend(Protocol):
         views: Sequence[LocalView],
         command: TemplateCommand,
     ) -> Sequence[LocalObservation]: ...
+
+    def inferTasks(
+        self,
+        tasks: Sequence[RoutedInferenceTask],
+        command: TemplateCommand,
+    ) -> Sequence[RoutedLocalObservation]: ...
 
     def close(self) -> None: ...
 

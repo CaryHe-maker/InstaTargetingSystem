@@ -55,6 +55,14 @@ runtime:
   inferRequestQueueCapacity: 1
   inferResponseQueueCapacity: 1
   resultQueueCapacity: 32
+speculativePipeline:
+  enabled: false
+  batchMergeEnabled: false
+  maxRollbackRate: 0.20
+  centerGapRatio: 0.50
+  logScaleGap: 0.25
+  minimumDirectionConfidence: 0.80
+  maxSpeculativeAgeFrames: 1
 visualization:
   enabled: false
   outputRoot: ../outputs/visualization
