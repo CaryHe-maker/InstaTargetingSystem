@@ -95,11 +95,12 @@ experiments/*
 !experiments/README.md
 
 # Model weights and inference engines
-models/
+models/*
 weights/
 checkpoints/
 *.pt
 *.pth
+!models/hit_small_inference.pth
 *.onnx
 *.engine
 *.plan
