@@ -59,7 +59,7 @@ class StateEvaluator:
             geometry,
             overlapRate=FUSION_OVERLAP_RATE,
             sourceMinConfidence=self._config.fusionSourceMinConfidence,
-            boxMode=FusionBoxMode.REFERENCE_ADAPTIVE,
+            boxMode=FusionBoxMode(self._config.fusionBoxMode),
         ).fuse(
             candidatePool,
             frameWidthPx=frameWidthPx,

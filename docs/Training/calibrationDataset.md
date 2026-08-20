@@ -1,10 +1,10 @@
 # 外观与运动校准数据流程
 
-外观 Beta Calibration、运动校准和 SingleScore 权重都由 Controller 模块拥有，但参数质量取决于离线数据，因此在 Training 模块记录统一的数据构建流程。
+外观 Beta Calibration 与 SingleScore 权重由 Controller 模块拥有，但参数质量取决于离线数据，因此在 Training 模块记录统一的数据构建流程。唯一真实数据根是 `E:\NewDownload\train`；仓库 `data/` 不得用于校准、IoU 或发布指标。
 
 ## 样本收集
 
-在冻结模型权重后运行独立校准序列，保存每个候选的 `backendFusedScore`、`appearanceProbability`、中心/尺度残差、预测协方差、`rawMotionScore`、reliability、SingleScore、球面/ERP 真值误差、状态、round、目标纬度、view role、`normalizedRadius`、`edgeMargin` 和 `envelopeInflation`。标签应依据局部预测回投后的真实命中标准生成，而不是依据最终 Controller 是否输出。
+在冻结模型权重后运行 `tools/collect_score_calibration.py`。工具用生产 Geometry 与 Stage 3 backend 收集稳定 oracle views，保存 presence、quality、二者乘积、运动分、局部/球面真值误差及投影诊断。标签依据局部预测回投后的真实命中生成，而不是依据最终 Controller 是否输出，避免 Controller 漂移污染校准标签。
 
 ## 数据划分
 
@@ -12,13 +12,13 @@
 
 ## 拟合与选择
 
-外观拟合 `sigmoid(c + alpha log(p) - beta log(1-p))` 三参数并约束单调。运动分数比较 Beta Calibration、isotonic regression 和固定 logit-temperature；样本不足时继续使用 identity，不做逐帧 min-max。用负对数似然、Brier score、候选排序 AUC 和 reliability diagram 选择参数。若高分段或遮挡/边缘样本不足，不能仅靠手选锚点宣称泛化良好。
+`tools/fit_score_calibration.py` 对 `presence*quality` 拟合 `sigmoid(c + alpha log(p) - beta log(1-p))` 三参数并约束单调。A1 同时比较 presence、quality 与乘积；当前乘积在 Brier、ECE 与 ROC-AUC 上最优。运动分当前保持已有同帧视图中心先验，不做逐帧 min-max。
 
 ## 与阈值联调
 
-先冻结两个校准映射，再在另一验证子集联合比较 80/20、70/30、60/40，并选择 `tracking.candidateMinScore` 和 `evaluator.fusionSourceMinConfidence`。`evaluator.successRate` 当前只写入诊断字段，不是可调生产门限。把同一数据同时用于拟合映射和调阈值会产生过拟合。
+当前 E02 在 6 个 calibration 序列、4792 个候选上联合选择 50/50 SingleScore 与两个工作点：`candidateMinScore=0.597262`、`fusionSourceMinConfidence=0.740642`。`evaluator.successRate` 当前只写入诊断字段，不是生产门限。最终 holdout 尚未读取，也不能用于继续拟合或调阈值。
 
 ## 发布
 
-当前参数和 SingleScore 权重存于 `controller/fused_score.py`。替换时应保存数据版本、模型权重哈希、拟合脚本、外观/运动参数、组合权重、校准指标和端到端回归结果。
+发布参数存于版本化 JSON，并记录 checkpoint SHA-256、manifest SHA-256、输入字段、拟合参数、组合权重、阈值和指标。Runtime 严格验证产物结构、checkpoint 哈希和 YAML 阈值；任何模型替换都必须生成新产物。
 

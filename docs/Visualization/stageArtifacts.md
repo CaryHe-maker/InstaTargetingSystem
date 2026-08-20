@@ -8,7 +8,7 @@
 
 ## backend_box
 
-在每个 LocalView 上绘制 HiT 局部框。标签 `fuseScore=raw/appearance` 依次显示 backend 原始融合分与 Beta Calibration 后的外观概率，可区分“模型框错”“外观校准错”和“Geometry 回投错”。
+在每个 LocalView 上绘制 HiT 局部框。标签 `fuseScore=raw/appearance` 依次显示 Stage 3 `presence*predictedIoU` 与 checkpoint 绑定校准后的外观概率，可区分“模型框错”“外观校准错”和“Geometry 回投错”。
 
 ## geometry_box
 

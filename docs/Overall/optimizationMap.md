@@ -2,7 +2,7 @@
 
 ## 想提高找回率
 
-先检查 Controller 的视域覆盖和 StateEvaluator，而不是直接放大 HiT 框。相关文档是 `Controller/viewPlanning.md`、`Controller/stateEvaluator.md` 和 `Controller/stateMachine.md`。当前有效门限是 `tracking.candidateMinScore` 与 `evaluator.fusionSourceMinConfidence`；Fusor overlap 固定为代码常量 0.70，所有模式统一使用上一可信框面积驱动的自适应裁剪。正常线程的 TRACKING/UNCERTAIN 视图预算均为 8；保留的显式 LOST planner 预算为 10。当前没有单独的 UNCERTAIN patience 参数。
+先检查 Controller 的视域覆盖和 StateEvaluator，而不是直接放大 HiT 框。相关文档是 `Controller/viewPlanning.md`、`Controller/stateEvaluator.md` 和 `Controller/stateMachine.md`。当前有效门限是 `tracking.candidateMinScore` 与 `evaluator.fusionSourceMinConfidence`；Fusor overlap 固定为代码常量 0.70，生产融合几何为 `best_source`。正常线程的 TRACKING/UNCERTAIN 视图预算均为 8；保留的显式 LOST planner 预算为 10。当前没有单独的 UNCERTAIN patience 参数。
 
 ## 想降低误检
 
@@ -22,5 +22,5 @@ HiT 已按轮执行真实 RGB tensor batch：正常线程的 TRACKING 与 UNCERT
 
 ## 优化的最低验证集
 
-每次算法调整至少比较：成功率/IoU、平均每帧视图数、每状态帧数、可靠融合比例、平均处理时间和最差处理时间。涉及分数时应保留原始分数与校准分数的联合日志，避免只看最终输出。
+每次算法调整至少比较：成功率/IoU、tracking loss rate、平均每帧视图数、每状态帧数、可靠融合比例和 P50/P95/P99 处理时间。涉及分数时应保留原始分数与校准分数的联合日志，避免只看最终输出。真实统计只能来自 `E:\NewDownload\train`；仓库 `data/` 只可用于纯单元测试。
 

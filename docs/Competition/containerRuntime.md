@@ -8,13 +8,13 @@
 
 ## 紧凑权重
 
-原始 `models/hit_small.pth` 包含 optimizer、stats 和训练设置，约 130.8 MiB（137 MB）。构建前运行：
+原始 `models/hit_small_stage3.pth` 包含 Stage 3 训练状态。构建前运行：
 
 ```powershell
 .\.venv\Scripts\python.exe docker\compact_checkpoint.py
 ```
 
-脚本逐张量验证后生成约 46.1 MiB 的 `models/hit_small_inference.pth`，只保留完全相同的 `net` 状态。Docker 将它复制为容器内的 `/app/models/hit_small.pth`；原训练 checkpoint 不会进入构建上下文。
+脚本逐张量验证后生成 `models/hit_small_stage3_inference.pth`，只保留完全相同的 Stage 3 `model` 状态；同时生成 `hit_small_stage3_inference.calibration.json`，其 checkpoint 哈希绑定压缩文件，其他拟合参数与工作点保持不变。Docker 将二者复制为配置期望的 `/app/models/hit_small_stage3.*`；原训练 checkpoint 不会进入构建上下文。
 
 ## 默认挂载
 
@@ -26,13 +26,20 @@
 
 ## 构建与运行
 
+最终提交流程以 GitHub checkout 为唯一输入。压缩 Stage 3 权重和哈希绑定校准文件已纳入版本控制，国内服务器不需要访问开发机 checkpoint，也不应在服务器重新运行 `compact_checkpoint.py`：
+
 ```powershell
-.\.venv\Scripts\python.exe docker\compact_checkpoint.py
+git clone <repository-url>
+cd InstaTargetingSystem
+python docker/verify_submission.py
 docker build -t instatarget:submission .
+python docker/verify_submission.py --image instatarget:submission
 docker run --rm --gpus all -v "${PWD}\dataset:/mnt/dataset" -v "${PWD}\result:/mnt/result" instatarget:submission
 ```
 
-构建完成后用 `docker image inspect instatarget:submission --format='{{.Size}}'` 检查总字节数，并用 `docker history instatarget:submission` 检查层大小。提交时不应包含原始 checkpoint、构建缓存或本地数据。
+Dockerfile 的最终 `scratch` 阶段只有 7 条文件系统 `COPY`，分别合并 `/layer-parts/00` 至 `06`。`ENV` 和 `ENTRYPOINT` 只写镜像配置，不产生 RootFS layer。验证脚本在构建前检查必需文件、checkpoint/calibration 哈希和静态 7 层结构，构建后检查 `.RootFS.Layers` 数量必须严格等于 7；多一层或少一层都会失败。
+
+构建完成后可用 `docker image inspect instatarget:submission --format='{{.Size}}'` 检查总字节数，并用 `docker history instatarget:submission` 检查层大小。上传镜像时不应包含原始 checkpoint、构建缓存或本地数据。
 
 ## 可重复性
 

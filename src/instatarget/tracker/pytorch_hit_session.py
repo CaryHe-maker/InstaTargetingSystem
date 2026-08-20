@@ -48,7 +48,7 @@ class PyTorchHiTSession:
         if not self._weights.is_file():
             raise ModelError(f"HiT checkpoint does not exist: {self._weights}")
         self._device = self._torch.device("cuda")
-        self._model, self._hasLearnedConfidence = self._loadModel()
+        self._model = self._loadModel()
         self._mean = self._torch.tensor(
             [0.485, 0.456, 0.406], device=self._device, dtype=self._torch.float32
         ).view(1, 3, 1, 1)
@@ -111,14 +111,10 @@ class PyTorchHiTSession:
             self._torch,
             batchSize,
         )
-        if self._hasLearnedConfidence:
-            presenceLogits = output["presenceLogit"].float().reshape(-1).tolist()
-            qualityLogits = output["qualityLogit"].float().reshape(-1).tolist()
-            presenceProbabilities = output["presenceProbability"].float().reshape(-1).tolist()
-            qualityProbabilities = output["qualityProbability"].float().reshape(-1).tolist()
-        else:
-            presenceLogits = qualityLogits = [None] * batchSize
-            presenceProbabilities = qualityProbabilities = [None] * batchSize
+        presenceLogits = output["presenceLogit"].float().reshape(-1).tolist()
+        qualityLogits = output["qualityLogit"].float().reshape(-1).tolist()
+        presenceProbabilities = output["presenceProbability"].float().reshape(-1).tolist()
+        qualityProbabilities = output["qualityProbability"].float().reshape(-1).tolist()
         return tuple(
             HiTPrediction(
                 bbox=_normalizedBoxToPixels(
@@ -128,13 +124,9 @@ class PyTorchHiTSession:
                 ),
                 modelScore=(
                     float(presenceProbability * qualityProbability)
-                    if presenceProbability is not None and qualityProbability is not None
-                    else certainty
                 ),
                 appearanceScore=(
                     float(presenceProbability * qualityProbability)
-                    if presenceProbability is not None and qualityProbability is not None
-                    else certainty
                 ),
                 presenceLogit=presenceLogit,
                 qualityLogit=qualityLogit,
@@ -170,7 +162,7 @@ class PyTorchHiTSession:
         self._closed = True
         self._torch.cuda.empty_cache()
 
-    def _loadModel(self) -> tuple[Any, bool]:
+    def _loadModel(self) -> Any:
         _activateVendorTree(self._hitRoot)
         try:
             import lib.models.HiT.backbone as backboneModule
@@ -192,17 +184,11 @@ class PyTorchHiTSession:
         try:
             model = build_hit(cfg)
             checkpoint = _loadCheckpoint(self._torch, self._weights)
-            learnedConfidence = isinstance(checkpoint.get("model"), dict)
-            if learnedConfidence:
-                wrapped = HiTTrainingModel(model)
-                wrapped.load_state_dict(checkpoint["model"], strict=True)
-                runtimeModel = wrapped
-            else:
-                state = checkpoint.get("net") if isinstance(checkpoint, dict) else None
-                if not isinstance(state, dict):
-                    raise ModelError("HiT checkpoint has no 'model' or legacy 'net' state")
-                model.load_state_dict(state, strict=True)
-                runtimeModel = model
+            state = checkpoint.get("model") if isinstance(checkpoint, dict) else None
+            if not isinstance(state, dict):
+                raise ModelError("Stage 3 HiT checkpoint has no 'model' state")
+            runtimeModel = HiTTrainingModel(model)
+            runtimeModel.load_state_dict(state, strict=True)
             replace_batchnorm(model.backbone.body)
             runtimeModel = runtimeModel.to(self._device).eval()
         except ModelError:
@@ -210,7 +196,7 @@ class PyTorchHiTSession:
         except Exception as error:
             raise ModelError(f"cannot construct HiT-Small from {self._weights}: {error}") from error
 
-        return runtimeModel, learnedConfidence
+        return runtimeModel
 
     def _preprocess(self, rgb: NDArray[np.uint8]) -> Any:
         return self._preprocessBatch(np.ascontiguousarray(rgb)[None, ...])
@@ -229,18 +215,7 @@ class PyTorchHiTSession:
             else nullcontext()
         )
         with self._torch.inference_mode(), autocast:
-            if self._hasLearnedConfidence:
-                output = self._model(template, search)
-            else:
-                features = self._model.forward_backbone(
-                    [search, template], first_score=None, threshold=0.9
-                )
-                raw, _, _ = self._model.forward_head(features)
-                output = {
-                    "predBoxes": raw["pred_boxes"],
-                    "cornerHeatmapTl": raw["corner_heatmap_tl"],
-                    "cornerHeatmapBr": raw["corner_heatmap_br"],
-                }
+            output = self._model(template, search)
         boxes = output.get("predBoxes")
         if boxes is None or boxes.numel() == 0:
             raise ModelError("HiT returned no predicted boxes")
@@ -360,7 +335,15 @@ def _heatmapCertainties(
 
 
 def _outputsAreFinite(output: dict[str, Any], torch: ModuleType) -> bool:
-    required = ("predBoxes", "cornerHeatmapTl", "cornerHeatmapBr")
+    required = (
+        "predBoxes",
+        "cornerHeatmapTl",
+        "cornerHeatmapBr",
+        "presenceLogit",
+        "qualityLogit",
+        "presenceProbability",
+        "qualityProbability",
+    )
     return all(name in output and bool(torch.isfinite(output[name]).all()) for name in required)
 
 

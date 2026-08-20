@@ -10,11 +10,14 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from instatarget.controller import (
+    UNCALIBRATED_STAGE3_SCORE_CALIBRATION,
+    ScoreCalibration,
     SpeculativePipeline,
     TrackControllerImpl,
     calibrateBackendFusedScore,
     calibrateLocalAppearanceProbabilities,
     composeSingleScore,
+    loadScoreCalibration,
     scoreViewCenterMotion,
 )
 from instatarget.core.config import AppConfig, ModelConfig
@@ -47,6 +50,7 @@ class RuntimeBundle:
     controller: TrackControllerImpl
     backend: TrackerBackend
     sink: ResultSinkProtocol
+    scoreCalibration: ScoreCalibration
     recorder: VisualizationRecorder | None = None
     speculativePipeline: SpeculativePipeline | None = None
 
@@ -55,6 +59,7 @@ def buildRuntime(
     config: AppConfig,
     *,
     hitSessionFactory: Callable[[ModelConfig], HiTSession] | None = None,
+    allowUncalibratedScoring: bool = False,
 ) -> RuntimeBundle:
     sessionFactory = hitSessionFactory or PyTorchHiTSession
     geometry = SphericalGeometryImpl(
@@ -70,7 +75,27 @@ def buildRuntime(
 
         recorder = VisualizationRecorder(config.visualization)
     speculativePipeline = SpeculativePipeline(config.speculativePipeline)
-    return RuntimeBundle(geometry, controller, backend, sink, recorder, speculativePipeline)
+    if config.scoring.calibrationArtifact is not None:
+        scoreCalibration = loadScoreCalibration(
+            config.scoring.calibrationArtifact,
+            checkpointPath=config.model.weights,
+            candidateMinScore=config.tracking.candidateMinScore,
+            fusionSourceMinConfidence=config.evaluator.fusionSourceMinConfidence,
+            requireCheckpointHashMatch=config.scoring.requireCheckpointHashMatch,
+        )
+    elif allowUncalibratedScoring:
+        scoreCalibration = UNCALIBRATED_STAGE3_SCORE_CALIBRATION
+    else:
+        raise ValueError("production runtime requires a Stage 3 calibration artifact")
+    return RuntimeBundle(
+        geometry=geometry,
+        controller=controller,
+        backend=backend,
+        sink=sink,
+        scoreCalibration=scoreCalibration,
+        recorder=recorder,
+        speculativePipeline=speculativePipeline,
+    )
 
 
 def runTracking(
@@ -84,6 +109,7 @@ def runTracking(
     recorder: VisualizationRecorder | None = None,
     resultRecorder: ResultVisualizationRecorder | None = None,
     processingTimer: TimeCounter | None = None,
+    scoreCalibration: ScoreCalibration,
 ) -> int:
     """Run the sequential tracking pipeline and publish one result per frame."""
     try:
@@ -119,7 +145,10 @@ def runTracking(
                     while True:
                         views = tuple(geometry.cropViews(frame, plan.views))
                         rawObservations = tuple(backend.infer(views, plan.templateCommand))
-                        observations = calibrateLocalAppearanceProbabilities(rawObservations)
+                        observations = calibrateLocalAppearanceProbabilities(
+                            rawObservations,
+                            scoreCalibration,
+                        )
                         projected = tuple(
                             _projectObservation(
                                 frame=frame,
@@ -127,6 +156,7 @@ def runTracking(
                                 observation=observation,
                                 predictedMotion=plan.predictedMotion,
                                 geometry=geometry,
+                                scoreCalibration=scoreCalibration,
                             )
                             for view, observation in zip(views, observations, strict=True)
                         )
@@ -197,6 +227,7 @@ def _projectObservation(
     observation: LocalObservation,
     predictedMotion: MotionState3D | None,
     geometry: SphericalGeometry,
+    scoreCalibration: ScoreCalibration,
 ) -> ProjectedObservation:
     projection = geometry.projectLocalBoxBoundary(
         observation.bbox,
@@ -208,9 +239,13 @@ def _projectObservation(
     appearanceProbability = (
         observation.appearanceProbability
         if observation.appearanceProbability is not None
-        else calibrateBackendFusedScore(observation.fusedScore)
+        else calibrateBackendFusedScore(observation.fusedScore, scoreCalibration)
     )
-    singleScore = composeSingleScore(appearanceProbability, motion.effectiveProbability)
+    singleScore = composeSingleScore(
+        appearanceProbability,
+        motion.effectiveProbability,
+        scoreCalibration,
+    )
     scaleScore = _scaleScore(observation.bbox, view)
     normalizedRadius, edgeMargin = _projectionQuality(observation.bbox, view)
     return ProjectedObservation(

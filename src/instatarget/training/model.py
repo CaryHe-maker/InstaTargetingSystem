@@ -99,12 +99,9 @@ def buildTrainingModel(config: TrainingConfig) -> HiTTrainingModel:
         dropout=config.model.dropout,
     )
     checkpoint = _loadCheckpoint(config.model.initialWeights)
-    if isinstance(checkpoint.get("model"), dict):
-        model.load_state_dict(checkpoint["model"], strict=True)
-    elif isinstance(checkpoint.get("net"), dict):
-        baseModel.load_state_dict(checkpoint["net"], strict=True)
-    else:
-        raise ModelError("training checkpoint must contain a 'model' or legacy 'net' state")
+    if not isinstance(checkpoint.get("model"), dict):
+        raise ModelError("training checkpoint must contain a Stage 3 'model' state")
+    model.load_state_dict(checkpoint["model"], strict=True)
     return model
 
 

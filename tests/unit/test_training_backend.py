@@ -162,7 +162,9 @@ class ManifestAndGeometryTest(unittest.TestCase):
     def testTrainingConfigIsIndependentAndStrict(self) -> None:
         config = loadTrainingConfig(REPOSITORY_ROOT / "configs" / "train_backend.yaml")
 
-        self.assertEqual(config.model.stage, 1)
+        self.assertEqual(config.model.stage, 3)
+        self.assertEqual(config.model.initialWeights.name, "hit_small_stage3.pth")
+        self.assertEqual(config.runtime.checkpointDir.name, "stage3_followup")
         self.assertEqual(config.data.templateSizePx, 128)
         self.assertEqual(config.optimization.gradientAccumulation, 4)
         self.assertEqual(config.runtime.resume, None)

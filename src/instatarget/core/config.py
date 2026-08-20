@@ -30,6 +30,16 @@ class ModelConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ScoringConfig:
+    calibrationArtifact: Path | None
+    requireCheckpointHashMatch: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.requireCheckpointHashMatch, bool):
+            raise ConfigError("scoring.requireCheckpointHashMatch must be boolean")
+
+
+@dataclass(frozen=True, slots=True)
 class GeometryConfig:
     viewWidthPx: int
     viewHeightPx: int
@@ -69,6 +79,7 @@ class EvaluatorConfig:
     firstRoundFusionOverlap: float = 0.30
     overlapThreshold: float = 0.70
     fusionSourceMinConfidence: float = 0.80
+    fusionBoxMode: str = "reference_adaptive"
 
     def __post_init__(self) -> None:
         _requireProbability("evaluator.supportWeight", self.supportWeight)
@@ -85,6 +96,10 @@ class EvaluatorConfig:
         _requireProbability(
             "evaluator.fusionSourceMinConfidence", self.fusionSourceMinConfidence
         )
+        if self.fusionBoxMode not in {"reference_adaptive", "best_source"}:
+            raise ConfigError(
+                "evaluator.fusionBoxMode must be 'reference_adaptive' or 'best_source'"
+            )
         if self.firstRoundFusionOverlap >= self.overlapThreshold:
             raise ConfigError(
                 "evaluator thresholds must satisfy firstRoundFusionOverlap < overlapThreshold"
@@ -257,6 +272,7 @@ class VisualizationConfig:
 class AppConfig:
     schemaVersion: int
     model: ModelConfig
+    scoring: ScoringConfig
     geometry: GeometryConfig
     decisionGate: DecisionGateConfig
     evaluator: EvaluatorConfig
@@ -594,6 +610,7 @@ def loadConfig(path: str | Path) -> AppConfig:
         {
             "schemaVersion",
             "model",
+            "scoring",
             "geometry",
             "decisionGate",
             "evaluator",
@@ -614,6 +631,11 @@ def loadConfig(path: str | Path) -> AppConfig:
         )
 
     modelRaw = _section(root, "model", {"backend", "variant", "weights", "precision"})
+    scoringRaw = _section(
+        root,
+        "scoring",
+        {"calibrationArtifact", "requireCheckpointHashMatch"},
+    )
     geometryRaw = _section(
         root,
         "geometry",
@@ -635,6 +657,7 @@ def loadConfig(path: str | Path) -> AppConfig:
             "firstRoundFusionOverlap",
             "overlapThreshold",
             "fusionSourceMinConfidence",
+            "fusionBoxMode",
         },
     )
     motionRaw = _section(
@@ -711,6 +734,16 @@ def loadConfig(path: str | Path) -> AppConfig:
     if not weightsPath.is_absolute():
         weightsPath = (configPath.parent / weightsPath).resolve()
 
+    calibrationValue = scoringRaw["calibrationArtifact"]
+    if calibrationValue is None:
+        calibrationPath = None
+    else:
+        calibrationPath = Path(
+            _requireStr("scoring.calibrationArtifact", calibrationValue)
+        ).expanduser()
+        if not calibrationPath.is_absolute():
+            calibrationPath = (configPath.parent / calibrationPath).resolve()
+
     outputRootValue = _requireStr("visualization.outputRoot", visualizationRaw["outputRoot"])
     outputRoot = Path(outputRootValue).expanduser()
     if not outputRoot.is_absolute():
@@ -723,6 +756,13 @@ def loadConfig(path: str | Path) -> AppConfig:
             variant=_requireStr("model.variant", modelRaw["variant"]),
             weights=weightsPath,
             precision=_requireStr("model.precision", modelRaw["precision"]),
+        ),
+        scoring=ScoringConfig(
+            calibrationArtifact=calibrationPath,
+            requireCheckpointHashMatch=_requireBool(
+                "scoring.requireCheckpointHashMatch",
+                scoringRaw["requireCheckpointHashMatch"],
+            ),
         ),
         geometry=GeometryConfig(
             viewWidthPx=_requireInt("geometry.viewWidthPx", geometryRaw["viewWidthPx"]),
@@ -764,6 +804,10 @@ def loadConfig(path: str | Path) -> AppConfig:
             fusionSourceMinConfidence=_requireFloat(
                 "evaluator.fusionSourceMinConfidence",
                 evaluatorRaw["fusionSourceMinConfidence"],
+            ),
+            fusionBoxMode=_requireStr(
+                "evaluator.fusionBoxMode",
+                evaluatorRaw["fusionBoxMode"],
             ),
         ),
         motion=MotionConfig(

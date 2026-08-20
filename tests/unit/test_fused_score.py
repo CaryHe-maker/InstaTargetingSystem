@@ -7,10 +7,12 @@ import numpy as np
 
 from instatarget.app.driver import _projectObservation
 from instatarget.controller import (
+    BetaCalibration,
     MotionScore,
+    ScoreCalibration,
+    calibrateBackendFusedScore,
+    calibrateLocalAppearanceProbabilities,
     composeSingleScore,
-    remapFusedScore,
-    remapLocalObservationFusedScores,
     scoreMotionConsistency,
     scoreViewCenterMotion,
 )
@@ -27,39 +29,45 @@ from instatarget.core.types import (
 )
 from instatarget.geometry import makeSphericalPoint
 
+TEST_CALIBRATION = ScoreCalibration(
+    format="instatarget.score-calibration.v1",
+    checkpointSha256="1" * 64,
+    manifestSha256="2" * 64,
+    split="calibration",
+    appearanceInput="presence_quality_product",
+    appearance=BetaCalibration(alpha=1.5, beta=0.75, intercept=-0.2),
+    appearanceWeight=0.8,
+    motionWeight=0.2,
+    candidateMinScore=0.35,
+    fusionSourceMinConfidence=0.65,
+)
+
 
 class FusedScoreRemappingTest(unittest.TestCase):
-    def testBetaCalibrationHitsRequestedAnchors(self) -> None:
-        expected = {
-            0.00: 0.00,
-            0.80: 0.05,
-            0.90: 0.45,
-            0.98: 0.97,
-            1.00: 1.00,
-        }
+    def testArtifactBetaCalibrationIsMonotonicAndKeepsEndpoints(self) -> None:
+        rawScores = (0.0, 0.1, 0.4, 0.8, 0.95, 1.0)
+        calibrated = tuple(
+            calibrateBackendFusedScore(score, TEST_CALIBRATION) for score in rawScores
+        )
 
-        for rawScore, remappedScore in expected.items():
-            with self.subTest(rawScore=rawScore):
-                self.assertAlmostEqual(remapFusedScore(rawScore), remappedScore, places=7)
-
-    def testStronglyStretchesPointEightToPointNineEight(self) -> None:
-        rawScores = (0.60, 0.80, 0.85, 0.90, 0.925, 0.95, 0.975, 0.99)
-        remapped = tuple(remapFusedScore(score) for score in rawScores)
-
-        self.assertEqual(remapped, tuple(sorted(remapped)))
-        self.assertGreater(remapFusedScore(0.98) - remapFusedScore(0.80), 0.90)
-        self.assertLess(remapFusedScore(0.85), 0.20)
-        self.assertGreater(remapFusedScore(0.95), 0.80)
+        self.assertEqual(calibrated, tuple(sorted(calibrated)))
+        self.assertEqual(calibrated[0], 0.0)
+        self.assertEqual(calibrated[-1], 1.0)
 
     def testCreatesNewObservationsWithoutOverwritingBackendScore(self) -> None:
         original = _observation(0.85)
 
-        (remapped,) = remapLocalObservationFusedScores((original,))
+        (remapped,) = calibrateLocalAppearanceProbabilities(
+            (original,), TEST_CALIBRATION
+        )
 
         self.assertIsNot(remapped, original)
         self.assertEqual(original.fusedScore, 0.85)
         self.assertEqual(remapped.fusedScore, 0.85)
-        self.assertAlmostEqual(remapped.appearanceProbability or 0.0, 0.16277496, places=7)
+        self.assertAlmostEqual(
+            remapped.appearanceProbability or 0.0,
+            calibrateBackendFusedScore(0.85, TEST_CALIBRATION),
+        )
         self.assertEqual(remapped.bbox, original.bbox)
         self.assertEqual(remapped.appearanceScore, original.appearanceScore)
 
@@ -96,8 +104,8 @@ class FusedScoreRemappingTest(unittest.TestCase):
         )
         self.assertAlmostEqual(unreliable.effectiveProbability, 0.5)
 
-    def testSingleScoreUsesSeventyThirtyLinearPool(self) -> None:
-        self.assertAlmostEqual(composeSingleScore(0.8, 0.2), 0.62)
+    def testSingleScoreUsesArtifactWeights(self) -> None:
+        self.assertAlmostEqual(composeSingleScore(0.8, 0.2, TEST_CALIBRATION), 0.68)
 
     def testViewCenterMotionFallsContinuouslyByPointOnePerThirtyDegrees(self) -> None:
         prediction = MotionState3D(
@@ -170,6 +178,7 @@ class FusedScoreRemappingTest(unittest.TestCase):
                 observation=observation,
                 predictedMotion=predicted,
                 geometry=geometry,
+                scoreCalibration=TEST_CALIBRATION,
             )
 
         score.assert_called_once_with(view.spec.bfov.center, predicted)

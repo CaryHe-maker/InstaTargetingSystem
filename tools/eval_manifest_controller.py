@@ -17,9 +17,14 @@ import numpy as np
 from instatarget.app.driver import buildRuntime, closeBackend, runTracking
 from instatarget.core.config import loadConfig
 from instatarget.core.types import FrameIndex, FramePacket, SequenceId, TrackResult
-from instatarget.eval.otb_metrics import circularBBoxIoU
+from instatarget.eval.otb_metrics import auc, circularBBoxIoU, trackingLossRate
 from instatarget.eval.spherical_metrics import bfovSphericalIoU, centerAngularErrorRad
-from instatarget.training.dataset import ManifestRecord, loadManifest
+from instatarget.training.dataset import (
+    ManifestRecord,
+    _bfovToNormalizedLocal,
+    _erpBoxToNormalizedLocal,
+    loadManifest,
+)
 
 
 class ManifestVideoSource:
@@ -96,10 +101,16 @@ class CandidateRecorder:
     def __init__(self, truth: dict[int, ManifestRecord]) -> None:
         self._truth = truth
         self._local: dict[tuple[int, int], Any] = {}
+        self._views: dict[tuple[int, int], Any] = {}
+        self.viewCounts: Counter[int] = Counter()
+        self.forwardCounts: Counter[int] = Counter()
         self.rows: list[dict[str, Any]] = []
 
     def recordLocalRgb(self, frame: FramePacket, views: Any) -> None:
-        del frame, views
+        self.viewCounts[int(frame.frameIndex)] += len(views)
+        self.forwardCounts[int(frame.frameIndex)] += 1
+        for view in views:
+            self._views[(int(frame.frameIndex), view.spec.viewId)] = view.spec
 
     def recordBackendBoxes(self, frame: FramePacket, views: Any, observations: Any) -> None:
         del views
@@ -110,6 +121,19 @@ class CandidateRecorder:
         record = self._truth[int(frame.frameIndex)]
         for observation in observations:
             local = self._local.pop((int(frame.frameIndex), observation.viewId))
+            spec = self._views.pop((int(frame.frameIndex), observation.viewId))
+            targetLocalBox = None
+            if record.visible:
+                targetLocalBox = (
+                    _bfovToNormalizedLocal(record.bfov, spec)
+                    if record.bfov is not None
+                    else _erpBoxToNormalizedLocal(
+                        record.bbox,
+                        spec,
+                        record.width,
+                        record.height,
+                    )
+                )
             iou = (
                 circularBBoxIoU(observation.bbox, record.bbox, record.width)
                 if record.visible and record.bbox is not None
@@ -117,9 +141,15 @@ class CandidateRecorder:
             )
             self.rows.append(
                 {
+                    "sequenceId": record.sequenceId,
+                    "split": record.split,
                     "frameIndex": int(frame.frameIndex),
                     "viewId": observation.viewId,
                     "visible": record.visible,
+                    "targetPresent": targetLocalBox is not None,
+                    "targetLocalBoxCxCyWh": (
+                        targetLocalBox.tolist() if targetLocalBox is not None else None
+                    ),
                     "circularErpIoU": iou,
                     "hitAt0.5": bool(record.visible and iou >= 0.5),
                     "modelScore": local.modelScore,
@@ -127,6 +157,7 @@ class CandidateRecorder:
                     "qualityLogit": local.qualityLogit,
                     "presenceProbability": local.presenceProbability,
                     "qualityProbability": local.qualityProbability,
+                    "predictedIoU": local.predictedIoU,
                     "cornerScore": local.cornerScore,
                     "appearanceProbability": observation.appearanceProbability,
                     "motionProbability": observation.motionProbability,
@@ -134,6 +165,18 @@ class CandidateRecorder:
                     "normalizedRadius": observation.normalizedRadius,
                     "edgeMargin": observation.edgeMargin,
                     "envelopeInflation": observation.envelopeInflation,
+                    "viewYawDeg": float(np.degrees(spec.bfov.center.yawRad)),
+                    "viewPitchDeg": float(np.degrees(spec.bfov.center.pitchRad)),
+                    "viewHorizontalFovDeg": float(
+                        np.degrees(spec.bfov.horizontalFovRad)
+                    ),
+                    "viewVerticalFovDeg": float(np.degrees(spec.bfov.verticalFovRad)),
+                    "targetPitchDeg": (
+                        float(np.degrees(record.bfov.center.pitchRad))
+                        if record.bfov is not None
+                        else None
+                    ),
+                    "difficultType": record.difficultType,
                 }
             )
 
@@ -143,6 +186,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--weights", required=True, type=Path)
+    parser.add_argument(
+        "--dataset-root",
+        type=Path,
+        default=Path(r"E:\NewDownload\train"),
+        help="Canonical labeled dataset root; manifest and every video must be inside it.",
+    )
     parser.add_argument(
         "--split",
         required=True,
@@ -154,6 +203,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--spherical-samples-yaw", type=int, default=128)
     parser.add_argument("--spherical-samples-pitch", type=int, default=64)
     parser.add_argument("--allow-holdout", action="store_true")
+    parser.add_argument(
+        "--uncalibrated-stage3",
+        action="store_true",
+        help="Use raw Stage 3 presence*quality for pre-calibration E01 only.",
+    )
     return parser
 
 
@@ -161,13 +215,28 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.split == "holdout" and not args.allow_holdout:
         raise RuntimeError("holdout evaluation requires --allow-holdout after model freeze")
+    datasetRoot = args.dataset_root.expanduser().resolve()
+    manifestPath = args.manifest.expanduser().resolve()
+    if not manifestPath.is_relative_to(datasetRoot):
+        raise RuntimeError(
+            f"manifest must be inside the canonical dataset root {datasetRoot}: {manifestPath}"
+        )
     records = tuple(
         record
-        for record in loadManifest(args.manifest)
+        for record in loadManifest(manifestPath)
         if record.split == args.split and record.sequenceId == args.sequence
     )
     if not records:
         raise RuntimeError(f"sequence is not present in split: {args.sequence}")
+    outside = sorted(
+        {
+            str(record.videoPath)
+            for record in records
+            if not record.videoPath.is_relative_to(datasetRoot)
+        }
+    )
+    if outside:
+        raise RuntimeError(f"manifest video is outside canonical dataset root: {outside[0]}")
     records = tuple(sorted(records, key=lambda item: item.frameIndex))
     if records[0].frameIndex != 0 or not records[0].visible or records[0].bbox is None:
         raise RuntimeError("sequence requires a visible frame-0 initialization")
@@ -178,6 +247,11 @@ def main(argv: list[str] | None = None) -> int:
     appConfig = replace(
         appConfig,
         model=replace(appConfig.model, weights=args.weights.resolve()),
+        scoring=(
+            replace(appConfig.scoring, calibrationArtifact=None)
+            if args.uncalibrated_stage3
+            else appConfig.scoring
+        ),
         visualization=replace(appConfig.visualization, enabled=False),
     )
     selected = records[: args.max_frames] if args.max_frames is not None else records
@@ -186,7 +260,10 @@ def main(argv: list[str] | None = None) -> int:
     sink = MemoryResultSink()
     timer = IntervalTimer()
     recorder = CandidateRecorder(truth)
-    runtime = buildRuntime(appConfig)
+    runtime = buildRuntime(
+        appConfig,
+        allowUncalibratedScoring=args.uncalibrated_stage3,
+    )
     source.open("")
     try:
         count = runTracking(
@@ -198,13 +275,14 @@ def main(argv: list[str] | None = None) -> int:
             sink=sink,
             recorder=recorder,
             processingTimer=timer,
+            scoreCalibration=runtime.scoreCalibration,
         )
         sink.finalize(count)
     finally:
         closeBackend(runtime.backend)
         source.close()
 
-    report = _summarize(args, selected, sink.results, timer, recorder.rows)
+    report = _summarize(args, selected, sink.results, timer, recorder)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix(args.output.suffix + ".tmp")
     temporary.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
@@ -216,6 +294,26 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     candidateTemporary.replace(candidates)
+    timings = args.output.with_name(f"{args.output.stem}.timings.jsonl")
+    timingTemporary = timings.with_suffix(timings.suffix + ".tmp")
+    timingTemporary.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "sequenceId": args.sequence,
+                    "frameIndex": int(record.frameIndex),
+                    "totalProcessingMs": interval / 1_000_000.0,
+                    "viewCount": recorder.viewCounts[int(record.frameIndex)],
+                    "forwardCount": recorder.forwardCounts[int(record.frameIndex)],
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+            for record, interval in zip(selected, timer.intervalsNs[:-1], strict=True)
+        ),
+        encoding="utf-8",
+    )
+    timingTemporary.replace(timings)
     print(json.dumps(report["summary"], indent=2))
     return 0
 
@@ -225,8 +323,9 @@ def _summarize(
     records: tuple[ManifestRecord, ...],
     results: list[TrackResult],
     timer: IntervalTimer,
-    candidates: list[dict[str, Any]],
+    recorder: CandidateRecorder,
 ) -> dict[str, Any]:
+    candidates = recorder.rows
     erpIous: list[float] = []
     sphericalIous: list[float] = []
     centerErrors: list[float] = []
@@ -234,12 +333,23 @@ def _summarize(
     heightErrors: list[float] = []
     absentCount = falsePositives = 0
     invalidSphericalPredictions = 0
+    frameRows: list[dict[str, Any]] = []
     for record, result in zip(records[1:], results[1:], strict=True):
         if not record.visible or record.bbox is None or record.bfov is None:
             absentCount += 1
             falsePositives += int(result.valid)
+            frameRows.append(
+                {
+                    "frameIndex": record.frameIndex,
+                    "visible": False,
+                    "valid": result.valid,
+                    "circularErpIoU": 0.0,
+                    "sphericalIoU": 0.0,
+                }
+            )
             continue
-        erpIous.append(circularBBoxIoU(result.bbox, record.bbox, record.width))
+        erpIoU = circularBBoxIoU(result.bbox, record.bbox, record.width)
+        erpIous.append(erpIoU)
         if not (
             0.0 < result.bfov.horizontalFovRad < pi
             and 0.0 < result.bfov.verticalFovRad < pi
@@ -258,6 +368,25 @@ def _summarize(
         centerErrors.append(centerAngularErrorRad(result.bfov, record.bfov))
         widthErrors.append(abs(result.bfov.horizontalFovRad / record.bfov.horizontalFovRad - 1.0))
         heightErrors.append(abs(result.bfov.verticalFovRad / record.bfov.verticalFovRad - 1.0))
+        frameRows.append(
+            {
+                "frameIndex": record.frameIndex,
+                "visible": True,
+                "valid": result.valid,
+                "circularErpIoU": erpIoU,
+                "sphericalIoU": sphericalIous[-1],
+                "centerErrorDeg": float(np.degrees(centerErrors[-1])),
+                "widthRelativeError": widthErrors[-1],
+                "heightRelativeError": heightErrors[-1],
+                "seam": bool(record.bbox.xPx + record.bbox.widthPx > record.width),
+                "highLatitude": bool(abs(record.bfov.center.pitchRad) >= pi / 3.0),
+                "smallTarget": bool(
+                    record.bbox.widthPx * record.bbox.heightPx
+                    <= 0.01 * record.width * record.height
+                ),
+                "difficultType": record.difficultType,
+            }
+        )
     frameIntervals = timer.intervalsNs[1:-1]
     elapsedMs = np.asarray(frameIntervals, dtype=np.float64) / 1_000_000.0
     values = np.asarray(erpIous, dtype=np.float64)
@@ -269,11 +398,20 @@ def _summarize(
         "evaluatedVisibleFrames": len(erpIous),
         "absentFrames": absentCount,
         "circularErpMeanIoU": float(values.mean()) if values.size else 0.0,
+        "successAUC": auc(erpIous),
         "successRateAt0.5": float((values > 0.5).mean()) if values.size else 0.0,
+        "lostFrameCount": int(np.sum(values <= 1e-12)) if values.size else 0,
+        "trackingLossRate": trackingLossRate(erpIous),
         "sphericalMeanIoU": float(np.mean(sphericalIous)) if sphericalIous else 0.0,
         "meanCenterErrorDeg": float(np.degrees(np.mean(centerErrors))) if centerErrors else 0.0,
+        "centerErrorP50Deg": _percentileDegrees(centerErrors, 50),
+        "centerErrorP95Deg": _percentileDegrees(centerErrors, 95),
         "meanWidthRelativeError": float(np.mean(widthErrors)) if widthErrors else 0.0,
         "meanHeightRelativeError": float(np.mean(heightErrors)) if heightErrors else 0.0,
+        "widthRelativeErrorP50": _percentile(widthErrors, 50),
+        "widthRelativeErrorP95": _percentile(widthErrors, 95),
+        "heightRelativeErrorP50": _percentile(heightErrors, 50),
+        "heightRelativeErrorP95": _percentile(heightErrors, 95),
         "invalidSphericalPredictions": invalidSphericalPredictions,
         "absentFalsePositiveRate": falsePositives / absentCount if absentCount else 0.0,
         "validRate": (
@@ -287,6 +425,18 @@ def _summarize(
         "latencyP95Ms": float(np.percentile(elapsedMs, 95)) if elapsedMs.size else 0.0,
         "latencyP99Ms": float(np.percentile(elapsedMs, 99)) if elapsedMs.size else 0.0,
         "candidateCount": len(candidates),
+        "averageViewsPerFrame": (
+            float(np.mean([recorder.viewCounts[int(record.frameIndex)] for record in records[1:]]))
+            if len(records) > 1
+            else 0.0
+        ),
+        "averageForwardsPerFrame": (
+            float(
+                np.mean([recorder.forwardCounts[int(record.frameIndex)] for record in records[1:]])
+            )
+            if len(records) > 1
+            else 0.0
+        ),
         "candidateHitRateAt0.5": (
             float(np.mean([row["hitAt0.5"] for row in candidates]))
             if candidates
@@ -308,7 +458,16 @@ def _summarize(
             }
             for result in results
         ],
+        "frameMetrics": frameRows,
     }
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    return float(np.percentile(np.asarray(values, dtype=np.float64), percentile)) if values else 0.0
+
+
+def _percentileDegrees(values: list[float], percentile: float) -> float:
+    return float(np.degrees(_percentile(values, percentile)))
 
 
 if __name__ == "__main__":

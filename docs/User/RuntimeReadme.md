@@ -7,7 +7,8 @@
 真实 HiT-Small 运行需要：
 
 - `src/instatarget/vendor/hit` 内置的最小 HiT-Small 运行时；
-- `models/hit_small.pth` 权重；
+- `models/hit_small_stage3.pth` 权重；
+- `models/hit_small_stage3.calibration.json` 校准产物；
 - 可用的 CUDA PyTorch 运行时。
 
 适配器默认从源码包内查找 HiT 运行时，也接受 `HIT_ROOT` 环境变量。模型配置中的权重路径相对于配置文件解析。
@@ -18,7 +19,7 @@
 
 同一轮 RGB 视图会作为一个 tensor batch 推理。当前正常线程只在 TRACKING/UNCERTAIN 间转移，二者均为 4+4 两轮；低于 LT 或全零缺失保持 UNCERTAIN，不自动进入 LOST。保留的显式 LOST 组件仍为单轮 10 张。第二轮依赖第一轮 Fusor 中心，因此不能与第一轮合并。
 
-三种状态使用同一个 Fuse 输出规则：以上一可信框面积为参考，在最大交叉框和最小合并框之间自适应裁剪；参考面积不小于合并框时直接输出合并框，不进行额外放大。
+三种状态使用同一个 Fuse 输出规则：两来源融合保留融合置信度与支持信息，最终几何取 calibrated SingleScore 较高来源。正常状态机不会因 IoU 为零自动进入 LOST；tracking loss rate 目前只在离线评估中统计。
 
 ## Docker
 
@@ -26,4 +27,4 @@ Dockerfile 使用 `pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime`，复制经过
 
 ## 资源释放
 
-应用入口在正常和异常路径关闭视频源、结果 sink 和后端。HiT 关闭过程移除热图钩子并释放 CUDA 缓存。模型权重保存在 `models/hit_small.pth`，应用配置位于 `configs/*.yaml`，HiT-Small 网络配置位于 `src/instatarget/vendor/hit/configs/HiT_Small.yaml`。
+应用入口在正常和异常路径关闭视频源、结果 sink 和后端。HiT 关闭过程移除热图钩子并释放 CUDA 缓存。模型权重与校准产物保存在 `models/hit_small_stage3.*`，应用配置位于 `configs/*.yaml`，HiT-Small 网络配置位于 `src/instatarget/vendor/hit/configs/HiT_Small.yaml`。

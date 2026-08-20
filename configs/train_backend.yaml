@@ -16,8 +16,8 @@ data:
 
 model:
   variant: hit_small
-  initialWeights: ../models/hit_small.pth
-  stage: 1
+  initialWeights: ../models/hit_small_stage3.pth
+  stage: 3
   hiddenDim: 256
   dropout: 0.1
 
@@ -46,7 +46,7 @@ loss:
   presenceFocalGamma: 0.0
 
 runtime:
-  checkpointDir: E:/InstaTargetingSystemTraining/checkpoints/stage1
+  checkpointDir: E:/InstaTargetingSystemTraining/checkpoints/stage3_followup
   resume: none
   validateEverySteps: 1000
   earlyStoppingPatience: 10

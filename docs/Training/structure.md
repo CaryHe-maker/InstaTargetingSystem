@@ -10,7 +10,9 @@ Training 现在包含 manifest 驱动的数据对、生产 Geometry crop、训�
 | `training/model.py` | HiT wrapper、presence/quality heads、Stage 冻结 |
 | `training/losses.py` | mask-aware presence/L1/GIoU/quality loss |
 | `training/train_backend.py` | AMP、累积梯度、分层 optimizer、验证、checkpoint/resume |
-| `configs/train_backend.yaml` | 严格独立 TrainingConfig 示例 |
+| `configs/train_backend.yaml` | 以冻结 Stage 3 权重为起点的严格后续微调配置 |
+| `tools/collect_score_calibration.py` | Stage 3 oracle-view calibration 候选收集 |
+| `tools/fit_score_calibration.py` | 单调 Beta、SingleScore 权重和工作点拟合 |
 
 深入阅读：[trainingDataset.md](trainingDataset.md)、[backendTraining.md](backendTraining.md)、[calibrationDataset.md](calibrationDataset.md)。
 

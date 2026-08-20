@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +25,14 @@ class DriverSmokeTest(unittest.TestCase):
                 writeRgbPng(root / f"frame_{index:04d}.png", rgb)
 
             config = loadConfig(REPOSITORY_ROOT / "configs" / "RGBonly.yaml")
-            runtime = buildRuntime(config, hitSessionFactory=_TestHiTSession)
+            runtime = buildRuntime(
+                replace(
+                    config,
+                    scoring=replace(config.scoring, calibrationArtifact=None),
+                ),
+                hitSessionFactory=_TestHiTSession,
+                allowUncalibratedScoring=True,
+            )
             source = FrameSource(sequenceId="sequence")
             source.open(str(root))
             output = Path(directory) / "result.txt"
@@ -42,6 +50,7 @@ class DriverSmokeTest(unittest.TestCase):
                 recorder=_CheckingRecorder(runtime.recorder, timer),
                 resultRecorder=resultRecorder,
                 processingTimer=timer,
+                scoreCalibration=runtime.scoreCalibration,
             )
             finalizeSink(runtime.sink, resultCount)
 

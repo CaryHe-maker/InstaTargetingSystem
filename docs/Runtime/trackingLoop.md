@@ -11,10 +11,10 @@
 1. `beginFrame()` 产生当前 round 的 SearchPlan。
 2. `cropViews()` 一次裁剪本轮所有视图。
 3. `backend.infer()` 按计划顺序把本轮全部视图交给 backend。PyTorch HiT 会话执行一次 RGB tensor batch。每个 attempt 的 expectedRevision 严格递增，但第二轮 KEEP 保持模板特征内容不变。
-4. `calibrateLocalAppearanceProbabilities()` 把 backend 原始 `fusedScore` 校准为独立的 `appearanceProbability`，不覆盖原分；旧 `remapLocalObservationFusedScores()` 仅是兼容别名。
+4. `calibrateLocalAppearanceProbabilities()` 把 Stage 3 的 `presence*predictedIoU` 校准为独立的 `appearanceProbability`，不覆盖原分。
 5. `_projectObservation()` 将局部框边界一次回投，直接生成 ERP bbox、紧致 BFoV、边界与膨胀诊断。
-6. 每个局部图中心与该帧预测中心的大圆夹角生成同帧视图运动分数，再按 70/30 合成 `singleScore`；检测框在局部图内部的位置不改变该视图的运动先验。
-7. `controller.consume()` 在 TRACKING/UNCERTAIN 第一轮先用 Fusor 选择最佳中心，再围绕该中心请求第二轮 VStype1 四角 4 张视图；无候选时以预测中心回退。第二轮结束时把两轮观测统一交给 Fusor，完成单框排序和两框融合后提交。当前正常线程不会进入 LOST，低于 LT 或全零缺失仍提交 UNCERTAIN；显式 LOST 组件保留 6 张 cubemap 加 4 张 Type1 的单轮 Fusor 路径。三种模式的最佳融合框都以上一可信框面积执行同一套参考面积裁剪；当参考面积不小于最小合并框时直接返回合并框，不再放大。
+6. 每个局部图中心与该帧预测中心的大圆夹角生成同帧视图运动分数，再按校准产物冻结的 50/50 权重合成 `singleScore`；检测框在局部图内部的位置不改变该视图的运动先验。
+7. `controller.consume()` 在 TRACKING/UNCERTAIN 第一轮先用 Fusor 选择最佳中心，再围绕该中心请求第二轮 VStype1 四角 4 张视图；无候选时以预测中心回退。第二轮结束时把两轮观测统一交给 Fusor，完成单框排序和两框融合后提交。当前正常线程不会进入 LOST，低于 LT 或全零缺失仍提交 UNCERTAIN；显式 LOST 组件保留 6 张 cubemap 加 4 张 Type1 的单轮 Fusor 路径。两来源融合仍保留融合置信度与支持信息，但生产 `best_source` 几何直接取 calibrated SingleScore 较高来源的 bbox/BFoV。
 
 中间轮的视图、局部观测和投影观测暂存在 `visualizationBatches`，但只在处理区间结束后写图。Controller 另外在 FrameTransaction 中保存各轮投影观测；第一轮局部图不会重复执行 backend 推理，但其投影观测会在第二轮提交时参与 Fusor 排序与融合。
 

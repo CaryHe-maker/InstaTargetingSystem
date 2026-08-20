@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MIB = 1024 * 1024
-LARGE_LIBRARY_BYTES = 64 * MIB
+DEFAULT_LAYER_COUNT = 7
 ROOT_ENTRIES = (
     "app",
     "bin",
@@ -33,14 +33,6 @@ ROOT_ENTRIES = (
     "var",
     "workspace",
 )
-LARGE_LIBRARY_MARKERS = (
-    "/site-packages/torch/lib/",
-    "/site-packages/nvidia/",
-    "/site-packages/cusparselt/",
-    "/site-packages/triton/",
-)
-
-
 @dataclass(frozen=True, slots=True)
 class Entry:
     source: Path
@@ -53,7 +45,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path("/"))
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--layers", type=int, default=50)
+    parser.add_argument("--layers", type=int, default=DEFAULT_LAYER_COUNT)
     args = parser.parse_args()
     partitionRoot(args.root, args.output, args.layers)
     return 0
@@ -71,32 +63,10 @@ def partitionRoot(root: Path, output: Path, layerCount: int) -> None:
         bucket.mkdir(parents=True)
 
     entries, directories = _collectEntries(root)
-    large = sorted(
-        (entry for entry in entries if _isLargeLibrary(entry)),
-        key=lambda entry: entry.size,
-        reverse=True,
-    )
-    if len(large) >= layerCount:
-        raise ValueError(
-            f"{len(large)} isolated libraries leave no buckets for remaining files"
-        )
-
     assignments: list[list[Entry]] = [[] for _ in buckets]
     sizes = [0] * layerCount
-    assigned: set[Path] = set()
-    for index, entry in enumerate(large):
-        assignments[index].append(entry)
-        sizes[index] += entry.size
-        assigned.add(entry.relative)
-
-    regularBucketIndexes = tuple(range(len(large), layerCount))
-    remaining = sorted(
-        (entry for entry in entries if entry.relative not in assigned),
-        key=lambda entry: entry.size,
-        reverse=True,
-    )
-    for entry in remaining:
-        index = min(regularBucketIndexes, key=sizes.__getitem__)
+    for entry in sorted(entries, key=lambda item: item.size, reverse=True):
+        index = min(range(layerCount), key=sizes.__getitem__)
         assignments[index].append(entry)
         sizes[index] += entry.size
 
@@ -111,10 +81,9 @@ def partitionRoot(root: Path, output: Path, layerCount: int) -> None:
     _restoreDirectoryMetadata(root, buckets)
 
     for index, items in enumerate(assignments):
-        isolated = " isolated" if index < len(large) else ""
         print(
             f"layer {index:02d}: {sizes[index] / MIB:8.1f} MiB, "
-            f"{len(items):6d} entries{isolated}"
+            f"{len(items):6d} entries"
         )
     print(f"partitioned {len(entries)} entries into {layerCount} non-empty layers")
 
@@ -159,25 +128,18 @@ def _collectEntries(root: Path) -> tuple[list[Entry], list[Path]]:
     return entries, directories
 
 
-def _isLargeLibrary(entry: Entry) -> bool:
-    if entry.isSymlink or entry.size < LARGE_LIBRARY_BYTES:
-        return False
-    normalized = "/" + entry.relative.as_posix()
-    return any(marker in normalized for marker in LARGE_LIBRARY_MARKERS)
-
-
 def _copyEntry(entry: Entry, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     metadata = entry.source.lstat()
     if entry.isSymlink:
         target.symlink_to(os.readlink(entry.source))
-        os.chown(target, metadata.st_uid, metadata.st_gid, follow_symlinks=False)
+        _chown(target, metadata.st_uid, metadata.st_gid, follow_symlinks=False)
         return
     try:
         os.link(entry.source, target)
     except OSError:
         shutil.copy2(entry.source, target, follow_symlinks=False)
-    os.chown(target, metadata.st_uid, metadata.st_gid, follow_symlinks=False)
+    _chown(target, metadata.st_uid, metadata.st_gid, follow_symlinks=False)
 
 
 def _copyEmptyDirectories(root: Path, directories: list[Path], bucket: Path) -> None:
@@ -206,7 +168,13 @@ def _restoreDirectoryMetadata(root: Path, buckets: list[Path]) -> None:
                 continue
             metadata = source.stat()
             shutil.copystat(source, target, follow_symlinks=False)
-            os.chown(target, metadata.st_uid, metadata.st_gid)
+            _chown(target, metadata.st_uid, metadata.st_gid)
+
+
+def _chown(path: Path, uid: int, gid: int, *, follow_symlinks: bool = True) -> None:
+    chown = getattr(os, "chown", None)
+    if chown is not None:
+        chown(path, uid, gid, follow_symlinks=follow_symlinks)
 
 
 if __name__ == "__main__":

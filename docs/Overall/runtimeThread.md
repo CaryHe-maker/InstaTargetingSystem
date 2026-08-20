@@ -30,9 +30,9 @@
 2. `controller.beginFrame()` 根据可靠历史预测中心，建立 `FrameTransaction` 和 Round 1 `SearchPlan`。
 3. Geometry 按计划一次裁剪本轮所有视图。
 4. Tracker 按本轮 view 顺序执行批量局部推理并返回 LocalObservation。PyTorch HiT 每轮做一次 RGB tensor forward。
-5. Beta Calibration 生成 `appearanceProbability`，保留 backend 原始融合分。
+5. checkpoint 绑定的 Beta Calibration 将 Stage 3 `presence*predictedIoU` 映射为 `appearanceProbability`，保留 backend 原始融合分。
 6. Geometry 将每个局部框边界一次回投，直接拟合 ERP bbox 和紧致 BFoV，并保留边界/膨胀诊断。
-7. Runtime 按局部 ViewSpec 中心与运动预测中心的大圆夹角生成当前生产运动概率，并按 70/30 合成 SingleScore；协方差归一化候选残差保留为离线诊断路径。
+7. Runtime 按局部 ViewSpec 中心与运动预测中心的大圆夹角生成当前生产运动概率，并按校准产物冻结的 50/50 合成 SingleScore；协方差归一化候选残差保留为离线诊断路径。
 8. `controller.consume()` 调用 StateEvaluator。TRACKING/UNCERTAIN 第一轮用 Fusor 最佳候选中心生成第二轮 VStype1 四角计划，没有候选则回退到预测中心；第二轮完成后把两轮投影观测统一交给 Fusor。返回 `FrameCommitted` 后结束本帧处理。
 9. 处理区间关闭后，Runtime 才写中间可视化、sink 和最终结果可视化。
 

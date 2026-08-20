@@ -257,6 +257,7 @@ def trackOneSequence(
             backend=runtime.backend,
             sink=sink,
             recorder=runtime.recorder,
+            scoreCalibration=runtime.scoreCalibration,
         )
         finalizeSink(sink, resultCount)
         return resultCount
