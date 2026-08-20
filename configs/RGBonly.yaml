@@ -2,10 +2,10 @@ schemaVersion: 1
 model:
   backend: pytorch
   variant: hit_small
-  weights: ../models/hit_small_stage3.pth
+  weights: ../models/hit_small_stage3_inference.pth
   precision: fp32
 scoring:
-  calibrationArtifact: ../models/hit_small_stage3.calibration.json
+  calibrationArtifact: ../models/hit_small_stage3_inference.calibration.json
   requireCheckpointHashMatch: true
 geometry:
   viewWidthPx: 256

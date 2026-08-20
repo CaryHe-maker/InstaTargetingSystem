@@ -2,7 +2,7 @@
 
 ## Stage 3 生产合同
 
-生产模型为 `models/hit_small_stage3.pth`。Tracker 保留 Stage 3 的 `presence` 与 `quality`（预测 IoU），Runtime 以二者乘积作为外观原始概率：
+生产模型为 `models/hit_small_stage3_inference.pth`。它与原始 Stage 3 checkpoint 的 `model` state 逐张量一致，但不包含优化器等训练状态。Tracker 保留 Stage 3 的 `presence` 与 `quality`（预测 IoU），Runtime 以二者乘积作为外观原始概率：
 
 ```text
 rawAppearance = clip(presence * predictedIoU, 0, 1)
@@ -12,7 +12,7 @@ singleScore = clip(0.50*appearanceProbability + 0.50*effectiveMotion, 0, 1)
 
 presence、quality 与二者乘积已在同一 calibration 数据上做 A1 比较。乘积的 Brier、ECE 与 ROC-AUC 最好，因此生产路径选择乘积，不是为兼容旧模型而保留的规则。
 
-当前校准来自 `models/hit_small_stage3.calibration.json`：`alpha=0.9934308915`、`beta=1.8582728356`、`intercept=0.6623364310`。它使用 `E:\NewDownload\train\manifest.jsonl` 的 6 个 calibration 序列、4792 个候选拟合，Brier 从 `0.17895` 降至 `0.13769`，ECE 从 `0.18271` 降至 `0.01685`，PR-AUC 为 `0.89583`，ROC-AUC 为 `0.88040`。
+当前校准来自 `models/hit_small_stage3_inference.calibration.json`：`alpha=0.9934308915`、`beta=1.8582728356`、`intercept=0.6623364310`。它使用 `E:\NewDownload\train\manifest.jsonl` 的 6 个 calibration 序列、4792 个候选拟合，Brier 从 `0.17895` 降至 `0.13769`，ECE 从 `0.18271` 降至 `0.01685`，PR-AUC 为 `0.89583`，ROC-AUC 为 `0.88040`。
 
 ## 产物绑定
 

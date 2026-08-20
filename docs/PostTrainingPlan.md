@@ -4,7 +4,7 @@
 
 本文记录 Stage 3、独立 calibration 和阶段 4 A4 完成后仍未实施的工作。当前生产基线必须保留为所有后续实验的对照组：
 
-- 模型：`models/hit_small_stage3.pth`，FP32。
+- 模型：`models/hit_small_stage3_inference.pth`，与原始 Stage 3 `model` state 逐张量一致，FP32。
 - 外观输入：`presence * predictedIoU`，使用 checkpoint 绑定的单调 Beta calibration。
 - SingleScore：appearance/motion `0.50/0.50`。
 - Controller 工作点：`candidateMinScore=0.597262`、`fusionSourceMinConfidence=0.740642`。

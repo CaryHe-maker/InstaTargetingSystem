@@ -22,7 +22,7 @@
 
 - `model.backend`：生产路径应为 `pytorch`。
 - `model.variant`：当前为 `hit_small`。
-- `model.weights`：当前为 `models/hit_small_stage3.pth`。
+- `model.weights`：当前为 `models/hit_small_stage3_inference.pth`。
 - `model.precision`：当前生产配置为 fp32；fp16 非有限时整批以 fp32 重算。
 
 精度优化需要同时检查框数值稳定性和校准分数分布；fp16 加速不能只看模型前向是否成功。

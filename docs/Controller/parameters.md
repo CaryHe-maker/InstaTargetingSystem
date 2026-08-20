@@ -44,7 +44,7 @@
 
 ## 分数参数
 
-当前外观 Beta 参数和 SingleScore 的 0.50/0.50 权重来自 `models/hit_small_stage3.calibration.json`。产物绑定 Stage 3 checkpoint SHA-256、manifest SHA-256、输入语义和两个工作点，生产加载时严格验证。运动尺度权重 0.35、最大 d2=25、中心测量标准差 0.025 rad 和 log 尺度测量标准差 0.08 仍位于 `controller/fused_score.py`，当前仅用于协方差诊断路径。
+当前外观 Beta 参数和 SingleScore 的 0.50/0.50 权重来自 `models/hit_small_stage3_inference.calibration.json`。产物绑定紧凑 Stage 3 checkpoint SHA-256、manifest SHA-256、输入语义和两个工作点，生产加载时严格验证。运动尺度权重 0.35、最大 d2=25、中心测量标准差 0.025 rad 和 log 尺度测量标准差 0.08 仍位于 `controller/fused_score.py`，当前仅用于协方差诊断路径。
 
 Fusor 的置信度常量位于 `controller/fusor.py`：`FUSION_AGREEMENT_BONUS_WEIGHT=0.15` 控制 IoU 一致性奖励，`FUSION_MAX_SCORE_GAIN=0.03` 限制融合分数相对最高来源的增益，`FUSION_SCORE_CAP=0.99` 是融合分数硬上限。这三个常量当前不进入 YAML 配置。
 

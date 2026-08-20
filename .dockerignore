@@ -26,7 +26,9 @@ src/instatarget/app/track.py
 src/instatarget/app/track_airsim360.py
 src/instatarget/data/
 src/instatarget/eval/
-src/instatarget/training/
+src/instatarget/training/*
+!src/instatarget/training/__init__.py
+!src/instatarget/training/model.py
 src/instatarget/adapters/
 src/instatarget/utils/
 src/instatarget/datasets/

@@ -33,9 +33,13 @@ WORKDIR /app
 
 COPY src ./src
 COPY configs/RGBonly.yaml ./configs/RGBonly.yaml
-COPY models/hit_small_stage3_inference.pth ./models/hit_small_stage3.pth
-COPY models/hit_small_stage3_inference.calibration.json ./models/hit_small_stage3.calibration.json
+COPY models/hit_small_stage3_inference.pth ./models/hit_small_stage3_inference.pth
+COPY models/hit_small_stage3_inference.calibration.json ./models/hit_small_stage3_inference.calibration.json
 COPY track.py ./track.py
+
+# Fail the build if context filtering breaks the production import graph or if
+# the committed checkpoint no longer strictly matches the bundled model.
+RUN PYTHONPATH=/app/src python -c "import sys; from instatarget.app.competition import runCompetition; from instatarget.tracker.pytorch_hit_session import validateHiTCheckpoint; parameter_count = validateHiTCheckpoint('/app/models/hit_small_stage3_inference.pth'); assert 'instatarget.data' not in sys.modules; print(f'runtime imports and {parameter_count} checkpoint parameters verified')"
 
 COPY docker/partition_image.py /partition_image.py
 RUN python /partition_image.py --output /layer-parts --layers 7 \

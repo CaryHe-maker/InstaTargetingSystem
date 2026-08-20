@@ -8,13 +8,13 @@
 
 ## 紧凑权重
 
-原始 `models/hit_small_stage3.pth` 包含 Stage 3 训练状态。构建前运行：
+原始 `models/hit_small_stage3.pth` 包含 Stage 3 训练状态。维护者替换原始权重后运行：
 
 ```powershell
 .\.venv\Scripts\python.exe docker\compact_checkpoint.py
 ```
 
-脚本逐张量验证后生成 `models/hit_small_stage3_inference.pth`，只保留完全相同的 Stage 3 `model` 状态；同时生成 `hit_small_stage3_inference.calibration.json`，其 checkpoint 哈希绑定压缩文件，其他拟合参数与工作点保持不变。Docker 将二者复制为配置期望的 `/app/models/hit_small_stage3.*`；原训练 checkpoint 不会进入构建上下文。
+脚本逐张量验证后生成 `models/hit_small_stage3_inference.pth`，只保留完全相同的 Stage 3 `model` 状态；同时生成 `hit_small_stage3_inference.calibration.json`，其 checkpoint 哈希绑定压缩文件，其他拟合参数与工作点保持不变。Docker 按原文件名复制到 `/app/models/`，与 `configs/RGBonly.yaml` 完全一致；原训练 checkpoint 不会进入构建上下文。
 
 ## 默认挂载
 
@@ -37,7 +37,7 @@ python docker/verify_submission.py --image instatarget:submission
 docker run --rm --gpus all -v "${PWD}\dataset:/mnt/dataset" -v "${PWD}\result:/mnt/result" instatarget:submission
 ```
 
-Dockerfile 的最终 `scratch` 阶段只有 7 条文件系统 `COPY`，分别合并 `/layer-parts/00` 至 `06`。`ENV` 和 `ENTRYPOINT` 只写镜像配置，不产生 RootFS layer。验证脚本在构建前检查必需文件、checkpoint/calibration 哈希和静态 7 层结构，构建后检查 `.RootFS.Layers` 数量必须严格等于 7；多一层或少一层都会失败。
+Dockerfile 的最终 `scratch` 阶段只有 7 条文件系统 `COPY`，分别合并 `/layer-parts/00` 至 `06`。`ENV` 和 `ENTRYPOINT` 只写镜像配置，不产生 RootFS layer。验证脚本在构建前检查必需文件已被 Git 跟踪且没有被 `.dockerignore` 排除，并核对 checkpoint/calibration 哈希和静态 7 层结构；Docker 构建阶段会在 CPU 上构造 HiT-Small 并严格加载全部 checkpoint 参数。构建后验证还会在无网络容器中重复同一模型探针，并检查 `.RootFS.Layers` 数量必须严格等于 7。任一文件、参数、运行时模块或层数偏差都会失败。
 
 构建完成后可用 `docker image inspect instatarget:submission --format='{{.Size}}'` 检查总字节数，并用 `docker history instatarget:submission` 检查层大小。上传镜像时不应包含原始 checkpoint、构建缓存或本地数据。
 
