@@ -23,11 +23,25 @@ class CoreConfigTest(unittest.TestCase):
         self.assertEqual(config.evaluator.minReacquireViews, 2)
         self.assertAlmostEqual(config.evaluator.successRate, 0.90)
         self.assertAlmostEqual(config.evaluator.overlapThreshold, 0.70)
-        self.assertAlmostEqual(config.evaluator.fusionSourceMinConfidence, 0.80)
+        self.assertAlmostEqual(config.evaluator.fusionSourceMinConfidence, 0.740642)
+        self.assertEqual(config.evaluator.fusionBoxMode, "best_source")
         self.assertEqual(config.motion.minSamplesForVelocity, 2)
         self.assertAlmostEqual(config.motion.processNoiseRadPerSec, 0.04)
         self.assertEqual(config.model.precision, "fp32")
-        self.assertEqual(config.model.weights, REPOSITORY_ROOT / "models" / "hit_small.pth")
+        self.assertFalse(config.speculativePipeline.enabled)
+        self.assertFalse(config.speculativePipeline.batchMergeEnabled)
+        self.assertAlmostEqual(config.speculativePipeline.centerGapRatio, 0.50)
+        self.assertAlmostEqual(config.speculativePipeline.logScaleGap, 0.25)
+        self.assertEqual(config.speculativePipeline.maxSpeculativeAgeFrames, 1)
+        self.assertEqual(
+            config.model.weights,
+            REPOSITORY_ROOT / "models" / "hit_small_stage3.pth",
+        )
+        self.assertEqual(
+            config.scoring.calibrationArtifact,
+            REPOSITORY_ROOT / "models" / "hit_small_stage3.calibration.json",
+        )
+        self.assertTrue(config.scoring.requireCheckpointHashMatch)
         self.assertFalse(config.visualization.enabled)
         self.assertEqual(
             config.visualization.outputRoot,
@@ -51,8 +65,8 @@ class CoreConfigTest(unittest.TestCase):
     def testLoadConfigRejectsRemovedFixedStateThresholds(self) -> None:
         source = (REPOSITORY_ROOT / "configs" / "RGBonly.yaml").read_text(encoding="utf-8")
         source = source.replace(
-            "  candidateMinScore: 0.40",
-            "  candidateMinScore: 0.40\n  uncertainThreshold: 0.45",
+            "  candidateMinScore: 0.597262",
+            "  candidateMinScore: 0.597262\n  uncertainThreshold: 0.45",
         )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -74,6 +88,16 @@ class CoreConfigTest(unittest.TestCase):
     def testLoadConfigRejectsUnknownVisualizationStage(self) -> None:
         source = (REPOSITORY_ROOT / "configs" / "RGBonly.yaml").read_text(encoding="utf-8")
         source = source.replace("    - geometry_box", "    - geometry_box\n    - unknown")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "invalid.yaml"
+            path.write_text(source, encoding="utf-8")
+            with self.assertRaises(ConfigError):
+                loadConfig(path)
+
+    def testLoadConfigRejectsBatchMergeWhenSpeculationIsDisabled(self) -> None:
+        source = (REPOSITORY_ROOT / "configs" / "RGBonly.yaml").read_text(encoding="utf-8")
+        source = source.replace("  batchMergeEnabled: false", "  batchMergeEnabled: true")
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "invalid.yaml"

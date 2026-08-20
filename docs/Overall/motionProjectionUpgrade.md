@@ -10,7 +10,7 @@
 4. MotionPredictor 保留球面切平面 Huber 常速度估计，同时输出中心、log 尺度协方差和可靠性。
 5. Runtime 按局部图中心与当前帧预测中心的大圆夹角计算视图运动先验：0 度为 1.0，每增加 30 度连续下降 0.1；协方差归一化候选残差保留为离线诊断。
 6. 运动历史只有一个样本时使用按历史成熟度降权的位置/尺度锚点；首个非空弱候选最多提供一次启动样本。正常序列从第三个输入帧起具备速度样本，不再因硬开关长期回退到中性 0.5。
-7. backend 原始融合分只做外观 Beta Calibration，不被覆盖。最终单框分数固定为 `0.70*appearanceProbability + 0.30*effectiveMotionProbability`。
+7. Stage 3 `presence*predictedIoU` 由 checkpoint 绑定的 Beta Calibration 映射且原值不被覆盖。最终单框分数由同一产物冻结为 `0.50*appearanceProbability + 0.50*effectiveMotionProbability`。
 8. StateEvaluator 只用 `singleScore` 做单框排序、来源门限和双框融合；旧 `fusedScore` 仅保留兼容回退。
 
 ## 字段流
@@ -33,12 +33,12 @@ appearanceProbability + effective motion
 
 ## 当前冻结参数
 
-- 外观 Beta 参数：`(14.30532301, 1.52758886, -2.21085783)`，锚点为 0.80→0.05、0.90→0.45、0.98→0.97。
-- SingleScore 权重：appearance 0.70，motion 0.30。
+- 外观 Beta 参数：`(0.9934308915, 1.8582728356, 0.6623364310)`，输入为 Stage 3 `presence*predictedIoU`。
+- SingleScore 权重：appearance 0.50，motion 0.50。
 - 运动组合权重：尺度残差 0.35，`d2` 上限 25。
 - motion calibration 当前为 identity；在独立校准集完成前，不使用逐帧 min-max 或伪造经验参数。
 
-所有轮次都使用 70/30 SingleScore。正常线程只执行 TRACKING/UNCERTAIN：第一轮先由 Fusor 选择中心，第二轮围绕该中心推理 VStype1 四角 4 张视图，提交时将两轮投影观测统一交给 Fusor。保留的显式 LOST 组件仍在同一批次评估 6 张旋转 cubemap 和 4 张 Type1。`appearanceOnlyScoring` 作为兼容字段固定为 false。
+所有轮次都使用产物驱动的 50/50 SingleScore。正常线程只执行 TRACKING/UNCERTAIN：第一轮先由 Fusor 选择中心，第二轮围绕该中心推理 VStype1 四角 4 张视图，提交时将两轮投影观测统一交给 Fusor。保留的显式 LOST 组件仍在同一批次评估 6 张旋转 cubemap 和 4 张 Type1。`appearanceOnlyScoring` 作为兼容字段固定为 false。
 
 ## 验证门槛
 

@@ -96,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
             recorder=runtime.recorder,
             resultRecorder=resultRecorder,
             processingTimer=timeCounter,
+            scoreCalibration=runtime.scoreCalibration,
         )
         expectedCount = resultCount if getattr(source, "frameCount", 0) <= 0 else source.frameCount
         finalizeSink(runtime.sink, expectedCount)

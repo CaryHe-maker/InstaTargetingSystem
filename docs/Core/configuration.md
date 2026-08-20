@@ -9,6 +9,7 @@
 ## 配置组归属
 
 - `model`：Tracker。
+- `scoring`：checkpoint 绑定的 Stage 3 校准产物。
 - `geometry`：Geometry 和视域输出尺寸。
 - `evaluator/motion/tracking/recovery`：Controller。
 - `runtime`：Runtime 的未来队列容量。
@@ -24,7 +25,7 @@
 - `tracking.maxAttemptsPerFrame` 固定为 2；当前校验硬性要求 `tracking.maxViewsPerFrameTotal >= 12`，两份生产配置也都取 12。正常线程每帧最多使用 8 张（TRACKING/UNCERTAIN 的 4+4）；保留的显式 LOST planner 使用 10 张（6 张 cubemap 和 4 张 Type1）。不能仅按当前可达路线把配置降到 8。
 - DecisionGate 两项权重总和不超过 1；生产 StateEvaluator 当前忽略整组 DecisionGate。
 
-外观 Beta 参数、运动残差组合权重和 70/30 SingleScore 当前是 `controller/fused_score.py` 中的冻结代码常量，不属于 YAML。`decisionGate.*Weight` 只服务旧兼容聚合，不控制生产路径的 SingleScore。
+外观 Beta 参数与 50/50 SingleScore 权重来自 `scoring.calibrationArtifact`，不再是代码中的旧模型常量。生产启动默认校验 checkpoint SHA-256，并要求产物中的 `candidateMinScore`、`fusionSourceMinConfidence` 与 YAML 一致。`decisionGate.*Weight` 只服务兼容聚合，不控制生产路径的 SingleScore。
 
 ## 修改流程
 

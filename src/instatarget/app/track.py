@@ -56,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
             backend=runtime.backend,
             sink=runtime.sink,
             recorder=runtime.recorder,
+            scoreCalibration=runtime.scoreCalibration,
         )
         expectedCount = (
             resultCount if getattr(source, "frameCount", 0) <= 0 else source.frameCount

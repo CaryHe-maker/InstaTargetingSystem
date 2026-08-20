@@ -8,14 +8,11 @@ from instatarget.controller.classifier import (
 )
 from instatarget.controller.decision_gate import DecisionGate, FrameAggregate, ScoredObservation
 from instatarget.controller.fused_score import (
-    FUSED_SCORE_BETA_PARAMETERS,
     MotionScore,
     calibrateBackendFusedScore,
     calibrateLocalAppearanceProbabilities,
     calibrateMotionScore,
     composeSingleScore,
-    remapFusedScore,
-    remapLocalObservationFusedScores,
     scoreMotionConsistency,
     scoreViewCenterMotion,
 )
@@ -30,6 +27,20 @@ from instatarget.controller.fusor import (
 )
 from instatarget.controller.motion_estimator import MotionEstimatorImpl, SphericalMotionEstimator
 from instatarget.controller.recovery_planner import PlannedView, RecoveryPlanner, ViewSpecType1
+from instatarget.controller.score_calibration import (
+    UNCALIBRATED_STAGE3_SCORE_CALIBRATION,
+    BetaCalibration,
+    ScoreCalibration,
+    loadScoreCalibration,
+)
+from instatarget.controller.speculative_pipeline import (
+    RollbackReason,
+    SpeculativeDecision,
+    SpeculativePipeline,
+    SpeculativeState,
+    SpeculativeSummary,
+    evaluateSpeculation,
+)
 from instatarget.controller.state_evaluator import StateEvaluator
 from instatarget.controller.state_machine import StateUpdate, TrackStateMachine
 from instatarget.controller.state_model import (
@@ -50,7 +61,6 @@ __all__ = [
     "CLASSIFY_RADIUS_RAD",
     "Classifier",
     "ClusterCenter",
-    "FUSED_SCORE_BETA_PARAMETERS",
     "FUSION_AGREEMENT_BONUS_WEIGHT",
     "FUSION_MAX_SCORE_GAIN",
     "FUSION_OVERLAP_RATE",
@@ -58,19 +68,20 @@ __all__ = [
     "FusionBoxMode",
     "Fusor",
     "MotionScore",
+    "BetaCalibration",
     "FrameAggregate",
     "fuse",
     "classify",
     "MotionEstimatorImpl",
     "PlannedView",
     "RecoveryPlanner",
+    "ScoreCalibration",
     "ViewSpecType1",
     "calibrateBackendFusedScore",
     "calibrateLocalAppearanceProbabilities",
     "calibrateMotionScore",
     "composeSingleScore",
-    "remapFusedScore",
-    "remapLocalObservationFusedScores",
+    "UNCALIBRATED_STAGE3_SCORE_CALIBRATION",
     "ScoredObservation",
     "StateEvaluator",
     "StateInstance",
@@ -80,9 +91,16 @@ __all__ = [
     "MeasurementEvidence",
     "MotionPrediction",
     "RecoveryMemory",
+    "RollbackReason",
     "SphericalMotionEstimator",
+    "SpeculativeDecision",
+    "SpeculativePipeline",
+    "SpeculativeState",
+    "SpeculativeSummary",
     "scoreMotionConsistency",
     "scoreViewCenterMotion",
+    "loadScoreCalibration",
+    "evaluateSpeculation",
     "StateUpdate",
     "TemplateDecision",
     "TemplatePolicy",

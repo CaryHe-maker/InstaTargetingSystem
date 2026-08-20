@@ -28,11 +28,11 @@ fusionScore = min(base + bonus, max(a, b) + 0.03, 0.99)
 
 几何平均值抑制一高一低来源造成的虚高，IoU 奖励只在来源分数一致且框形状一致时生效；最终分数最多比最高来源增加 0.03，并硬限制在 0.99。Fusor 将所有单框和可行融合框统一排序，只返回一个最佳结果。先比较 confidence，同分时优先融合候选，再选择 representative viewId 较小者。最终测量还必须达到 `tracking.candidateMinScore`。Fusor 不会返回候选列表，也不会融合三个或更多来源。
 
-## 统一的参考面积裁剪
+## Stage 4 融合几何
 
-`TRACKING`、`UNCERTAIN` 和 `LOST` 进入生产 StateEvaluator 后都固定使用 `REFERENCE_ADAPTIVE`，不再按状态分别选择合并框或交叉框。Controller 传入上一可信框的 ERP 面积作为 `size0`；第一个搜索帧使用 frame 0 初始化框。未接受的弱候选不会更新当前框，因此也不会改变下一帧的 `size0`。
+`TRACKING`、`UNCERTAIN` 和保留的显式 `LOST` 组件进入生产 StateEvaluator 后都使用配置中的 `BEST_SOURCE`。两框满足来源门限与 overlap 后仍生成融合候选，融合分数、来源 ID、支持和代表视图语义不变；若融合候选胜出，最终 bbox/BFoV 直接取两个来源中 calibrated SingleScore 较高者。同分时以 viewId 较小者稳定决定。
 
-若最高分候选是单框，Fusor 原样返回该框。若最高分候选是两框融合结果，则先计算 seam-aware 最大连通交叉框 `size1` 和最小循环合并框 `size2`，再按面积选择最终输出：
+该策略避免不同投影视图的框直接求交/求并造成严重尺度失真。`reference_adaptive` 仍作为可选实验模式保留，显式选择时才使用上一可信框面积执行以下裁剪：
 
 ```text
 size0 <= size1          -> 输出最大交叉框
@@ -56,4 +56,4 @@ size0 >= size2          -> 直接输出最小合并框，不放大
 
 `LOST`（保留组件，正常线程不可达）：第一轮一次性读取 6 张旋转 cubemap 和预测中心周围的 Type1 四角 4 张，共 10 张，统一交给 Fusor；不再追加第二轮。
 
-正常线程中的 TRACKING/UNCERTAIN 固定执行两轮，最终 StateScore 取两轮候选统一经过 Fusor 后的最佳分数；显式 LOST 组件取单轮 10 张视图的 Fusor 最佳分数。三种模式的最佳融合候选都使用上述参考面积裁剪。没有候选时 StateScore 为 0，并输出预测框但不接受测量；状态机随后保持 UNCERTAIN。`evaluator.successRate` 只写入诊断字段，不参与当前升级、排序或提交决策。
+正常线程中的 TRACKING/UNCERTAIN 固定执行两轮，最终 StateScore 取两轮候选统一经过 Fusor 后的最佳分数；显式 LOST 组件取单轮 10 张视图的 Fusor 最佳分数。没有候选时 StateScore 为 0，并输出预测框但不接受测量；状态机随后保持 UNCERTAIN。`evaluator.successRate` 只写入诊断字段，不参与当前升级、排序或提交决策。

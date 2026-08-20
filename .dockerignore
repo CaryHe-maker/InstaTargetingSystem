@@ -17,7 +17,8 @@ third_party
 
 # Only the compact inference checkpoint enters the build context.
 models/*
-!models/hit_small_inference.pth
+!models/hit_small_stage3_inference.pth
+!models/hit_small_stage3_inference.calibration.json
 
 # Local-only AirSim360 diagnostic entrypoints and development modules.
 src/instatarget/app/commands.py

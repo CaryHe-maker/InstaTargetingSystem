@@ -1,8 +1,16 @@
 import unittest
 
 from instatarget.adapters.competition_adapter import CompetitionAdapter
-from instatarget.core.types import BBoxXYWH, BFoV, FrameIndex, SequenceId, SphericalPoint, TrackResult, TrackStatus
-from instatarget.eval.otb_metrics import OtbMetrics, bboxIoU
+from instatarget.core.types import (
+    BBoxXYWH,
+    BFoV,
+    FrameIndex,
+    SequenceId,
+    SphericalPoint,
+    TrackResult,
+    TrackStatus,
+)
+from instatarget.eval.otb_metrics import OtbMetrics, bboxIoU, trackingLossRate
 
 
 class EvalAdapterTest(unittest.TestCase):
@@ -23,7 +31,24 @@ class EvalAdapterTest(unittest.TestCase):
         summary = metrics.summarize()
 
         self.assertAlmostEqual(summary["successRate@0.5"], 0.5)
-        self.assertAlmostEqual(bboxIoU(BBoxXYWH(0.0, 0.0, 10.0, 10.0), BBoxXYWH(0.0, 0.0, 10.0, 10.0)), 1.0)
+        self.assertEqual(summary["lostFrameCount"], 0)
+        self.assertEqual(summary["trackingLossRate"], 0.0)
+        self.assertAlmostEqual(
+            bboxIoU(
+                BBoxXYWH(0.0, 0.0, 10.0, 10.0),
+                BBoxXYWH(0.0, 0.0, 10.0, 10.0),
+            ),
+            1.0,
+        )
+
+    def testTrackingLossRateCountsOnlyZeroOverlapVisibleSamples(self) -> None:
+        self.assertAlmostEqual(trackingLossRate([0.0, 0.2, 0.0, 1.0]), 0.5)
+        self.assertEqual(trackingLossRate([]), 0.0)
+
+        metrics = OtbMetrics(ious=[0.0, 0.2, 0.0, 1.0])
+        summary = metrics.summarize()
+        self.assertEqual(summary["lostFrameCount"], 2)
+        self.assertAlmostEqual(summary["trackingLossRate"], 0.5)
 
 
 def _result(bbox: BBoxXYWH) -> TrackResult:

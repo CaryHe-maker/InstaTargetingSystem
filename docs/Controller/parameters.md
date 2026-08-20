@@ -9,7 +9,8 @@
 | `evaluator.successRate` | 0.90 | 仅复制到 `StateObservation` 诊断字段 |
 | `evaluator.firstRoundFusionOverlap` | 0.30 | schema/配置兼容；当前生产评估不读取 |
 | `evaluator.overlapThreshold` | 0.70 | schema/配置兼容；生产 Fusor 使用代码常量 0.70 |
-| `evaluator.fusionSourceMinConfidence` | 0.80 | 生成融合候选时两个来源各自的最低 SingleScore |
+| `evaluator.fusionSourceMinConfidence` | 0.740642 | 生成融合候选时两个来源各自的最低 SingleScore；必须与校准产物一致 |
+| `evaluator.fusionBoxMode` | `best_source` | 融合保留置信度，输出最高 SingleScore 来源的几何 |
 | `evaluator.supportWeight` | 0.25 | schema/接口兼容；当前生产评估不读取 |
 | `evaluator.agreementWeight` | 0.25 | schema/接口兼容；当前生产评估不读取 |
 | `evaluator.minReacquireViews` | 2 | schema/旧重捕获兼容；当前生产评估不读取 |
@@ -41,13 +42,13 @@
 
 `SphericalMotionEstimator` 还提供构造参数 `alpha=0.70`、`beta=0.20`，供旧 alpha-beta 兼容接口保留；当前详细窗口拟合路径不使用它们更新位置。
 
-## 分数常量
+## 分数参数
 
-当前 SingleScore 权重 0.70/0.30、运动尺度权重 0.35、最大 d2=25、中心测量标准差 0.025 rad 和 log 尺度测量标准差 0.08 位于 `controller/fused_score.py`。它们尚未进入严格 YAML schema；替换前必须完成独立校准并联动重标 `tracking.candidateMinScore` 与来源最低分。
+当前外观 Beta 参数和 SingleScore 的 0.50/0.50 权重来自 `models/hit_small_stage3.calibration.json`。产物绑定 Stage 3 checkpoint SHA-256、manifest SHA-256、输入语义和两个工作点，生产加载时严格验证。运动尺度权重 0.35、最大 d2=25、中心测量标准差 0.025 rad 和 log 尺度测量标准差 0.08 仍位于 `controller/fused_score.py`，当前仅用于协方差诊断路径。
 
 Fusor 的置信度常量位于 `controller/fusor.py`：`FUSION_AGREEMENT_BONUS_WEIGHT=0.15` 控制 IoU 一致性奖励，`FUSION_MAX_SCORE_GAIN=0.03` 限制融合分数相对最高来源的增益，`FUSION_SCORE_CAP=0.99` 是融合分数硬上限。这三个常量当前不进入 YAML 配置。
 
-融合框几何也不由 YAML 或状态参数选择。三种状态都使用 `REFERENCE_ADAPTIVE`：Controller 传入上一可信 ERP 框面积，Fusor 在最大交叉框、居中放大交叉框与最小合并框之间按面积关系裁剪。参考面积不小于合并框时直接返回合并框，不放大。
+融合框几何由严格 YAML 的 `evaluator.fusionBoxMode` 选择。当前生产值 `best_source` 由 A4 同序列实验确定：保留两来源融合 confidence/support，但 bbox、BFoV 和 representative local box 取 calibrated SingleScore 较高来源。`reference_adaptive` 仅保留为显式实验模式，不是当前生产路径。
 
 ## 回退包络和兼容参数
 
@@ -55,7 +56,7 @@ Fusor 的置信度常量位于 `controller/fusor.py`：`FUSION_AGREEMENT_BONUS_W
 |---|---:|---|
 | `tracking.contextScale` | 2.0 | 扩展预测回退 BFoV |
 | `tracking.contextMarginRatio` | 0.15 | 回退 BFoV 额外边距 |
-| `tracking.candidateMinScore` | 0.40 | 所有最佳候选被接受为测量的最低 confidence |
+| `tracking.candidateMinScore` | 0.597262 | 所有最佳候选被接受为测量的最低 confidence；必须与校准产物一致 |
 | `tracking.scaleClusterTolerance` | 0.50 | 旧尺度聚类容差 |
 | `tracking.guardYawStepDeg` | 120 | 旧 guard 视图步长 |
 | `tracking.minViewsForCommit` | 2 | 旧聚合最少视图数 |

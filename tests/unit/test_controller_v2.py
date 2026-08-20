@@ -512,7 +512,7 @@ class ControllerV2Test(unittest.TestCase):
         controller.commitInitialization(init)
         frame1 = FramePacket(SequenceId("floor"), FrameIndex(1), 1_000_000_000, frame0.rgb)
         first = controller.beginFrame(frame1)
-        lowPair = (_boxedCandidate(0, 0.0, 0.79), _boxedCandidate(1, 0.0, 0.79))
+        lowPair = (_boxedCandidate(0, 0.0, 0.70), _boxedCandidate(1, 0.0, 0.70))
         step = controller.consume(first, lowPair)
 
         self.assertIsInstance(step, MoreViewsRequired)
@@ -520,7 +520,7 @@ class ControllerV2Test(unittest.TestCase):
         self.assertEqual(step.plan.attemptIndex, 1)
         final = controller.consume(
             step.plan,
-            tuple(_boxedCandidate(view.viewId, 0.0, 0.79) for view in step.plan.views),
+            tuple(_boxedCandidate(view.viewId, 0.0, 0.70) for view in step.plan.views),
         )
         self.assertIsInstance(final, FrameCommitted)
         assert isinstance(final, FrameCommitted)
@@ -530,7 +530,7 @@ class ControllerV2Test(unittest.TestCase):
         self.assertFalse(controller.lastStateObservation.selectedIsFused)
         self.assertTrue(controller.lastStateObservation.selectedSourceConfidencePassed)
         self.assertEqual(len(controller.lastStateObservation.sourceViewIds), 1)
-        self.assertAlmostEqual(controller.lastStateObservation.stateScore, 0.79)
+        self.assertAlmostEqual(controller.lastStateObservation.stateScore, 0.70)
 
     def testOverlapThresholdSevenTenthsAllowsFirstRoundFusion(self) -> None:
         frame0 = FramePacket(
@@ -603,8 +603,8 @@ class ControllerV2Test(unittest.TestCase):
 
         assert isinstance(final, FrameCommitted)
         self.assertTrue(final.result.valid)
-        self.assertAlmostEqual(final.result.bbox.xPx, 30.0)
-        self.assertAlmostEqual(final.result.bbox.widthPx, 80.0)
+        self.assertAlmostEqual(final.result.bbox.xPx, 20.0)
+        self.assertAlmostEqual(final.result.bbox.widthPx, 100.0)
         assert controller.lastStateObservation is not None
         self.assertTrue(controller.lastStateObservation.selectedIsFused)
         self.assertEqual(
@@ -613,7 +613,7 @@ class ControllerV2Test(unittest.TestCase):
         )
         self.assertEqual(controller.lastStateObservation.candidateCount, 2)
 
-    def testTrackingFusionUsesReferenceAdaptiveIntersection(self) -> None:
+    def testTrackingFusionUsesBestSourceGeometry(self) -> None:
         frame0 = FramePacket(
             SequenceId("wide-fusion"),
             FrameIndex(0),
@@ -636,12 +636,12 @@ class ControllerV2Test(unittest.TestCase):
             ),
         )
 
-        self.assertAlmostEqual(result.bbox.xPx, 10.0)
-        self.assertAlmostEqual(result.bbox.widthPx, 90.0)
-        self.assertLess(result.bfov.horizontalFovRad, math.pi)
+        self.assertAlmostEqual(result.bbox.xPx, 0.0)
+        self.assertAlmostEqual(result.bbox.widthPx, 100.0)
+        self.assertAlmostEqual(result.bfov.horizontalFovRad, 0.35)
         self.assertTrue(result.valid)
 
-    def testTrackingFusionUsesReferenceAdaptiveIntersectionAcrossErpSeam(self) -> None:
+    def testTrackingFusionUsesBestSourceGeometryAcrossErpSeam(self) -> None:
         frame0 = FramePacket(
             SequenceId("seam-intersection"),
             FrameIndex(0),
@@ -667,8 +667,8 @@ class ControllerV2Test(unittest.TestCase):
             ),
         )
 
-        self.assertAlmostEqual(result.bbox.xPx, 350.0)
-        self.assertAlmostEqual(result.bbox.widthPx, 30.0)
+        self.assertAlmostEqual(result.bbox.xPx, 340.0)
+        self.assertAlmostEqual(result.bbox.widthPx, 40.0)
         self.assertTrue(result.valid)
 
     def testRuntimeStaysUncertainAndUsesTwoType1Rounds(self) -> None:
@@ -763,7 +763,7 @@ class ControllerV2Test(unittest.TestCase):
                 _boxedCandidate(
                     view.viewId,
                     20.0 if index == 0 else 30.0 if index == 6 else 200.0,
-                    0.95 if index in {0, 6} else 0.10,
+                    0.96 if index == 6 else 0.95 if index == 0 else 0.10,
                     widthPx=80.0 if index == 6 else 100.0,
                 )
                 for index, view in enumerate(lostFirst.views)

@@ -27,6 +27,7 @@ class FusionBoxMode(StrEnum):
     MAX_INTERSECTION = "max_intersection"
     MIN_UNION = "min_union"
     REFERENCE_ADAPTIVE = "reference_adaptive"
+    BEST_SOURCE = "best_source"
 
 
 class Fusor:
@@ -52,7 +53,7 @@ class Fusor:
         except ValueError as error:
             raise ValueError(
                 "fusion boxMode must be 'max_intersection', 'min_union', "
-                "or 'reference_adaptive'"
+                "'reference_adaptive', or 'best_source'"
             ) from error
 
     def fuse(
@@ -150,8 +151,13 @@ class Fusor:
             (first, second),
             key=lambda item: (_singleScore(item), -item.viewId),
         )
+        if self._boxMode is FusionBoxMode.BEST_SOURCE:
+            bbox = representative.bbox
+            bfov = representative.bfov
+        else:
+            bfov = _intersectionBfov(bbox, self._geometry, frameWidthPx, frameHeightPx)
         return EvaluatedCandidate(
-            bfov=_intersectionBfov(bbox, self._geometry, frameWidthPx, frameHeightPx),
+            bfov=bfov,
             bbox=bbox,
             confidence=confidence,
             sourceViewIds=tuple(sorted((first.viewId, second.viewId))),

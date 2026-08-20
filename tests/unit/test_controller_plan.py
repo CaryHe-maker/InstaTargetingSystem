@@ -119,6 +119,22 @@ class ControllerPlanTest(unittest.TestCase):
         self.assertAlmostEqual(result.bbox.xPx, 30.0)
         self.assertAlmostEqual(result.bbox.widthPx, 110.0)
 
+    def testFusorBestSourceKeepsFusedConfidenceButUsesBestSourceShape(self) -> None:
+        first = _observation(0, 0.0, 0.91, 30.0, width=60.0, height=40.0)
+        second = _observation(1, 0.01, 0.90, 35.0, width=80.0, height=50.0)
+
+        result = Fusor(self.geometry, boxMode=FusionBoxMode.BEST_SOURCE).fuse(
+            (first, second),
+            frameWidthPx=360,
+            frameHeightPx=180,
+        )
+
+        assert result is not None
+        self.assertTrue(result.fused)
+        self.assertEqual(result.representativeViewId, first.viewId)
+        self.assertEqual(result.bbox, first.bbox)
+        self.assertGreater(result.confidence, first.singleScore or first.fusedScore)
+
     def testFusorReferenceAdaptiveBoxCoversAllSizeBranches(self) -> None:
         observations = (
             _observation(0, 0.0, 0.90, 20.0, width=100.0, height=80.0),

@@ -1,1 +1,53 @@
-# TODO: Backend training configuration placeholder.
+schemaVersion: 1
+
+data:
+  manifest: E:/NewDownload/train/manifest.jsonl
+  trainSplit: train
+  validationSplit: validation
+  templateSizePx: 128
+  searchSizePx: 256
+  minFrameGap: 1
+  maxFrameGap: 200
+  minFovDeg: 30.0
+  maxFovDeg: 120.0
+  negativeSampleRatio: 0.25
+  minimumLabelQuality: 0.5
+  decoderCacheSize: 4
+
+model:
+  variant: hit_small
+  initialWeights: ../models/hit_small_stage3.pth
+  stage: 3
+  hiddenDim: 256
+  dropout: 0.1
+
+optimization:
+  batchSize: 8
+  gradientAccumulation: 4
+  epochs: 50
+  maxSteps: 1000
+  headsLearningRate: 0.0005
+  neckLearningRate: 0.0001
+  backboneLearningRate: 0.00001
+  weightDecay: 0.0001
+  warmupSteps: 500
+  scheduler: cosine
+  precision: bf16
+  gradientClipNorm: 0.1
+  seed: 20260819
+  workers: 4
+
+loss:
+  presenceWeight: 1.0
+  l1Weight: 5.0
+  giouWeight: 2.0
+  qualityWeight: 1.0
+  qualityNegativeWeight: 0.25
+  presenceFocalGamma: 0.0
+
+runtime:
+  checkpointDir: E:/InstaTargetingSystemTraining/checkpoints/stage3_followup
+  resume: none
+  validateEverySteps: 1000
+  earlyStoppingPatience: 10
+  logEverySteps: 20

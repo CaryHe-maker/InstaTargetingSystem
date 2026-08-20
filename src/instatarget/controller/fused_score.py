@@ -8,6 +8,9 @@ from math import acos, atan2, exp, isfinite, log, log1p, pi
 
 import numpy as np
 
+from instatarget.controller.score_calibration import (
+    ScoreCalibration,
+)
 from instatarget.core.errors import ProtocolError
 from instatarget.core.types import (
     BFoV,
@@ -16,11 +19,6 @@ from instatarget.core.types import (
     SphericalPoint,
 )
 
-# Parameters solve the beta-calibration model for these anchors:
-# 0.80 -> 0.05, 0.90 -> 0.45, 0.98 -> 0.97.
-FUSED_SCORE_BETA_PARAMETERS = (14.30532301, 1.52758886, -2.21085783)
-APPEARANCE_WEIGHT = 0.70
-MOTION_WEIGHT = 0.30
 MOTION_SCALE_WEIGHT = 0.35
 MOTION_MAX_D2 = 25.0
 MOTION_CENTER_MEASUREMENT_STD_RAD = 0.025
@@ -38,7 +36,10 @@ class MotionScore:
     squaredDistance: float
 
 
-def calibrateBackendFusedScore(score: float) -> float:
+def calibrateBackendFusedScore(
+    score: float,
+    calibration: ScoreCalibration,
+) -> float:
     """Calibrate a backend probability with a monotonic beta map."""
     value = float(score)
     if not isfinite(value) or not 0.0 <= value <= 1.0:
@@ -46,7 +47,9 @@ def calibrateBackendFusedScore(score: float) -> float:
     if value == 0.0 or value == 1.0:
         return value
 
-    alpha, beta, intercept = FUSED_SCORE_BETA_PARAMETERS
+    alpha = calibration.appearance.alpha
+    beta = calibration.appearance.beta
+    intercept = calibration.appearance.intercept
     calibratedLogit = intercept + alpha * log(value) - beta * log1p(-value)
     if calibratedLogit >= 0.0:
         return 1.0 / (1.0 + exp(-calibratedLogit))
@@ -56,27 +59,19 @@ def calibrateBackendFusedScore(score: float) -> float:
 
 def calibrateLocalAppearanceProbabilities(
     observations: Sequence[LocalObservation],
+    calibration: ScoreCalibration,
 ) -> tuple[LocalObservation, ...]:
     """Attach appearance probabilities without overwriting backend evidence."""
     return tuple(
         replace(
             observation,
-            appearanceProbability=calibrateBackendFusedScore(observation.fusedScore),
+            appearanceProbability=calibrateBackendFusedScore(
+                observation.fusedScore,
+                calibration,
+            ),
         )
         for observation in observations
     )
-
-
-def remapLocalObservationFusedScores(
-    observations: Sequence[LocalObservation],
-) -> tuple[LocalObservation, ...]:
-    """Compatibility alias for callers using the pre-upgrade function name."""
-    return calibrateLocalAppearanceProbabilities(observations)
-
-
-def remapFusedScore(score: float) -> float:
-    """Compatibility alias for the backend appearance calibration."""
-    return calibrateBackendFusedScore(score)
 
 
 def calibrateMotionScore(rawScore: float) -> float:
@@ -194,7 +189,11 @@ def scoreViewCenterMotion(
     )
 
 
-def composeSingleScore(appearanceProbability: float, motionProbability: float) -> float:
+def composeSingleScore(
+    appearanceProbability: float,
+    motionProbability: float,
+    calibration: ScoreCalibration,
+) -> float:
     """Compose the score consumed by candidate ranking and two-box fusion."""
     for name, value in (
         ("appearanceProbability", appearanceProbability),
@@ -204,7 +203,8 @@ def composeSingleScore(appearanceProbability: float, motionProbability: float) -
             raise ProtocolError(f"{name} must be in [0, 1], actual={value}")
     return float(
         np.clip(
-            APPEARANCE_WEIGHT * appearanceProbability + MOTION_WEIGHT * motionProbability,
+            calibration.appearanceWeight * appearanceProbability
+            + calibration.motionWeight * motionProbability,
             0.0,
             1.0,
         )
@@ -221,14 +221,11 @@ def _quadraticDistance(residual: np.ndarray, covariance: np.ndarray) -> float:
 
 
 __all__ = [
-    "FUSED_SCORE_BETA_PARAMETERS",
     "MotionScore",
     "calibrateBackendFusedScore",
     "calibrateLocalAppearanceProbabilities",
     "calibrateMotionScore",
     "composeSingleScore",
-    "remapFusedScore",
-    "remapLocalObservationFusedScores",
     "scoreMotionConsistency",
     "scoreViewCenterMotion",
 ]

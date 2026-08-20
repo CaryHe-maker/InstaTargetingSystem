@@ -76,6 +76,22 @@ def auc(ious: list[float]) -> float:
     return float(np.trapezoid(curve, thresholds))
 
 
+def trackingLossRate(ious: list[float], *, epsilon: float = 1e-12) -> float:
+    """Fraction of visible evaluated frames with effectively zero overlap.
+
+    The denominator intentionally excludes target-absent frames.  ``epsilon`` avoids
+    classifying floating-point projection noise as a recovered overlap.
+    """
+    if not np.isfinite(epsilon) or epsilon < 0.0:
+        raise ValueError("epsilon must be finite and non-negative")
+    values = np.asarray(ious, dtype=np.float64)
+    if values.size == 0:
+        return 0.0
+    if not np.isfinite(values).all() or np.any((values < 0.0) | (values > 1.0)):
+        raise ValueError("IoU values must be finite and in [0, 1]")
+    return float(np.mean(values <= epsilon))
+
+
 @dataclass(slots=True)
 class OtbMetrics:
     ious: list[float] = field(default_factory=list)
@@ -83,14 +99,22 @@ class OtbMetrics:
     def update(self, prediction: BBoxXYWH, target: BBoxXYWH) -> None:
         self.ious.append(bboxIoU(prediction, target))
 
-    def summarize(self) -> dict[str, float]:
+    def summarize(self) -> dict[str, float | int]:
         if not self.ious:
-            return {"successRate@0.5": 0.0, "auc": 0.0, "meanIoU": 0.0}
+            return {
+                "successRate@0.5": 0.0,
+                "auc": 0.0,
+                "meanIoU": 0.0,
+                "lostFrameCount": 0,
+                "trackingLossRate": 0.0,
+            }
         values = np.asarray(self.ious, dtype=np.float64)
         return {
             "successRate@0.5": float((values > 0.5).mean()),
             "auc": auc(self.ious),
             "meanIoU": float(values.mean()),
+            "lostFrameCount": int(np.sum(values <= 1e-12)),
+            "trackingLossRate": trackingLossRate(self.ious),
         }
 
 
@@ -112,4 +136,5 @@ __all__ = [
     "circularBBoxIoU",
     "readResultFile",
     "successCurve",
+    "trackingLossRate",
 ]

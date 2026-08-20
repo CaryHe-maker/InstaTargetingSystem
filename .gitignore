@@ -105,6 +105,13 @@ checkpoints/
 *.plan
 *.trt
 
+# The bundled HiT implementation is source code, not a model artifact.
+!src/instatarget/vendor/hit/
+!src/instatarget/vendor/hit/lib/
+!src/instatarget/vendor/hit/lib/**
+src/instatarget/vendor/hit/lib/**/__pycache__/
+src/instatarget/vendor/hit/lib/**/*.pyc
+
 # Vendored reference implementations
 third_party/
 
@@ -127,3 +134,12 @@ docker/*.tar
 !docker/
 !*.example
 !*.template
+
+# GitHub clones must contain the complete competition Docker build context.
+# Keep only the compact Stage 3 checkpoint (< GitHub's 100 MB file limit), its
+# hash-bound calibration artifact, and documentation; raw training weights stay ignored.
+!models/
+models/*
+!models/README.md
+!models/hit_small_stage3_inference.pth
+!models/hit_small_stage3_inference.calibration.json
