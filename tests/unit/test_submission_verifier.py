@@ -48,12 +48,15 @@ class SubmissionVerifierTest(unittest.TestCase):
         )
 
     @patch.object(verifySubmission.subprocess, "run")
-    def testBuiltImageVerificationRunsRuntimeImportProbe(self, run) -> None:
+    def testBuiltImageVerificationAcceptsTenLayersAndRunsRuntimeProbe(self, run) -> None:
         run.side_effect = [
             subprocess.CompletedProcess(
                 args=[],
                 returncode=0,
-                stdout='["1", "2", "3", "4", "5", "6", "7"]',
+                stdout=(
+                    '["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]'
+                    "|4282300716"
+                ),
             ),
             subprocess.CompletedProcess(
                 args=[],
@@ -69,8 +72,39 @@ class SubmissionVerifierTest(unittest.TestCase):
         self.assertIn("docker", runtimeCommand)
         self.assertIn("run", runtimeCommand)
         self.assertIn("validateHiTCheckpoint", runtimeCommand[-1])
+        self.assertIn("torch.version.cuda == '12.8'", runtimeCommand[-1])
+        self.assertIn("sm_120", runtimeCommand[-1])
         self.assertIn("--network", runtimeCommand)
         self.assertIn("none", runtimeCommand)
+
+    @patch.object(verifySubmission.subprocess, "run")
+    def testBuiltImageVerificationRejectsElevenLayers(self, run) -> None:
+        run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                '["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"]'
+                "|4282300716"
+            ),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "1-10 RootFS layers"):
+            verifySubmission.verifyBuiltImage("model:too-many-layers")
+
+        self.assertEqual(run.call_count, 1)
+
+    @patch.object(verifySubmission.subprocess, "run")
+    def testBuiltImageVerificationRejectsOversizedImage(self, run) -> None:
+        run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='["1", "2", "3", "4", "5", "6", "7"]|5000000001',
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "exceeds the project size guard"):
+            verifySubmission.verifyBuiltImage("model:too-large")
+
+        self.assertEqual(run.call_count, 1)
 
 
 if __name__ == "__main__":

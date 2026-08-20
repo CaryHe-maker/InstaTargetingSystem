@@ -4,7 +4,7 @@
 
 根目录唯一的 Dockerfile 打包比赛所需源码、`configs/RGBonly.yaml`、内置 HiT vendor、推理权重和无参数 `track.py`。开发工具、测试、文档、数据、可视化、缓存和原始训练 checkpoint 不进入构建上下文。
 
-基础镜像已经提供匹配 CUDA 的 PyTorch 和 torchvision，容器依赖清单不会重复安装它们。构建先清理 Conda/Pip 缓存、头文件、静态库和测试资源，再把有效文件系统复制进 `scratch` 最终阶段，使删除内容不会残留在基础镜像层中。
+基础镜像固定为 `pytorch/pytorch:2.11.0-cuda12.8-cudnn9-devel`，已经提供 Python 3.12、PyTorch 2.11、torchvision 0.26、CUDA 12.8 和 RTX 5090 D v2 所需的 `sm_120` 编译架构，容器依赖清单不会重复安装 torch 和 torchvision。该组合符合评测服务器 NVIDIA driver 580、CUDA 最高 12.8、单卡 24 GB 显存、16 CPU 和 64 GB 内存的约束。构建保留预编译 PyTorch 与 NVIDIA wheel 运行库，移除只用于开发的 PyTorch 源码/Git 历史、CUDA 编译工具链、Nsight、头文件、Triton、CMake 和测试资源；competition 路线不在容器内编译扩展。随后把清理后的有效文件系统复制进 `scratch` 最终阶段，使删除内容不会残留在基础镜像层中。
 
 ## 紧凑权重
 
@@ -37,7 +37,7 @@ python docker/verify_submission.py --image instatarget:submission
 docker run --rm --gpus all -v "${PWD}\dataset:/mnt/dataset" -v "${PWD}\result:/mnt/result" instatarget:submission
 ```
 
-Dockerfile 的最终 `scratch` 阶段只有 7 条文件系统 `COPY`，分别合并 `/layer-parts/00` 至 `06`。`ENV` 和 `ENTRYPOINT` 只写镜像配置，不产生 RootFS layer。验证脚本在构建前检查必需文件已被 Git 跟踪且没有被 `.dockerignore` 排除，并核对 checkpoint/calibration 哈希和静态 7 层结构；Docker 构建阶段会在 CPU 上构造 HiT-Small 并严格加载全部 checkpoint 参数。构建后验证还会在无网络容器中重复同一模型探针，并检查 `.RootFS.Layers` 数量必须严格等于 7。任一文件、参数、运行时模块或层数偏差都会失败。
+Dockerfile 的最终 `scratch` 阶段使用 7 条文件系统 `COPY`，分别合并 `/layer-parts/00` 至 `06`，低于最多 10 个 RootFS layer 的提交限制。`ENV` 和 `ENTRYPOINT` 只写镜像配置，不产生 RootFS layer。验证脚本在构建前检查必需文件已被 Git 跟踪且没有被 `.dockerignore` 排除，并核对 checkpoint/calibration 哈希、固定基础镜像和静态 7 层结构；Docker 构建阶段会断言 PyTorch、torchvision、CUDA 和 `sm_120` 版本，并在 CPU 上构造 HiT-Small、严格加载全部 checkpoint 参数。构建后验证还会在无网络容器中重复版本、架构和模型探针，并检查 `.RootFS.Layers` 数量在 1 至 10 之间、镜像 `.Size` 不超过 5,000,000,000 bytes。任一文件、参数、运行时模块、CUDA 架构、层数或体积偏差都会失败。
 
 构建完成后可用 `docker image inspect instatarget:submission --format='{{.Size}}'` 检查总字节数，并用 `docker history instatarget:submission` 检查层大小。上传镜像时不应包含原始 checkpoint、构建缓存或本地数据。
 

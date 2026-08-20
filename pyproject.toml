@@ -11,16 +11,16 @@ dependencies = [
   "numpy>=1.26,<3",
   "opencv-python-headless>=4.11,<5",
   "PyYAML>=6,<7",
-  "torch>=2.6,<2.7",
-  "torchvision>=0.21,<0.22",
+  "torch>=2.11,<2.12",
+  "torchvision>=0.26,<0.27",
   "timm==0.5.4",
   "easydict>=1.13,<2",
 ]
 
 [project.optional-dependencies]
 hit = [
-  "torch>=2,<3",
-  "torchvision>=0.20,<1",
+  "torch>=2.11,<2.12",
+  "torchvision>=0.26,<0.27",
   "timm>=0.5.4",
   "yacs>=0.1.8",
   "easydict>=1.13,<2",

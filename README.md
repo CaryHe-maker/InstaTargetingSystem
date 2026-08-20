@@ -9,7 +9,7 @@ InstaTargetingSystem 是面向 ERP 全景视频的 RGB-only 单目标跟踪系�
 
 生产运行使用项目内置的 `src/instatarget/vendor/hit`、`models/hit_small_stage3_inference.pth`、与其哈希绑定的 `models/hit_small_stage3_inference.calibration.json` 和可用的 CUDA PyTorch 环境。项目不会在模型或校准产物缺失时切换到替代路径。
 
-GitHub 已包含小于 100 MB 的压缩 Stage 3 checkpoint 及其哈希绑定校准文件；国内构建服务器 clone 后可直接执行 `python docker/verify_submission.py` 和 `docker build`。最终镜像严格为 7 个 RootFS layer。具体流程见 [提交容器运行环境](docs/Competition/containerRuntime.md)。
+GitHub 已包含小于 100 MB 的压缩 Stage 3 checkpoint 及其哈希绑定校准文件；国内构建服务器 clone 后可直接执行 `python docker/verify_submission.py` 和 `docker build`。提交镜像固定基于 `pytorch/pytorch:2.11.0-cuda12.8-cudnn9-devel`，包含 RTX 5090 D v2 所需的 `sm_120` 支持；当前实现为 7 个 RootFS layer，低于最多 10 层的限制。具体流程见 [提交容器运行环境](docs/Competition/containerRuntime.md)。
 
 ## 快速命令
 

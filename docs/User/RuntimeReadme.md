@@ -2,7 +2,7 @@
 
 ## 本地运行
 
-项目需要 Python 3.11、CUDA、PyTorch 2.6、torchvision 0.21、OpenCV、PyYAML、NumPy、timm 和 EasyDict。依赖清单位于 `requirements.txt`，开发测试依赖位于 `pyproject.toml`。
+项目 Docker 运行时使用 Python 3.12、CUDA 12.8、PyTorch 2.11、torchvision 0.26、OpenCV、PyYAML、NumPy、timm 和 EasyDict。依赖清单位于 `requirements.txt`，开发测试依赖位于 `pyproject.toml`。
 
 真实 HiT-Small 运行需要：
 
@@ -23,7 +23,7 @@
 
 ## Docker
 
-Dockerfile 使用 `pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime`，复制经过 `.dockerignore` 筛选的比赛源码、RGB-only 配置、内置 HiT 运行时、权重和 `track.py`。容器通过 `DATASET_DIR`、`RESULT_DIR`、`CONFIG_PATH` 和 `HIT_ROOT` 指定输入、输出、配置和模型源。
+Dockerfile 直接使用 `pytorch/pytorch:2.11.0-cuda12.8-cudnn9-devel`。该镜像内置 PyTorch 2.11、torchvision 0.26 和 CUDA 12.8，并包含 RTX 5090 D v2 所需的 `sm_120` 编译架构。最终推理镜像会移除 PyTorch 源码、CUDA 编译器、Nsight、头文件、Triton 和 CMake，只保留 competition 所需的预编译运行库。Docker 复制经过 `.dockerignore` 筛选的比赛源码、RGB-only 配置、内置 HiT 运行时、权重和 `track.py`。容器通过 `DATASET_DIR`、`RESULT_DIR`、`CONFIG_PATH` 和 `HIT_ROOT` 指定输入、输出、配置和模型源。
 
 ## 资源释放
 
