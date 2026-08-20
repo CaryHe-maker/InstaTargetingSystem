@@ -9,6 +9,7 @@ from instatarget.app.driver import buildRuntime, finalizeSink, openSink, runTrac
 from instatarget.core.config import loadConfig
 from instatarget.core.types import BBoxXYWH
 from instatarget.data.frame_source import FrameSource
+from instatarget.eval.profiler import RuntimeProfiler
 from instatarget.tracker.hit_backend import HiTPrediction
 from instatarget.visualization.png import writeRgbPng
 
@@ -39,6 +40,7 @@ class DriverSmokeTest(unittest.TestCase):
             openSink(runtime.sink, str(output))
             timer = _BoundaryTimer()
             resultRecorder = _CheckingResultRecorder(timer)
+            profiler = RuntimeProfiler()
 
             resultCount = runTracking(
                 source=_CheckingSource(source, timer),
@@ -50,6 +52,7 @@ class DriverSmokeTest(unittest.TestCase):
                 recorder=_CheckingRecorder(runtime.recorder, timer),
                 resultRecorder=resultRecorder,
                 processingTimer=timer,
+                profiler=profiler,
                 scoreCalibration=runtime.scoreCalibration,
             )
             finalizeSink(runtime.sink, resultCount)
@@ -61,6 +64,8 @@ class DriverSmokeTest(unittest.TestCase):
             self.assertEqual(resultRecorder.roundCounts[0], 0)
             self.assertIsNotNone(resultRecorder.roundCounts[1])
             self.assertGreaterEqual(resultRecorder.roundCounts[1], 1)
+            self.assertEqual([row["frameIndex"] for row in profiler.frameRows], [0, 1])
+            self.assertIn("total", profiler.summarizeFrames())
 
 
 class _TestHiTSession:

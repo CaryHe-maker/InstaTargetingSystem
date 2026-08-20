@@ -19,11 +19,16 @@
 
 真实评估命令必须使用 `E:\NewDownload\train\manifest.jsonl`，评估工具会拒绝位于该 canonical root 之外的 manifest 或视频。最终 holdout 在模型、校准、Controller 与流水线全部冻结前禁止读取。
 
+性能/精度 A/B 使用 `tools/compare_evaluation_ab.py`。工具按 frame/round/view key 对齐候选，比较 model/presence/quality/appearance/motion/SingleScore、局部框、投影框/BFoV 和最终 TrackResult，同时拒绝任何非有限数。普通低风险优化要求零差异；`--fp16-gates` 允许数值变化，但要求 mean IoU、success@0.5、loss rate、absent FPR 和 P95 同时过门槛。
+
+发布前运行 `tools/verify_release_artifacts.py`。它核对 checkpoint/calibration SHA-256、RGB-only YAML、Docker build context、Git 跟踪文件和严格 7 层结构；传入 `--image-tar` 时还检查导出镜像的实际 layer 数。GitHub Actions 在全新 clone 上执行同一脚本。
+
 ## 回归命令
 
 ```powershell
 & ".venv\Scripts\python.exe" -m pytest -p no:cacheprovider tests
 & ".venv\Scripts\python.exe" -m ruff check src tests tools
+& ".venv\Scripts\python.exe" tools\verify_release_artifacts.py
 git diff --check
 ```
 

@@ -87,6 +87,11 @@ class HiTBackend:
     def supportsOnlineTemplates(self) -> bool:
         return self._session.supportsOnlineTemplates
 
+    @property
+    def lastProfile(self) -> dict[str, int | float | bool | str]:
+        value = getattr(self._session, "lastProfile", {})
+        return dict(value) if isinstance(value, dict) else {}
+
     def encodeTemplate(self, rgb: NDArray[np.uint8], bbox: BBoxXYWH) -> object:
         self._requireOpen()
         _requireRgb(rgb)

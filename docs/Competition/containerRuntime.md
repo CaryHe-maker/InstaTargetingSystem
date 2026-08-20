@@ -39,6 +39,8 @@ docker run --rm --gpus all -v "${PWD}\dataset:/mnt/dataset" -v "${PWD}\result:/m
 
 Dockerfile 的最终 `scratch` 阶段只有 7 条文件系统 `COPY`，分别合并 `/layer-parts/00` 至 `06`。`ENV` 和 `ENTRYPOINT` 只写镜像配置，不产生 RootFS layer。验证脚本在构建前检查必需文件、checkpoint/calibration 哈希和静态 7 层结构，构建后检查 `.RootFS.Layers` 数量必须严格等于 7；多一层或少一层都会失败。
 
+仓库级 `tools/verify_release_artifacts.py` 额外核对 RGB-only YAML、`.dockerignore` 放行规则、GitHub clone 必需的受跟踪文件，以及配置/Docker/压缩产物 SHA-256。GitHub Actions 在 push 和 pull request 上运行该脚本。全新 clone 不包含本地原始训练 checkpoint 时只验证压缩配对；开发机存在原始配对时还会检查压缩 calibration 除 checkpoint hash 外与原始参数完全一致。
+
 构建完成后可用 `docker image inspect instatarget:submission --format='{{.Size}}'` 检查总字节数，并用 `docker history instatarget:submission` 检查层大小。上传镜像时不应包含原始 checkpoint、构建缓存或本地数据。
 
 ## 可重复性

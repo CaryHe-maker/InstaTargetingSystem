@@ -36,6 +36,10 @@ class TrackerBackendImpl(TrackerBackendProtocol):
     def templateRevision(self) -> int:
         return self._templates.revision
 
+    @property
+    def lastProfile(self) -> dict[str, int | float | bool | str]:
+        return self._hitBackend.lastProfile
+
     def initialize(self, template: LocalView, templateBox: BBoxXYWH) -> None:
         if self._closed:
             raise ProtocolError("tracker backend is closed")
@@ -113,9 +117,7 @@ class TrackerBackendImpl(TrackerBackendProtocol):
             tuple(view.rgb for view in views),
             (snapshot.anchor.features,),
         )
-        sharedInferenceNs = (
-            (perf_counter_ns() - inferenceStartedNs) // len(views) if views else 0
-        )
+        sharedInferenceNs = (perf_counter_ns() - inferenceStartedNs) // len(views) if views else 0
         return tuple(
             buildRgbObservation(view, prediction, sharedInferenceNs)
             for view, prediction in zip(views, predictions, strict=True)

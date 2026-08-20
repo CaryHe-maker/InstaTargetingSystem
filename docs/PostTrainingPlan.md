@@ -1,5 +1,42 @@
 # Stage 3 后续优化计划
 
+## 编号完成度
+
+| 编号 | 状态 |
+| --- | --- |
+| 1.0 | 完成 |
+| 2.1 | 完成 |
+| 2.2 | 完成，候选均未进入生产 |
+| 2.3 | 完成，FP16 未进入生产 |
+| 2.4 | 完成 |
+| 2.5 | 完成 |
+| 2.6 | 完成，无 Geometry 修改 |
+| 3.1 | 未进行 |
+| 3.2 | 未进行 |
+| 3.3 | 未进行 |
+| 3.4 | 未进行 |
+| 3.5 | 未进行 |
+| 3.6 | 未进行 |
+| 3.7 | 未进行 |
+| 3.8 | 未进行 |
+| 3.9 | 未进行 |
+| 3.10 | 未进行 |
+
+`1.0` 表示“当前冻结基线”的保留与确认。第 3 节属于有风险优化，本轮不执行。
+
+## 本轮执行结论
+
+本轮完成第 1、2 节，生产基线继续保持 Stage 3 FP32 顺序 `4+4`。完成表示对应的实现、产物、A/B 和保留/回退决定已经落定；不表示所有候选都应启用。
+
+- 2.1：manifest 评估可选记录 decode、crop、preprocess、host-to-device、CUDA Event forward、projection、calibration、Controller、backend 和 total。报告同时提供逐调用与逐帧 P50/P95/P99、batch/forward、峰值显存、温度、OOM、FP16 回退、环境和文件 hash。100 帧 profiler off/on 的所有候选与最终 TrackResult 均为零差异，P95 分别为 `313.888 ms` 与 `313.861 ms`，未观察到可分辨 overhead。关闭 profiler 时不创建 CUDA Event、不做计时同步。
+- 2.2：按单变量测试 cuDNN benchmark、channels-last、固定 shape resize/传输 buffer 复用、pinned memory/non-blocking。cuDNN 和 channels-last 改变逐输出或最终轨迹；buffer 复用和 pinned/non-blocking 可保持零差异，但没有稳定 P95 收益。所有开关继续默认关闭。
+- 2.3：FP16 的 bbox、corner heatmap、presence/quality logits 与概率均受非有限检查保护，异常时整批 FP32 回退并计数。100 帧 A/B 为零输出差异、零 fallback，但 P95 从 `313.861 ms` 上升至 `404.187 ms`，因此不进入生产。
+- 2.4：validation 覆盖从原四序列扩展到包含 `train_sim/seq_0045` 的五序列，共 `2918` 个可见帧和 `173` 个 absent frame。扩展汇总的 absent FPR 为 `0.56069`，tracking loss rate 为 `0.23578`。新增序列产生 55 个 loss episode，长度 P50/P95/最大值为 `2/32/97` 帧；当前 shadow lostCandidate precision/recall 为 `0.4186/0.2545`。这些值只用于离线诊断，不接入状态机。
+- 2.5：`tools/verify_release_artifacts.py` 与 GitHub Actions 校验 checkpoint/calibration 配对、配置与 Docker 输入、Git 跟踪状态和严格 7 层镜像结构。脚本兼容只包含压缩 checkpoint 的全新 GitHub clone；本地原始 checkpoint 存在时会额外核对两份 calibration 参数一致。
+- 2.6：新增 local IoU、direct circular ERP IoU、spherical IoU 与 `envelopeInflation` 的证据报告。含 absent 的新增序列上有 `5612` 个可见候选，inflation 与 local-to-ERP/local-to-spherical gap 的相关性仅为 `0.009/0.064`，不足以证明包络是主误差源，因此不修改 Geometry。
+
+A/B 产物保存在本地 `artifacts/post_training/`，该目录不进入提交。统一比较入口为 `tools/compare_evaluation_ab.py`；非 FP16 低风险优化要求逐输出和最终 TrackResult 零差异，FP16 另执行精度、loss、absent FPR 和 P95 门槛。
+
 ## 1. 当前冻结基线
 
 本文记录 Stage 3、独立 calibration 和阶段 4 A4 完成后仍未实施的工作。当前生产基线必须保留为所有后续实验的对照组：

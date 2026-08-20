@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from time import perf_counter_ns
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -38,6 +39,7 @@ from instatarget.io.result_sink import FileResultSink
 from instatarget.tracker import HiTBackend, PyTorchHiTSession, TrackerBackendImpl
 
 if TYPE_CHECKING:
+    from instatarget.eval.profiler import RuntimeProfiler
     from instatarget.tracker.hit_backend import HiTSession
     from instatarget.visualization.recorder import VisualizationRecorder
     from instatarget.visualization.result import ResultVisualizationRecorder
@@ -109,19 +111,26 @@ def runTracking(
     recorder: VisualizationRecorder | None = None,
     resultRecorder: ResultVisualizationRecorder | None = None,
     processingTimer: TimeCounter | None = None,
+    profiler: RuntimeProfiler | None = None,
     scoreCalibration: ScoreCalibration,
 ) -> int:
     """Run the sequential tracking pipeline and publish one result per frame."""
     try:
+        initializationStartedNs = _profileNow(profiler)
         _startProcessing(processingTimer)
         try:
+            decodeStartedNs = _profileNow(profiler)
             frame0 = _requireFrame(source.read())
-            initPlan = controller.buildInitialization(frame0, initialBox)
-            templateView = geometry.cropViews(frame0, [initPlan.templateView])[0]
+            _startProfileFrame(profiler, int(frame0.frameIndex), decodeStartedNs)
+            with _profile(profiler, "controller"):
+                initPlan = controller.buildInitialization(frame0, initialBox)
+            with _profile(profiler, "crop"):
+                templateView = geometry.cropViews(frame0, [initPlan.templateView])[0]
             backend.initialize(templateView, initPlan.templateBox)
             initialResult = controller.commitInitialization(initPlan)
         finally:
             _stopProcessing(processingTimer)
+        _finishProfileFrame(profiler, initializationStartedNs, batchSizes=[1], forwardCount=0)
         sink.write(initialResult)
         if resultRecorder is not None:
             resultRecorder.record(frame0, initialResult, stateScore=None, roundCount=0)
@@ -130,11 +139,18 @@ def runTracking(
             recorder.recordLocalRgb(frame0, [templateView])
 
         while True:
+            iterationStartedNs = (
+                perf_counter_ns() if profiler is not None and profiler.enabled else None
+            )
             _startProcessing(processingTimer)
             try:
+                decodeStartedNs = _profileNow(profiler)
                 frame = source.read()
                 if frame is not None:
-                    plan = controller.beginFrame(frame)
+                    _startProfileFrame(profiler, int(frame.frameIndex), decodeStartedNs)
+                    with _profile(profiler, "controller"):
+                        plan = controller.beginFrame(frame)
+                    batchSizes: list[int] = []
                     visualizationBatches: list[
                         tuple[
                             tuple[LocalView, ...],
@@ -143,25 +159,32 @@ def runTracking(
                         ]
                     ] = []
                     while True:
-                        views = tuple(geometry.cropViews(frame, plan.views))
-                        rawObservations = tuple(backend.infer(views, plan.templateCommand))
-                        observations = calibrateLocalAppearanceProbabilities(
-                            rawObservations,
-                            scoreCalibration,
-                        )
-                        projected = tuple(
-                            _projectObservation(
-                                frame=frame,
-                                view=view,
-                                observation=observation,
-                                predictedMotion=plan.predictedMotion,
-                                geometry=geometry,
-                                scoreCalibration=scoreCalibration,
+                        with _profile(profiler, "crop"):
+                            views = tuple(geometry.cropViews(frame, plan.views))
+                        batchSizes.append(len(views))
+                        with _profile(profiler, "backend"):
+                            rawObservations = tuple(backend.infer(views, plan.templateCommand))
+                        _recordBackendProfile(profiler, backend)
+                        with _profile(profiler, "calibration"):
+                            observations = calibrateLocalAppearanceProbabilities(
+                                rawObservations,
+                                scoreCalibration,
                             )
-                            for view, observation in zip(views, observations, strict=True)
-                        )
+                        with _profile(profiler, "projection"):
+                            projected = tuple(
+                                _projectObservation(
+                                    frame=frame,
+                                    view=view,
+                                    observation=observation,
+                                    predictedMotion=plan.predictedMotion,
+                                    geometry=geometry,
+                                    scoreCalibration=scoreCalibration,
+                                )
+                                for view, observation in zip(views, observations, strict=True)
+                            )
                         visualizationBatches.append((views, observations, projected))
-                        step = controller.consume(plan, projected)
+                        with _profile(profiler, "controller"):
+                            step = controller.consume(plan, projected)
                         if isinstance(step, MoreViewsRequired):
                             plan = step.plan
                             continue
@@ -171,6 +194,12 @@ def runTracking(
                 _stopProcessing(processingTimer)
             if frame is None:
                 break
+            _finishProfileFrame(
+                profiler,
+                iterationStartedNs,
+                batchSizes=batchSizes,
+                forwardCount=len(batchSizes),
+            )
             if recorder is not None:
                 for views, observations, projected in visualizationBatches:
                     recorder.recordLocalRgb(frame, views)
@@ -307,6 +336,66 @@ def _startProcessing(timer: TimeCounter | None) -> None:
 def _stopProcessing(timer: TimeCounter | None) -> None:
     if timer is not None:
         timer.stopProcessing()
+
+
+def _profile(profiler: RuntimeProfiler | None, name: str):
+    if profiler is None or not profiler.enabled:
+        from contextlib import nullcontext
+
+        return nullcontext()
+    return profiler.track(name)
+
+
+def _profileNow(profiler: RuntimeProfiler | None) -> int | None:
+    return perf_counter_ns() if profiler is not None and profiler.enabled else None
+
+
+def _startProfileFrame(
+    profiler: RuntimeProfiler | None,
+    frameIndex: int,
+    decodeStartedNs: int | None,
+) -> None:
+    if profiler is None or not profiler.enabled:
+        return
+    profiler.startFrame(frameIndex)
+    if decodeStartedNs is not None:
+        profiler.record("decode", perf_counter_ns() - decodeStartedNs)
+
+
+def _finishProfileFrame(
+    profiler: RuntimeProfiler | None,
+    totalStartedNs: int | None,
+    **metadata: object,
+) -> None:
+    if profiler is None or not profiler.enabled:
+        return
+    profiler.annotateFrame(**metadata)
+    if totalStartedNs is not None:
+        profiler.record("total", perf_counter_ns() - totalStartedNs)
+    profiler.finishFrame()
+
+
+def _recordBackendProfile(
+    profiler: RuntimeProfiler | None,
+    backend: TrackerBackend,
+) -> None:
+    if profiler is None or not profiler.enabled:
+        return
+    values = getattr(backend, "lastProfile", {})
+    if not isinstance(values, dict):
+        return
+    for name in ("preprocess", "hostToDevice", "cudaForward"):
+        value = values.get(name)
+        if isinstance(value, (int, float)):
+            profiler.record(name, int(value))
+    profiler.appendFrameMetadata(
+        "backendBatches",
+        {
+            name: value
+            for name, value in values.items()
+            if isinstance(value, (bool, int, float, str))
+        },
+    )
 
 
 __all__ = [

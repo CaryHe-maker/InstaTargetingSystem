@@ -45,6 +45,12 @@ def buildParser() -> argparse.ArgumentParser:
         help="Write midVisual/backend_box and midVisual/geometry_box; evaluation remains enabled.",
     )
     parser.add_argument("--max-frames", type=int)
+    parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--precision", choices=("fp32", "fp16"))
+    parser.add_argument("--cudnn-benchmark", action="store_true")
+    parser.add_argument("--channels-last", action="store_true")
+    parser.add_argument("--reuse-buffers", action="store_true")
+    parser.add_argument("--pinned-nonblocking", action="store_true")
     parser.add_argument("--spherical-samples-yaw", type=int, default=128)
     parser.add_argument("--spherical-samples-pitch", type=int, default=64)
     parser.add_argument("--allow-holdout", action="store_true")
@@ -103,18 +109,39 @@ def main(argv: list[str] | None = None) -> int:
         safeName = sequenceId.replace("/", "__").replace("\\", "__")
         reportPath = reportsRoot / f"{safeName}.json"
         command = [
-            "--manifest", str(manifestPath),
-            "--dataset-root", str(datasetRoot),
-            "--config", str(args.config.expanduser().resolve()),
-            "--weights", str(args.weights.expanduser().resolve()),
-            "--split", splitBySequence[sequenceId],
-            "--sequence", sequenceId,
-            "--output", str(reportPath),
-            "--spherical-samples-yaw", str(args.spherical_samples_yaw),
-            "--spherical-samples-pitch", str(args.spherical_samples_pitch),
+            "--manifest",
+            str(manifestPath),
+            "--dataset-root",
+            str(datasetRoot),
+            "--config",
+            str(args.config.expanduser().resolve()),
+            "--weights",
+            str(args.weights.expanduser().resolve()),
+            "--split",
+            splitBySequence[sequenceId],
+            "--sequence",
+            sequenceId,
+            "--output",
+            str(reportPath),
+            "--spherical-samples-yaw",
+            str(args.spherical_samples_yaw),
+            "--spherical-samples-pitch",
+            str(args.spherical_samples_pitch),
         ]
         if args.max_frames is not None:
             command.extend(("--max-frames", str(args.max_frames)))
+        if args.profile:
+            command.append("--profile")
+        if args.precision is not None:
+            command.extend(("--precision", args.precision))
+        for enabled, option in (
+            (args.cudnn_benchmark, "--cudnn-benchmark"),
+            (args.channels_last, "--channels-last"),
+            (args.reuse_buffers, "--reuse-buffers"),
+            (args.pinned_nonblocking, "--pinned-nonblocking"),
+        ):
+            if enabled:
+                command.append(option)
         if args.allow_holdout:
             command.append("--allow-holdout")
         if args.visualize:
@@ -134,8 +161,10 @@ def main(argv: list[str] | None = None) -> int:
 
     aggregatePath = outputRoot / "aggregate.json"
     summaryArguments = [
-        "--inputs", *[str(path) for path in reportPaths],
-        "--output", str(aggregatePath),
+        "--inputs",
+        *[str(path) for path in reportPaths],
+        "--output",
+        str(aggregatePath),
     ]
     if args.split == "all":
         summaryArguments.append("--allow-mixed-splits")
@@ -154,9 +183,7 @@ def _formatResult(summary: dict[str, Any], reportPaths: list[Path]) -> str:
         with timingPath.open("r", encoding="utf-8") as stream:
             timingRows.extend(json.loads(line) for line in stream if line.strip())
     evaluatedTiming = [
-        float(row["totalProcessingMs"])
-        for row in timingRows
-        if int(row["frameIndex"]) != 0
+        float(row["totalProcessingMs"]) for row in timingRows if int(row["frameIndex"]) != 0
     ]
     average = sum(evaluatedTiming) / len(evaluatedTiming) if evaluatedTiming else 0.0
     lines = [
