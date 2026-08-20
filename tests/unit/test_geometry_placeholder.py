@@ -124,6 +124,22 @@ class GeometryTest(unittest.TestCase):
             self.assertGreaterEqual(float(yPx), roundTrip.yPx - 1e-6)
             self.assertLessEqual(float(yPx), roundTrip.yPx + roundTrip.heightPx + 1e-6)
 
+    def testBboxToBfovHandlesWrappedCameraAngles(self) -> None:
+        frameWidthPx = 360
+        frameHeightPx = 180
+        bbox = BBoxXYWH(xPx=0.0, yPx=6.0, widthPx=174.0, heightPx=126.0)
+
+        bfov = self.geometry.bboxToBfov(bbox, frameWidthPx, frameHeightPx)
+        roundTrip = self.geometry.bfovToBbox(bfov, frameWidthPx, frameHeightPx)
+        sampleX, sampleY = _sampleBoxBoundary(bbox, self.geometry.boundarySamplesPerEdge)
+
+        self.assertLess(bfov.horizontalFovRad, np.pi)
+        self.assertLess(bfov.verticalFovRad, np.pi)
+        for xPx, yPx in zip(sampleX, sampleY, strict=True):
+            self.assertTrue(containsCircularX(float(xPx), roundTrip, frameWidthPx))
+            self.assertGreaterEqual(float(yPx), roundTrip.yPx - 1e-6)
+            self.assertLessEqual(float(yPx), roundTrip.yPx + roundTrip.heightPx + 1e-6)
+
     def testLocalBoxToBfovUsesBoundarySamples(self) -> None:
         frameWidthPx = 360
         frameHeightPx = 180

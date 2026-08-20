@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from math import cos, pi, sin
 
 import numpy as np
 from numpy.typing import NDArray
@@ -160,24 +161,21 @@ def _fitBfovFromVectors(vectors: NDArray[np.float64]) -> BFoV:
     center = makeSphericalPoint(*unitVectorToYawPitch(tuple(meanVector)))
     horizontalAngles = np.empty(0, dtype=np.float64)
     verticalAngles = np.empty(0, dtype=np.float64)
-    for _ in range(4):
+    for _ in range(12):
         forward, right, up = cameraBasis(
             BFoV(center=center, horizontalFovRad=1.0, verticalFovRad=1.0)
         )
         forwardDots = vectors @ forward
         horizontalAngles = np.arctan2(vectors @ right, forwardDots)
         verticalAngles = np.arctan2(vectors @ up, forwardDots)
-        horizontalOffset = float(
-            (np.min(horizontalAngles) + np.max(horizontalAngles)) / 2.0
-        )
-        verticalOffset = float((np.min(verticalAngles) + np.max(verticalAngles)) / 2.0)
+        horizontalOffset, _ = _minimalCircularAngleInterval(horizontalAngles)
+        verticalOffset, _ = _linearAngleInterval(verticalAngles)
         if max(abs(horizontalOffset), abs(verticalOffset)) < 1e-10:
             break
-        shifted = (
-            forward
-            + np.tan(horizontalOffset) * right
-            + np.tan(verticalOffset) * up
+        horizontalForward = (
+            cos(horizontalOffset) * forward + sin(horizontalOffset) * right
         )
+        shifted = cos(verticalOffset) * horizontalForward + sin(verticalOffset) * up
         shifted /= np.linalg.norm(shifted)
         center = makeSphericalPoint(*unitVectorToYawPitch(tuple(shifted)))
 
@@ -187,8 +185,23 @@ def _fitBfovFromVectors(vectors: NDArray[np.float64]) -> BFoV:
     forwardDots = vectors @ forward
     horizontalAngles = np.arctan2(vectors @ right, forwardDots)
     verticalAngles = np.arctan2(vectors @ up, forwardDots)
-    horizontalFovRad = float(np.max(horizontalAngles) - np.min(horizontalAngles))
-    verticalFovRad = float(np.max(verticalAngles) - np.min(verticalAngles))
+    horizontalOffset, horizontalFovRad = _minimalCircularAngleInterval(horizontalAngles)
+    verticalOffset, verticalFovRad = _linearAngleInterval(verticalAngles)
+    if max(abs(horizontalOffset), abs(verticalOffset)) >= 1e-8:
+        horizontalForward = (
+            cos(horizontalOffset) * forward + sin(horizontalOffset) * right
+        )
+        shifted = cos(verticalOffset) * horizontalForward + sin(verticalOffset) * up
+        shifted /= np.linalg.norm(shifted)
+        center = makeSphericalPoint(*unitVectorToYawPitch(tuple(shifted)))
+        forward, right, up = cameraBasis(
+            BFoV(center=center, horizontalFovRad=1.0, verticalFovRad=1.0)
+        )
+        forwardDots = vectors @ forward
+        horizontalAngles = np.arctan2(vectors @ right, forwardDots)
+        verticalAngles = np.arctan2(vectors @ up, forwardDots)
+        _, horizontalFovRad = _minimalCircularAngleInterval(horizontalAngles)
+        _, verticalFovRad = _linearAngleInterval(verticalAngles)
     if not 0.0 < horizontalFovRad < np.pi:
         raise GeometryError(f"horizontal BFoV span is invalid: {horizontalFovRad}")
     if not 0.0 < verticalFovRad < np.pi:
@@ -199,6 +212,38 @@ def _fitBfovFromVectors(vectors: NDArray[np.float64]) -> BFoV:
         verticalFovRad=verticalFovRad,
         rollRad=0.0,
     )
+
+
+def _minimalCircularAngleInterval(
+    angles: NDArray[np.float64],
+) -> tuple[float, float]:
+    values = np.asarray(angles, dtype=np.float64).reshape(-1)
+    if values.size == 0 or not np.isfinite(values).all():
+        raise GeometryError("angles must be a non-empty finite array")
+    normalized = np.sort(np.mod(values, 2.0 * pi))
+    if normalized.size == 1:
+        return _wrapAngle(float(normalized[0])), 0.0
+    gaps = np.diff(normalized)
+    wrapGap = normalized[0] + 2.0 * pi - normalized[-1]
+    allGaps = np.concatenate((gaps, np.asarray((wrapGap,), dtype=np.float64)))
+    largestGapIndex = int(np.argmax(allGaps))
+    start = float(normalized[(largestGapIndex + 1) % normalized.size])
+    span = max(0.0, float(2.0 * pi - allGaps[largestGapIndex]))
+    midpoint = _wrapAngle(start + span / 2.0)
+    return midpoint, span
+
+
+def _linearAngleInterval(angles: NDArray[np.float64]) -> tuple[float, float]:
+    values = np.asarray(angles, dtype=np.float64).reshape(-1)
+    if values.size == 0 or not np.isfinite(values).all():
+        raise GeometryError("angles must be a non-empty finite array")
+    lower = float(np.min(values))
+    upper = float(np.max(values))
+    return (lower + upper) / 2.0, max(0.0, upper - lower)
+
+
+def _wrapAngle(angle: float) -> float:
+    return float((angle + pi) % (2.0 * pi) - pi)
 
 
 def _sampleErpBoxBoundary(

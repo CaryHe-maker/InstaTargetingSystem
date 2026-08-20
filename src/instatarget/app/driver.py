@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -21,7 +22,7 @@ from instatarget.controller import (
     scoreViewCenterMotion,
 )
 from instatarget.core.config import AppConfig, ModelConfig
-from instatarget.core.errors import DecodeError
+from instatarget.core.errors import DecodeError, GeometryError
 from instatarget.core.protocols import FrameSource as FrameSourceProtocol
 from instatarget.core.protocols import MoreViewsRequired, SphericalGeometry, TrackerBackend
 from instatarget.core.protocols import ResultSink as ResultSinkProtocol
@@ -149,16 +150,13 @@ def runTracking(
                             rawObservations,
                             scoreCalibration,
                         )
-                        projected = tuple(
-                            _projectObservation(
-                                frame=frame,
-                                view=view,
-                                observation=observation,
-                                predictedMotion=plan.predictedMotion,
-                                geometry=geometry,
-                                scoreCalibration=scoreCalibration,
-                            )
-                            for view, observation in zip(views, observations, strict=True)
+                        projected = _projectValidObservations(
+                            frame=frame,
+                            views=views,
+                            observations=observations,
+                            predictedMotion=plan.predictedMotion,
+                            geometry=geometry,
+                            scoreCalibration=scoreCalibration,
                         )
                         visualizationBatches.append((views, observations, projected))
                         step = controller.consume(plan, projected)
@@ -269,6 +267,38 @@ def _projectObservation(
         normalizedRadius=normalizedRadius,
         edgeMargin=edgeMargin,
     )
+
+
+def _projectValidObservations(
+    *,
+    frame: FramePacket,
+    views: tuple[LocalView, ...],
+    observations: tuple[LocalObservation, ...],
+    predictedMotion: MotionState3D | None,
+    geometry: SphericalGeometry,
+    scoreCalibration: ScoreCalibration,
+) -> tuple[ProjectedObservation, ...]:
+    projected: list[ProjectedObservation] = []
+    for view, observation in zip(views, observations, strict=True):
+        try:
+            projected.append(
+                _projectObservation(
+                    frame=frame,
+                    view=view,
+                    observation=observation,
+                    predictedMotion=predictedMotion,
+                    geometry=geometry,
+                    scoreCalibration=scoreCalibration,
+                )
+            )
+        except GeometryError as error:
+            print(
+                "[runtime] skipped invalid spherical projection: "
+                f"sequence={frame.sequenceId}, frame={int(frame.frameIndex)}, "
+                f"view={view.spec.viewId}, reason={error}",
+                file=sys.stderr,
+            )
+    return tuple(projected)
 
 
 def _scaleScore(box: BBoxXYWH, view: LocalView) -> float:

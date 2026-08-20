@@ -1,11 +1,13 @@
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from math import pi
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
 
-from instatarget.app.driver import _projectObservation
+from instatarget.app.driver import _projectObservation, _projectValidObservations
 from instatarget.controller import (
     BetaCalibration,
     MotionScore,
@@ -16,6 +18,7 @@ from instatarget.controller import (
     scoreMotionConsistency,
     scoreViewCenterMotion,
 )
+from instatarget.core.errors import GeometryError
 from instatarget.core.types import (
     BBoxXYWH,
     BFoV,
@@ -183,6 +186,37 @@ class FusedScoreRemappingTest(unittest.TestCase):
 
         score.assert_called_once_with(view.spec.bfov.center, predicted)
         self.assertAlmostEqual(projected.motionScore, 0.8)
+
+    def testInvalidSphericalProjectionIsSkipped(self) -> None:
+        view = LocalView(
+            ViewSpec(7, BFoV(makeSphericalPoint(0.0, 0.0), 1.0, 1.0), 256, 256),
+            np.zeros((256, 256, 3), dtype=np.uint8),
+        )
+        observation = _observation(0.90)
+        frame = FramePacket(
+            SequenceId("projection-skip"),
+            FrameIndex(18),
+            18,
+            np.zeros((180, 360, 3), dtype=np.uint8),
+        )
+        geometry = Mock()
+        geometry.projectLocalBoxBoundary.side_effect = GeometryError(
+            "horizontal BFoV span is invalid"
+        )
+        stderr = StringIO()
+
+        with redirect_stderr(stderr):
+            projected = _projectValidObservations(
+                frame=frame,
+                views=(view,),
+                observations=(observation,),
+                predictedMotion=None,
+                geometry=geometry,
+                scoreCalibration=TEST_CALIBRATION,
+            )
+
+        self.assertEqual(projected, ())
+        self.assertIn("sequence=projection-skip, frame=18, view=7", stderr.getvalue())
 
 
 def _observation(score: float) -> LocalObservation:
