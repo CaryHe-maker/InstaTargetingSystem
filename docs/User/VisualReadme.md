@@ -4,13 +4,14 @@
 
 ## 输出内容
 
-`midVisual` 按帧和视图写入三类 PNG：
+`midVisual` 按帧和视图写入两类 PNG：
 
-- `local_rgb`：局部 RGB 输入。
 - `backend_box`：HiT 局部框，标签为 backend 原始分/外观概率。
 - `geometry_box`：一次边界回投得到的直接 ERP 框，标签为 SingleScore/运动概率/包络膨胀比。
 
-`result\visualResult` 每帧写一张 ERP 图，绿色框表示已提交的结果，标签包含提交后的控制器状态、该帧实际执行轮数和状态分数。初始化帧的轮数为 0。
+`local_rgb` 不再由默认可视化命令生成；如需调试原始局部输入，可在代码中显式启用该阶段。
+
+`result\visualResult`（manifest 批量命令对应 `resultVisual`）每帧写一张 ERP 图，绿色框表示已提交的结果，标签包含提交后的控制器状态、该帧实际执行轮数和状态分数。初始化帧的轮数为 0。
 
 ## 影响范围
 

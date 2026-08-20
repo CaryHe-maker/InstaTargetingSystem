@@ -17,6 +17,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--inputs", required=True, type=Path, nargs="+")
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--allow-mixed-splits",
+        action="store_true",
+        help="Allow aggregating sequences from multiple manifest splits.",
+    )
     return parser
 
 
@@ -28,8 +33,10 @@ def main(argv: list[str] | None = None) -> int:
     splits = {report["summary"]["split"] for report in reports}
     weights = {report["summary"]["weights"] for report in reports}
     sequences = [report["summary"]["sequence"] for report in reports]
-    if len(splits) != 1 or len(weights) != 1:
-        raise RuntimeError("all evaluations must use one split and one checkpoint")
+    if len(weights) != 1:
+        raise RuntimeError("all evaluations must use one checkpoint")
+    if len(splits) != 1 and not args.allow_mixed_splits:
+        raise RuntimeError("all evaluations must use one split unless --allow-mixed-splits is set")
     if len(sequences) != len(set(sequences)):
         raise RuntimeError("evaluation sequence IDs must be unique")
 
@@ -61,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     heightErrors = [float(row["heightRelativeError"]) for row in visible]
     summary = {
         "format": "instatarget.manifest-controller-aggregate.v1",
-        "split": next(iter(splits)),
+        "split": next(iter(splits)) if len(splits) == 1 else "mixed",
         "weights": next(iter(weights)),
         "sequenceIds": sequences,
         "sequenceCount": len(sequences),
@@ -85,6 +92,13 @@ def main(argv: list[str] | None = None) -> int:
         "latencyP99Ms": _percentile(latency, 99),
         "statusCounts": dict(statusCounts),
         "resultSourceCounts": dict(sourceCounts),
+        "validRate": _mean(
+            [
+                float(row["valid"])
+                for report in reports
+                for row in report["frames"][1:]
+            ]
+        ),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix(args.output.suffix + ".tmp")

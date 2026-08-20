@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 
 from instatarget.app.driver import buildRuntime, closeBackend, runTracking
-from instatarget.core.config import loadConfig
+from instatarget.core.config import DEFAULT_VISUALIZATION_STAGES, VisualizationConfig, loadConfig
 from instatarget.core.types import FrameIndex, FramePacket, SequenceId, TrackResult
 from instatarget.eval.otb_metrics import auc, circularBBoxIoU, trackingLossRate
 from instatarget.eval.spherical_metrics import bfovSphericalIoU, centerAngularErrorRad
@@ -98,8 +98,9 @@ class IntervalTimer:
 
 
 class CandidateRecorder:
-    def __init__(self, truth: dict[int, ManifestRecord]) -> None:
+    def __init__(self, truth: dict[int, ManifestRecord], visualRecorder: Any = None) -> None:
         self._truth = truth
+        self._visualRecorder = visualRecorder
         self._local: dict[tuple[int, int], Any] = {}
         self._views: dict[tuple[int, int], Any] = {}
         self.viewCounts: Counter[int] = Counter()
@@ -107,17 +108,22 @@ class CandidateRecorder:
         self.rows: list[dict[str, Any]] = []
 
     def recordLocalRgb(self, frame: FramePacket, views: Any) -> None:
+        if self._visualRecorder is not None:
+            self._visualRecorder.recordLocalRgb(frame, views)
         self.viewCounts[int(frame.frameIndex)] += len(views)
         self.forwardCounts[int(frame.frameIndex)] += 1
         for view in views:
             self._views[(int(frame.frameIndex), view.spec.viewId)] = view.spec
 
     def recordBackendBoxes(self, frame: FramePacket, views: Any, observations: Any) -> None:
-        del views
+        if self._visualRecorder is not None:
+            self._visualRecorder.recordBackendBoxes(frame, views, observations)
         for observation in observations:
             self._local[(int(frame.frameIndex), observation.viewId)] = observation
 
     def recordGeometryBoxes(self, frame: FramePacket, observations: Any) -> None:
+        if self._visualRecorder is not None:
+            self._visualRecorder.recordGeometryBoxes(frame, observations)
         record = self._truth[int(frame.frameIndex)]
         for observation in observations:
             local = self._local.pop((int(frame.frameIndex), observation.viewId))
@@ -199,6 +205,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--sequence", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--visual-output-root",
+        type=Path,
+        help="Optional midVisual root; only backend_box and geometry_box are written.",
+    )
+    parser.add_argument(
+        "--result-visual-root",
+        type=Path,
+        help="Optional root for one final ERP result image per frame.",
+    )
     parser.add_argument("--max-frames", type=int)
     parser.add_argument("--spherical-samples-yaw", type=int, default=128)
     parser.add_argument("--spherical-samples-pitch", type=int, default=64)
@@ -259,7 +275,23 @@ def main(argv: list[str] | None = None) -> int:
     source = ManifestVideoSource(records, args.max_frames)
     sink = MemoryResultSink()
     timer = IntervalTimer()
-    recorder = CandidateRecorder(truth)
+    visualRecorder = None
+    if args.visual_output_root is not None:
+        from instatarget.visualization.recorder import VisualizationRecorder
+
+        visualRecorder = VisualizationRecorder(
+            VisualizationConfig(
+                enabled=True,
+                outputRoot=args.visual_output_root,
+                stages=DEFAULT_VISUALIZATION_STAGES,
+            )
+        )
+    recorder = CandidateRecorder(truth, visualRecorder)
+    resultVisualRecorder = None
+    if args.result_visual_root is not None:
+        from instatarget.visualization.result import ResultVisualizationRecorder
+
+        resultVisualRecorder = ResultVisualizationRecorder(args.result_visual_root)
     runtime = buildRuntime(
         appConfig,
         allowUncalibratedScoring=args.uncalibrated_stage3,
@@ -274,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
             backend=runtime.backend,
             sink=sink,
             recorder=recorder,
+            resultRecorder=resultVisualRecorder,
             processingTimer=timer,
             scoreCalibration=runtime.scoreCalibration,
         )

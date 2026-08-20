@@ -1,6 +1,6 @@
 # 中间阶段产物
 
-`VisualizationRecorder` 提供三个独立阶段，用同一 frameIndex/viewId 命名，便于逐层定位误差来源。
+`VisualizationRecorder` 提供三个可选阶段，用同一 frameIndex/viewId 命名，便于逐层定位误差来源。默认运行只启用 `backend_box` 和 `geometry_box`。
 
 ## local_rgb
 
@@ -17,4 +17,6 @@
 ## 多轮组织
 
 Runtime 在处理阶段只把每轮数据保存在 `visualizationBatches`；计时停止后按 round/viewId 写图。三个阶段可以通过 `visualization.stages` 独立启用，关闭阶段不得创建空目录。
+
+`local_rgb` 保留为可选诊断阶段，不会在默认 `midVisual` 中写入。
 

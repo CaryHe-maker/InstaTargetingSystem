@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from instatarget.app.driver import buildRuntime, finalizeSink, openSink, runTracking
-from instatarget.core.config import VisualizationConfig, loadConfig
+from instatarget.core.config import DEFAULT_VISUALIZATION_STAGES, VisualizationConfig, loadConfig
 from instatarget.core.errors import (
     ConfigError,
     DecodeError,
@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
                 visualization=VisualizationConfig(
                     enabled=True,
                     outputRoot=Path(args.mid_visual_root),
-                    stages=frozenset(("local_rgb", "backend_box", "geometry_box")),
+                    stages=DEFAULT_VISUALIZATION_STAGES,
                 ),
             )
         runtime = buildRuntime(config)

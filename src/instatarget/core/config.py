@@ -11,6 +11,7 @@ from instatarget.core.errors import ConfigError
 
 SUPPORTED_SCHEMA_VERSION = 1
 VISUALIZATION_STAGES = frozenset({"local_rgb", "backend_box", "geometry_box"})
+DEFAULT_VISUALIZATION_STAGES = frozenset({"backend_box", "geometry_box"})
 
 
 @dataclass(frozen=True, slots=True)
