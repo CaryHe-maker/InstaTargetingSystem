@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from instatarget.app.driver import buildRuntime, finalizeSink, openSink, runTracking
+from instatarget.app.driver import buildRuntime, closeRuntime, finalizeSink, openSink, runTracking
 from instatarget.core.config import loadConfig
 from instatarget.core.errors import (
     ConfigError,
@@ -84,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if runtime is not None:
             try:
-                runtime.backend.close()
+                closeRuntime(runtime)
             except Exception:
                 pass
         if source is not None:

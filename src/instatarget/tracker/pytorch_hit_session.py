@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import math
 import os
 import sys
@@ -54,6 +55,7 @@ class PyTorchHiTSession:
         self._lastProfile: dict[str, int | float | bool | str] = {}
         self._fp16FallbackCount = 0
         self._oomCount = 0
+        self._deviceBatchLimit: int | None = None
         self._torch = _importTorch()
         if not self._torch.cuda.is_available():
             raise ModelError("official HiT-Small requires a CUDA-capable PyTorch runtime")
@@ -259,25 +261,118 @@ class PyTorchHiTSession:
             raise ProtocolError("HiT device template must have shape [1,C,H,W]")
         tensors = tuple(self._validateDeviceRgb(item) for item in deviceRgbs)
         batchSize = len(tensors)
+        if self._deviceBatchLimit is not None and batchSize > self._deviceBatchLimit:
+            return self._inferDeviceBatchChunked(
+                tensors,
+                imageSizes,
+                template,
+                chunkSize=self._deviceBatchLimit,
+                recoveredFromOom=False,
+            )
+        try:
+            return self._inferDeviceBatchOnce(tensors, imageSizes, template)
+        except self._torch.cuda.OutOfMemoryError:
+            pass
+
+        self._oomCount += 1
+        self._recoverCudaOom()
+        if batchSize == 1:
+            self._lastProfile = self._profileSnapshot(
+                preprocessNs=0,
+                hostToDeviceNs=0,
+                cudaForwardNs=0,
+                batchSize=1,
+                fp16Fallback=False,
+            )
+            raise ModelError("HiT CUDA out of memory for one device view") from None
+
+        # A recovery frame may request up to twelve views.  The full batch has
+        # the best throughput, but its activation peak can exceed a 24 GB card
+        # even though every view fits independently.  After one OOM, keep future
+        # batches bounded as well instead of repeatedly stressing the allocator.
+        self._deviceBatchLimit = 1
+        return self._inferDeviceBatchChunked(
+            tensors,
+            imageSizes,
+            template,
+            chunkSize=1,
+            recoveredFromOom=True,
+        )
+
+    def _inferDeviceBatchChunked(
+        self,
+        tensors: Sequence[Any],
+        imageSizes: Sequence[tuple[int, int]],
+        template: Any,
+        *,
+        chunkSize: int,
+        recoveredFromOom: bool,
+    ) -> tuple[HiTPrediction, ...]:
+        batchSize = len(tensors)
+        predictions: list[HiTPrediction] = []
+        totalForwardNs = 0
+        usedFp16Fallback = False
+        for start in range(0, batchSize, chunkSize):
+            chunkTensors = tensors[start : start + chunkSize]
+            chunkSizes = imageSizes[start : start + chunkSize]
+            try:
+                chunk = self._inferDeviceBatchOnce(chunkTensors, chunkSizes, template)
+            except self._torch.cuda.OutOfMemoryError:
+                self._oomCount += 1
+                self._recoverCudaOom()
+                self._lastProfile = self._profileSnapshot(
+                    preprocessNs=0,
+                    hostToDeviceNs=0,
+                    cudaForwardNs=totalForwardNs,
+                    batchSize=batchSize,
+                    fp16Fallback=usedFp16Fallback,
+                )
+                self._lastProfile.update(
+                    {
+                        "deviceInput": True,
+                        "oomRecovered": False,
+                        "fallbackChunkSize": chunkSize,
+                    }
+                )
+                raise ModelError(
+                    f"HiT CUDA out of memory for device chunk size {chunkSize}"
+                ) from None
+            predictions.extend(chunk)
+            totalForwardNs += int(self._lastProfile.get("cudaForward", 0))
+            usedFp16Fallback = usedFp16Fallback or bool(
+                self._lastProfile.get("fp16Fallback", False)
+            )
+        self._lastProfile = self._profileSnapshot(
+            preprocessNs=0,
+            hostToDeviceNs=0,
+            cudaForwardNs=totalForwardNs,
+            batchSize=batchSize,
+            fp16Fallback=usedFp16Fallback,
+        )
+        self._lastProfile.update(
+            {
+                "deviceInput": True,
+                "oomRecovered": recoveredFromOom,
+                "fallbackChunkSize": chunkSize,
+            }
+        )
+        return tuple(predictions)
+
+    def _inferDeviceBatchOnce(
+        self,
+        tensors: Sequence[Any],
+        imageSizes: Sequence[tuple[int, int]],
+        template: Any,
+    ) -> tuple[HiTPrediction, ...]:
+        batchSize = len(tensors)
         search = self._torch.stack(tensors, dim=0)
         batchTemplate = template.expand(batchSize, -1, -1, -1)
         if self._channelsLast:
             search = search.contiguous(memory_format=self._torch.channels_last)
             batchTemplate = batchTemplate.contiguous(memory_format=self._torch.channels_last)
-        try:
-            output, cudaForwardNs = self._forward(
-                search, batchTemplate, useFp16=self._precision == "fp16"
-            )
-        except self._torch.cuda.OutOfMemoryError as error:
-            self._oomCount += 1
-            self._lastProfile = self._profileSnapshot(
-                preprocessNs=0,
-                hostToDeviceNs=0,
-                cudaForwardNs=0,
-                batchSize=batchSize,
-                fp16Fallback=False,
-            )
-            raise ModelError(f"HiT CUDA out of memory for device batch size {batchSize}") from error
+        output, cudaForwardNs = self._forward(
+            search, batchTemplate, useFp16=self._precision == "fp16"
+        )
         outputsInvalid = not _outputsAreFinite(output, self._torch)
         if self._precision == "fp16" and outputsInvalid:
             self._fp16FallbackCount += 1
@@ -343,6 +438,16 @@ class PyTorchHiTSession:
                 strict=True,
             )
         )
+
+    def _recoverCudaOom(self) -> None:
+        """Release failed-batch temporaries without reusing the OOM traceback."""
+        gc.collect()
+        try:
+            self._torch.cuda.empty_cache()
+        except RuntimeError:
+            # If CUDA reports a secondary asynchronous failure, the caller will
+            # surface the original model error and close the runtime safely.
+            pass
 
     def close(self) -> None:
         if self._closed:

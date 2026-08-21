@@ -309,10 +309,23 @@ def runTracking(
                                         geometry=geometry,
                                         scoreCalibration=scoreCalibration,
                                     )
-                                visualizationBatches.append((views, observations, projected))
+                                # Recorders only consume the compatibility RGB and view
+                                # metadata.  Never retain CUDA tensors after this round.
+                                if recorder is not None:
+                                    visualizationViews = tuple(
+                                        LocalView(spec=view.spec, rgb=view.rgb, deviceRgb=None)
+                                        for view in views
+                                    )
+                                    visualizationBatches.append(
+                                        (visualizationViews, observations, projected)
+                                    )
                                 with _profile(profiler, "controller"):
                                     step = controller.consume(plan, projected)
                             except Exception as error:
+                                # A failed round (including an OOM converted by the
+                                # backend) must not keep its CUDA views alive until the
+                                # next frame.
+                                visualizationBatches.clear()
                                 result = _fallbackFrameResult(
                                     controller,
                                     frame,
@@ -346,6 +359,10 @@ def runTracking(
                         recorder.recordLocalRgb(frame, views)
                         recorder.recordBackendBoxes(frame, views, observations)
                         recorder.recordGeometryBoxes(frame, projected)
+                visualizationBatches.clear()
+                # Do not let the last round's CUDA-backed views survive into the
+                # next iteration through Python locals.
+                views = rawObservations = observations = projected = step = None
                 sink.write(result)
                 if resultRecorder is not None:
                     stateObservation = controller.lastStateObservation
