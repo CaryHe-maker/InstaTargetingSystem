@@ -9,7 +9,6 @@ from instatarget.core.types import (
     FrameIndex,
     InferenceRole,
     LocalView,
-    LocalObservation,
     RoutedInferenceTask,
     SequenceId,
     TaskKey,
@@ -19,7 +18,6 @@ from instatarget.core.types import (
 )
 from instatarget.geometry import makeSphericalPoint
 from instatarget.tracker import HiTBackend, HiTPrediction, TrackerBackendImpl
-from instatarget.tracker.observation import refineObservations
 
 
 class FakeHiTSession:
@@ -225,19 +223,6 @@ class TrackerBackendTest(unittest.TestCase):
         self.assertEqual(backend.templateRevision, 3)
         self.assertEqual(session.encoded[-1][0], 20)
 
-    def testDynamicTemplatesCanExposeRecentFeatureToHiT(self) -> None:
-        session = FakeHiTSession()
-        backend = TrackerBackendImpl(HiTBackend(session), useDynamicTemplates=True)
-        backend.initialize(_view(0, 10), BBoxXYWH(xPx=0.0, yPx=0.0, widthPx=2.0, heightPx=2.0))
-        backend.infer([_view(1, 20)], _command(TemplateCommandKind.KEEP, 1, 1))
-
-        backend.infer(
-            [_view(2, 30)],
-            _command(TemplateCommandKind.UPDATE_RECENT, 2, 2, viewId=1),
-        )
-
-        self.assertEqual(session.inferred[-1][1], ("template-0", "template-1"))
-
     def testUnsupportedOnlineTemplatesRejectUpdates(self) -> None:
         session = FakeHiTSession(supportsOnlineTemplates=False)
         backend = TrackerBackendImpl(HiTBackend(session))
@@ -258,27 +243,6 @@ class TrackerBackendTest(unittest.TestCase):
         self.assertEqual(session.closeCount, 1)
         with self.assertRaises(ProtocolError):
             backend.infer([], _command(TemplateCommandKind.KEEP, 2, 2))
-
-    def testRefineObservationsClipsAndExpandsWithinViewBounds(self) -> None:
-        view = _view(0, 5)
-        observation = LocalObservation(
-            viewId=view.spec.viewId,
-            bbox=BBoxXYWH(xPx=3.2, yPx=3.1, widthPx=1.2, heightPx=1.1),
-            modelScore=0.9,
-            appearanceScore=0.9,
-            fusedScore=0.9,
-            latencyNs=1,
-            predictedIoU=0.92,
-            cornerScore=0.88,
-        )
-        refined = refineObservations(
-            (observation,),
-            (view,),
-        )
-
-        self.assertEqual(len(refined), 1)
-        self.assertLessEqual(refined[0].bbox.xPx + refined[0].bbox.widthPx, view.spec.outputWidthPx)
-        self.assertLessEqual(refined[0].bbox.yPx + refined[0].bbox.heightPx, view.spec.outputHeightPx)
 
 
 if __name__ == "__main__":

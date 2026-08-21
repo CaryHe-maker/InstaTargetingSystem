@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import queue
+import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -24,7 +25,7 @@ from instatarget.controller import (
     scoreViewCenterMotion,
 )
 from instatarget.core.config import AppConfig, ModelConfig
-from instatarget.core.errors import DecodeError
+from instatarget.core.errors import DecodeError, GeometryError
 from instatarget.core.protocols import FrameSource as FrameSourceProtocol
 from instatarget.core.protocols import MoreViewsRequired, SphericalGeometry, TrackerBackend
 from instatarget.core.protocols import ResultSink as ResultSinkProtocol
@@ -36,7 +37,7 @@ from instatarget.core.types import (
     MotionState3D,
     ProjectedObservation,
 )
-from instatarget.geometry import GpuGeometryImpl, SphericalGeometryImpl
+from instatarget.geometry import GpuGeometryImpl
 from instatarget.io.result_sink import FileResultSink
 from instatarget.tracker import HiTBackend, PyTorchHiTSession, TrackerBackendImpl
 
@@ -57,11 +58,10 @@ class RuntimeBundle:
     scoreCalibration: ScoreCalibration
     recorder: VisualizationRecorder | None = None
     speculativePipeline: SpeculativePipeline | None = None
-    experimentVariant: str = "shared_control_production"
 
 
 class _PrefetchReader:
-    """Small decode worker used only by the isolated pipeline experiment."""
+    """Decode frames ahead of inference while preserving source order."""
 
     _END = object()
 
@@ -121,43 +121,42 @@ class _PrefetchReader:
                     frameIndex = int(frame.frameIndex)
                     self._decodeNs[frameIndex] = int(decodeNs)
                     self._readyNs[frameIndex] = perf_counter_ns()
-                self._queue.put(self._END if frame is None else frame)
+                if not self._enqueue(self._END if frame is None else frame):
+                    return
                 if frame is None:
                     return
         except BaseException as error:
             self._error = error
+            self._enqueue(error)
+
+    def _enqueue(self, item: object) -> bool:
+        while not self._stop.is_set():
             try:
-                self._queue.put(error, timeout=1.0)
+                self._queue.put(item, timeout=0.1)
+                return True
             except queue.Full:
-                pass
+                continue
+        return False
 
 
 def buildRuntime(
     config: AppConfig,
     *,
     hitSessionFactory: Callable[[ModelConfig], HiTSession] | None = None,
+    geometryFactory: Callable[[int], SphericalGeometry] | None = None,
     allowUncalibratedScoring: bool = False,
-    experimentVariant: str = "shared_control_production",
 ) -> RuntimeBundle:
     sessionFactory = hitSessionFactory or PyTorchHiTSession
-    if experimentVariant in {"gpu_geometry_only", "pipeline_gpu_geometry"}:
-        geometry = GpuGeometryImpl(
+    geometry = (
+        geometryFactory(config.geometry.boundarySamplesPerEdge)
+        if geometryFactory is not None
+        else GpuGeometryImpl(
             boundarySamplesPerEdge=config.geometry.boundarySamplesPerEdge,
         )
-    else:
-        geometry = SphericalGeometryImpl(
-            boundarySamplesPerEdge=config.geometry.boundarySamplesPerEdge,
-        )
+    )
     rgbSession = sessionFactory(config.model)
-    backend = TrackerBackendImpl(
-        HiTBackend(rgbSession),
-        useDynamicTemplates=experimentVariant in {"template_strict", "template_relaxed"},
-    )
-    controller = TrackControllerImpl(
-        geometry,
-        config,
-        experimentVariant=experimentVariant,
-    )
+    backend = TrackerBackendImpl(HiTBackend(rgbSession))
+    controller = TrackControllerImpl(geometry, config)
     sink = FileResultSink()
     recorder = None
     if config.visualization.enabled:
@@ -185,7 +184,6 @@ def buildRuntime(
         scoreCalibration=scoreCalibration,
         recorder=recorder,
         speculativePipeline=speculativePipeline,
-        experimentVariant=experimentVariant,
     )
 
 
@@ -202,7 +200,6 @@ def runTracking(
     processingTimer: TimeCounter | None = None,
     profiler: RuntimeProfiler | None = None,
     scoreCalibration: ScoreCalibration,
-    experimentVariant: str = "shared_control_production",
 ) -> int:
     """Run the sequential tracking pipeline and publish one result per frame."""
     try:
@@ -229,13 +226,8 @@ def runTracking(
         if recorder is not None:
             recorder.recordLocalRgb(frame0, [templateView])
 
-        pipelineReader = (
-            _PrefetchReader(source)
-            if experimentVariant in {"pipeline_only", "pipeline_gpu_geometry"}
-            else None
-        )
-        if pipelineReader is not None:
-            pipelineReader.start()
+        pipelineReader = _PrefetchReader(source)
+        pipelineReader.start()
         try:
             while True:
                 iterationStartedNs = (
@@ -245,11 +237,10 @@ def runTracking(
                 frame = None
                 try:
                     decodeStartedNs = _profileNow(profiler)
-                    frame = pipelineReader.read() if pipelineReader is not None else source.read()
+                    frame = pipelineReader.read()
                     if frame is not None:
                         _startProfileFrame(profiler, int(frame.frameIndex), decodeStartedNs)
-                        if pipelineReader is not None:
-                            _recordPipelineProfile(profiler, pipelineReader, controller)
+                        _recordPipelineProfile(profiler, pipelineReader, controller)
                         with _profile(profiler, "controller"):
                             plan = controller.beginFrame(frame)
                         batchSizes: list[int] = []
@@ -269,10 +260,6 @@ def runTracking(
                                 rawObservations = tuple(
                                     backend.infer(views, plan.templateCommand)
                                 )
-                                if experimentVariant == "iou_refine_head":
-                                    from instatarget.tracker.observation import refineObservations
-
-                                    rawObservations = refineObservations(rawObservations, views)
                                 if recorder is not None and hasattr(
                                     recorder, "setActiveTemplateFrame"
                                 ):
@@ -287,18 +274,13 @@ def runTracking(
                                     scoreCalibration,
                                 )
                             with _profile(profiler, "projection"):
-                                projected = tuple(
-                                    _projectObservation(
-                                        frame=frame,
-                                        view=view,
-                                        observation=observation,
-                                        predictedMotion=plan.predictedMotion,
-                                        geometry=geometry,
-                                        scoreCalibration=scoreCalibration,
-                                    )
-                                    for view, observation in zip(
-                                        views, observations, strict=True
-                                    )
+                                projected = _projectValidObservations(
+                                    frame=frame,
+                                    views=views,
+                                    observations=observations,
+                                    predictedMotion=plan.predictedMotion,
+                                    geometry=geometry,
+                                    scoreCalibration=scoreCalibration,
                                 )
                             visualizationBatches.append((views, observations, projected))
                             with _profile(profiler, "controller"):
@@ -351,8 +333,7 @@ def runTracking(
                     releaseFrame()
                 resultCount += 1
         finally:
-            if pipelineReader is not None:
-                pipelineReader.close()
+            pipelineReader.close()
             releaseFrame = getattr(geometry, "releaseFrame", None)
             if callable(releaseFrame):
                 releaseFrame()
@@ -427,6 +408,38 @@ def _projectObservation(
         normalizedRadius=normalizedRadius,
         edgeMargin=edgeMargin,
     )
+
+
+def _projectValidObservations(
+    *,
+    frame: FramePacket,
+    views: tuple[LocalView, ...],
+    observations: tuple[LocalObservation, ...],
+    predictedMotion: MotionState3D | None,
+    geometry: SphericalGeometry,
+    scoreCalibration: ScoreCalibration,
+) -> tuple[ProjectedObservation, ...]:
+    projected: list[ProjectedObservation] = []
+    for view, observation in zip(views, observations, strict=True):
+        try:
+            projected.append(
+                _projectObservation(
+                    frame=frame,
+                    view=view,
+                    observation=observation,
+                    predictedMotion=predictedMotion,
+                    geometry=geometry,
+                    scoreCalibration=scoreCalibration,
+                )
+            )
+        except GeometryError as error:
+            print(
+                "[runtime] skipped invalid spherical projection: "
+                f"sequence={frame.sequenceId}, frame={int(frame.frameIndex)}, "
+                f"view={view.spec.viewId}, reason={error}",
+                file=sys.stderr,
+            )
+    return tuple(projected)
 
 
 def _scaleScore(box: BBoxXYWH, view: LocalView) -> float:
@@ -552,10 +565,10 @@ def _recordGeometryProfile(
 
 def _recordPipelineProfile(
     profiler: RuntimeProfiler | None,
-    pipelineReader: _PrefetchReader | None,
+    pipelineReader: _PrefetchReader,
     controller: TrackControllerImpl,
 ) -> None:
-    if profiler is None or not profiler.enabled or pipelineReader is None:
+    if profiler is None or not profiler.enabled:
         return
     readerValues = pipelineReader.lastProfile
     for source in (readerValues, controller.lastPipelineProfile):

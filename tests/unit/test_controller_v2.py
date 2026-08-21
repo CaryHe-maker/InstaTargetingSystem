@@ -153,7 +153,6 @@ class ControllerV2Test(unittest.TestCase):
             self.geometry,
             self.config,
             motionEstimator=estimator,
-            experimentVariant="pipeline_only",
         )
         controller.commitInitialization(
             controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
@@ -181,120 +180,6 @@ class ControllerV2Test(unittest.TestCase):
         # the R1 observation as the frame's final measurement, at which point it is committed once.
         self.assertEqual(len(estimator.samples), 2)
         self.assertEqual(estimator.samples[-1].frameIndex, FrameIndex(1))
-
-    def testStrictErpVariantUsesOneDirectSecondRoundViewWhenTwoXFits(self) -> None:
-        frame0 = FramePacket(
-            SequenceId("erp-strict"),
-            FrameIndex(0),
-            0,
-            np.zeros((180, 360, 3), dtype=np.uint8),
-        )
-        controller = TrackControllerImpl(
-            self.geometry,
-            self.config,
-            experimentVariant="erp_crop_2x_strict",
-        )
-        controller.commitInitialization(
-            controller.buildInitialization(frame0, BBoxXYWH(160.0, 70.0, 40.0, 40.0))
-        )
-        frame1 = FramePacket(
-            SequenceId("erp-strict"),
-            FrameIndex(1),
-            1_000_000_000,
-            frame0.rgb,
-        )
-
-        firstPlan = controller.beginFrame(frame1)
-        step = controller.consume(firstPlan, (_candidate(firstPlan.views[0].viewId, 0.0),))
-
-        self.assertIsInstance(step, MoreViewsRequired)
-        assert isinstance(step, MoreViewsRequired)
-        self.assertEqual(len(step.plan.views), 1)
-        self.assertIsNotNone(step.plan.views[0].erpCrop)
-        self.assertEqual(step.plan.viewRoles, ("round2_erp_direct_2x",))
-
-    def testRelaxedErpVariantClipsTwoXWhenOnePointTwoFiveXFits(self) -> None:
-        frame0 = FramePacket(
-            SequenceId("erp-relaxed"),
-            FrameIndex(0),
-            0,
-            np.zeros((180, 360, 3), dtype=np.uint8),
-        )
-        initial = BBoxXYWH(5.0, 70.0, 40.0, 40.0)
-        controller = TrackControllerImpl(
-            self.geometry,
-            self.config,
-            experimentVariant="erp_crop_2x_relaxed",
-        )
-        controller.commitInitialization(controller.buildInitialization(frame0, initial))
-        frame1 = FramePacket(
-            SequenceId("erp-relaxed"),
-            FrameIndex(1),
-            1_000_000_000,
-            frame0.rgb,
-        )
-        centerYaw = 2.0 * math.pi * 25.0 / 360.0 - math.pi
-
-        firstPlan = controller.beginFrame(frame1)
-        step = controller.consume(
-            firstPlan,
-            (_candidate(firstPlan.views[0].viewId, centerYaw),),
-        )
-
-        self.assertIsInstance(step, MoreViewsRequired)
-        assert isinstance(step, MoreViewsRequired)
-        self.assertEqual(len(step.plan.views), 1)
-        crop = step.plan.views[0].erpCrop
-        self.assertIsNotNone(crop)
-        assert crop is not None
-        self.assertEqual(crop.xPx, 0.0)
-        self.assertLess(crop.widthPx, initial.widthPx * 2.0)
-
-    def testFourXRelaxedErpVariantUsesFourXCropAfterOnePointTwoFiveXFits(self) -> None:
-        frame0 = FramePacket(
-            SequenceId("erp-4x-relaxed"),
-            FrameIndex(0),
-            0,
-            np.zeros((180, 360, 3), dtype=np.uint8),
-        )
-        initial = BBoxXYWH(40.0, 70.0, 40.0, 40.0)
-        controller = TrackControllerImpl(
-            self.geometry,
-            self.config,
-            experimentVariant="erp_crop_4x_relaxed",
-        )
-        controller.commitInitialization(controller.buildInitialization(frame0, initial))
-        frame1 = FramePacket(
-            SequenceId("erp-4x-relaxed"),
-            FrameIndex(1),
-            1_000_000_000,
-            frame0.rgb,
-        )
-
-        firstPlan = controller.beginFrame(frame1)
-        centerYaw = 2.0 * math.pi * 60.0 / 360.0 - math.pi
-        step = controller.consume(
-            firstPlan,
-            (_candidate(firstPlan.views[0].viewId, centerYaw),),
-        )
-
-        self.assertIsInstance(step, MoreViewsRequired)
-        assert isinstance(step, MoreViewsRequired)
-        self.assertEqual(len(step.plan.views), 1)
-        crop = step.plan.views[0].erpCrop
-        self.assertIsNotNone(crop)
-        assert crop is not None
-        self.assertEqual(step.plan.viewRoles, ("round2_erp_direct_4x",))
-        self.assertGreaterEqual(crop.widthPx, initial.widthPx * 3.5)
-        self.assertLessEqual(crop.widthPx, initial.widthPx * 4.0)
-
-        self.assertTrue(
-            all(
-                math.isclose(view.bfov.horizontalFovRad, self.config.geometry.maxFovRad)
-                and math.isclose(view.bfov.verticalFovRad, self.config.geometry.maxFovRad)
-                for view in firstPlan.views
-            )
-        )
 
     def testSecondRoundFusesCandidatesFromBothRounds(self) -> None:
         frame0 = FramePacket(

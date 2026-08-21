@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from time import perf_counter_ns
 
 from instatarget.core.errors import ModelError
@@ -35,42 +34,6 @@ def buildRgbObservation(
     )
 
 
-def refineObservations(
-    observations: tuple[LocalObservation, ...],
-    views: tuple[LocalView, ...],
-) -> tuple[LocalObservation, ...]:
-    """Temporary heuristic refinement used by the isolated IoU/BBox experiment."""
-    if len(observations) != len(views):
-        raise ModelError("refinement observations and views must have equal length")
-    refined: list[LocalObservation] = []
-    for observation, view in zip(observations, views, strict=True):
-        score = _refinementScore(observation)
-        scale = 1.0 + 0.10 * (0.55 - score)
-        scale = max(0.90, min(1.08, scale))
-        centerX = observation.bbox.xPx + observation.bbox.widthPx / 2.0
-        centerY = observation.bbox.yPx + observation.bbox.heightPx / 2.0
-        widthPx = observation.bbox.widthPx * scale
-        heightPx = observation.bbox.heightPx * scale
-        refinedBox = clipLocalBox(
-            BBoxXYWH(
-                xPx=centerX - widthPx / 2.0,
-                yPx=centerY - heightPx / 2.0,
-                widthPx=widthPx,
-                heightPx=heightPx,
-            ),
-            view.spec.outputWidthPx,
-            view.spec.outputHeightPx,
-        )
-        refined.append(
-            replace(
-                observation,
-                bbox=refinedBox,
-                fusedScore=min(1.0, max(observation.fusedScore, score)),
-            )
-        )
-    return tuple(refined)
-
-
 def clipLocalBox(bbox: BBoxXYWH, widthPx: int, heightPx: int) -> BBoxXYWH:
     """Clip a model box to a local view, rejecting boxes with no area."""
     x0 = max(0.0, min(float(widthPx), bbox.xPx))
@@ -87,23 +50,4 @@ def startTimingNs() -> int:
     return perf_counter_ns()
 
 
-__all__ = [
-    "LocalObservation",
-    "buildRgbObservation",
-    "clipLocalBox",
-    "refineObservations",
-    "startTimingNs",
-]
-
-
-def _refinementScore(observation: LocalObservation) -> float:
-    values = [
-        observation.appearanceProbability,
-        observation.predictedIoU,
-        observation.cornerScore,
-        observation.fusedScore,
-    ]
-    filtered = [float(item) for item in values if item is not None]
-    if not filtered:
-        return 0.5
-    return float(sum(filtered) / len(filtered))
+__all__ = ["LocalObservation", "buildRgbObservation", "clipLocalBox", "startTimingNs"]

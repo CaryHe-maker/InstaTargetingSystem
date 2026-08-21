@@ -1,10 +1,12 @@
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from instatarget.app.driver import _PrefetchReader, buildRuntime, closeBackend
 from instatarget.core.config import loadConfig
 from instatarget.core.types import BBoxXYWH
 from instatarget.eval.profiler import RuntimeProfiler
+from instatarget.geometry import SphericalGeometryImpl
 from instatarget.tracker.hit_backend import HiTPrediction
 from instatarget.tracker.pytorch_hit_session import _devicesMatch, _resolveHitRoot
 from instatarget.app.driver import _recordGeometryProfile
@@ -24,10 +26,28 @@ class RuntimeHiTWiringTest(unittest.TestCase):
         factory = _SessionFactory()
         config = loadConfig(REPOSITORY_ROOT / "configs" / "RGBonly.yaml")
 
-        runtime = buildRuntime(config, hitSessionFactory=factory)
+        runtime = buildRuntime(
+            config,
+            hitSessionFactory=factory,
+            geometryFactory=SphericalGeometryImpl,
+        )
         closeBackend(runtime.backend)
 
         self.assertEqual(factory.count, 1)
+
+    def testProductionRuntimeSelectsGpuGeometryByDefault(self) -> None:
+        factory = _SessionFactory()
+        config = loadConfig(REPOSITORY_ROOT / "configs" / "RGBonly.yaml")
+        geometry = SphericalGeometryImpl(config.geometry.boundarySamplesPerEdge)
+
+        with patch("instatarget.app.driver.GpuGeometryImpl", return_value=geometry) as gpuGeometry:
+            runtime = buildRuntime(config, hitSessionFactory=factory)
+        closeBackend(runtime.backend)
+
+        gpuGeometry.assert_called_once_with(
+            boundarySamplesPerEdge=config.geometry.boundarySamplesPerEdge
+        )
+        self.assertIs(runtime.geometry, geometry)
 
     def testGeometryProfileIsRecordedIntoPerFrameProfilerStats(self) -> None:
         profiler = RuntimeProfiler(enabled=True)

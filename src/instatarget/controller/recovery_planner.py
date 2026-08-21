@@ -119,12 +119,10 @@ class RecoveryPlanner:
         geometryConfig: GeometryConfig,
         trackingConfig: TrackingConfig,
         recoveryConfig: RecoveryConfig,
-        experimentVariant: str = "",
     ) -> None:
         self._geometry = geometryConfig
         self._tracking = trackingConfig
         self._recovery = recoveryConfig
-        self._experimentVariant = experimentVariant
 
     def buildViews(
         self,
@@ -188,28 +186,20 @@ class RecoveryPlanner:
                 f"view budget cannot fit attempt: required={requiredViews}, available={budget}"
             )
         trackingSize = _trackingSize(predictedMotion, fallbackBfov)
-        forceMaxFov = status is TrackStatus.UNCERTAIN
-        if self._experimentVariant == "erp_crop_4x_relaxed":
-            # This ERP crop experiment fixes the first-round Type1 views at 120 degrees.
-            forceMaxFov = True
-        elif self._experimentVariant == "fov_adaptive_both_rounds":
-            forceMaxFov = False
-        elif self._experimentVariant == "fov_adaptive_round1_only":
-            forceMaxFov = attemptIndex == 1
         if attemptIndex == 1:
             return self._fourCorners(
                 center,
                 viewIdStart,
                 attemptIndex,
                 dynamicSize=trackingSize,
-                forceMaxFov=forceMaxFov,
+                forceMaxFov=status is TrackStatus.UNCERTAIN,
             )
         return self._fourCorners(
             center,
             viewIdStart,
             attemptIndex,
             dynamicSize=trackingSize,
-            forceMaxFov=forceMaxFov,
+            forceMaxFov=status is TrackStatus.UNCERTAIN,
         )
 
     def contextBfov(

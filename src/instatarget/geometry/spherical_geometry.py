@@ -56,23 +56,7 @@ class SphericalGeometryImpl(SphericalGeometryProtocol):
         return _fitBfovFromVectors(vectors)
 
     def cropViews(self, frame: FramePacket, specs: Sequence[ViewSpec]) -> list[LocalView]:
-        direct = [spec for spec in specs if spec.erpCrop is not None]
-        if not direct:
-            return self._projector.cropViews(frame, specs)
-        perspective = {
-            spec.viewId: view
-            for spec, view in zip(
-                (item for item in specs if item.erpCrop is None),
-                self._projector.cropViews(frame, [item for item in specs if item.erpCrop is None]),
-                strict=True,
-            )
-        }
-        return [
-            _cropDirectErp(frame, spec)
-            if spec.erpCrop is not None
-            else perspective[spec.viewId]
-            for spec in specs
-        ]
+        return self._projector.cropViews(frame, specs)
 
     def localBoxToBfov(self, localBox: BBoxXYWH, spec: ViewSpec) -> BFoV:
         _requireViewSpec(spec)
@@ -104,8 +88,6 @@ class SphericalGeometryImpl(SphericalGeometryProtocol):
         _requireViewSpec(spec)
         _requireLocalBox(localBox, spec.outputWidthPx, spec.outputHeightPx)
         _requireFrameDimensions(frameWidthPx, frameHeightPx)
-        if spec.erpCrop is not None:
-            return self._projectDirectErpBox(localBox, spec, frameWidthPx, frameHeightPx)
         sampleX, sampleY = _sampleErpBoxBoundary(
             localBox.xPx,
             localBox.yPx,
@@ -151,79 +133,6 @@ class SphericalGeometryImpl(SphericalGeometryProtocol):
             ),
             indirectBbox=indirectBbox,
             envelopeInflation=float(indirectArea / max(directArea, 1e-12)),
-        )
-
-    def _projectDirectErpBox(
-        self,
-        localBox: BBoxXYWH,
-        spec: ViewSpec,
-        frameWidthPx: int,
-        frameHeightPx: int,
-    ) -> LocalBoxProjection:
-        crop = spec.erpCrop
-        if crop is None:
-            raise GeometryError("direct ERP projection requires erpCrop metadata")
-        if crop.xPx + crop.widthPx > frameWidthPx or crop.yPx + crop.heightPx > frameHeightPx:
-            raise GeometryError("direct ERP crop must stay inside the frame")
-        scaleX = crop.widthPx / spec.outputWidthPx
-        scaleY = crop.heightPx / spec.outputHeightPx
-        bbox = BBoxXYWH(
-            xPx=crop.xPx + localBox.xPx * scaleX,
-            yPx=crop.yPx + localBox.yPx * scaleY,
-            widthPx=localBox.widthPx * scaleX,
-            heightPx=localBox.heightPx * scaleY,
-        )
-        try:
-            bfov = self.bboxToBfov(bbox, frameWidthPx, frameHeightPx)
-        except GeometryError:
-            # A relaxed 4x ERP crop can cover more than a hemisphere. Keep the
-            # direct projection usable by capping the representable BFoV span.
-            center = erpPixelToSphericalPoint(
-                bbox.xPx + bbox.widthPx / 2.0,
-                bbox.yPx + bbox.heightPx / 2.0,
-                frameWidthPx,
-                frameHeightPx,
-            )
-            bfov = BFoV(
-                center=center,
-                horizontalFovRad=min(
-                    np.pi - 1e-6,
-                    max(1e-6, 2.0 * np.pi * bbox.widthPx / frameWidthPx),
-                ),
-                verticalFovRad=min(
-                    np.pi - 1e-6,
-                    max(1e-6, np.pi * bbox.heightPx / frameHeightPx),
-                ),
-            )
-        sampleX, sampleY = _sampleErpBoxBoundary(
-            bbox.xPx,
-            bbox.yPx,
-            bbox.widthPx,
-            bbox.heightPx,
-            self.boundarySamplesPerEdge,
-        )
-        vectors = _erpSamplesToVectors(sampleX, sampleY, frameWidthPx, frameHeightPx)
-        boundary = tuple(
-            makeSphericalPoint(
-                float(np.arctan2(vector[0], vector[2])),
-                float(np.arcsin(np.clip(vector[1], -1.0, 1.0))),
-            )
-            for vector in vectors
-        )
-        indirect = self.bfovToBbox(bfov, frameWidthPx, frameHeightPx)
-        return LocalBoxProjection(
-            bfov=bfov,
-            bbox=bbox,
-            sphericalBoundary=boundary,
-            erpBoundary=tuple(
-                (float(xValue), float(yValue))
-                for xValue, yValue in zip(sampleX, sampleY, strict=True)
-            ),
-            indirectBbox=indirect,
-            envelopeInflation=float(
-                indirect.widthPx * indirect.heightPx
-                / max(bbox.widthPx * bbox.heightPx, 1e-12)
-            ),
         )
 
     def bfovToBbox(self, bfov: BFoV, frameWidthPx: int, frameHeightPx: int) -> BBoxXYWH:
@@ -445,24 +354,6 @@ def _requireLocalBox(localBox: BBoxXYWH, viewWidthPx: int, viewHeightPx: int) ->
 def _requireViewSpec(spec: ViewSpec) -> None:
     if spec.outputWidthPx <= 0 or spec.outputHeightPx <= 0:
         raise GeometryError("view dimensions must be positive")
-
-
-def _cropDirectErp(frame: FramePacket, spec: ViewSpec) -> LocalView:
-    import cv2
-
-    crop = spec.erpCrop
-    if crop is None:
-        raise GeometryError("direct ERP crop metadata is missing")
-    frameHeight, frameWidth = frame.rgb.shape[:2]
-    x0 = max(0, int(np.floor(crop.xPx)))
-    y0 = max(0, int(np.floor(crop.yPx)))
-    x1 = min(frameWidth, int(np.ceil(crop.xPx + crop.widthPx)))
-    y1 = min(frameHeight, int(np.ceil(crop.yPx + crop.heightPx)))
-    if x1 <= x0 or y1 <= y0:
-        raise GeometryError("direct ERP crop has no pixels")
-    rgb = np.ascontiguousarray(frame.rgb[y0:y1, x0:x1])
-    resized = cv2.resize(rgb, (spec.outputWidthPx, spec.outputHeightPx))
-    return LocalView(spec=spec, rgb=np.ascontiguousarray(resized))
 
 
 __all__ = ["SphericalGeometryImpl"]

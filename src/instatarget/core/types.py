@@ -253,17 +253,12 @@ class ViewSpec:
     bfov: BFoV
     outputWidthPx: int
     outputHeightPx: int
-    erpCrop: BBoxXYWH | None = None
 
     def __post_init__(self) -> None:
         if self.viewId < 0:
             raise ProtocolError("viewId must be non-negative")
         if self.outputWidthPx <= 0 or self.outputHeightPx <= 0:
             raise ProtocolError("view output dimensions must be positive")
-        if self.erpCrop is not None and (
-            self.erpCrop.xPx < 0.0 or self.erpCrop.yPx < 0.0
-        ):
-            raise ProtocolError("direct ERP crop must start inside the frame")
 
 
 @dataclass(frozen=True, slots=True)

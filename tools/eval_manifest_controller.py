@@ -3,12 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import os
-import platform
-import subprocess
-import sys
 from collections import Counter
 from dataclasses import asdict, replace
 from math import pi
@@ -20,36 +15,15 @@ import cv2
 import numpy as np
 
 from instatarget.app.driver import buildRuntime, closeBackend, runTracking
-from instatarget.core.config import DEFAULT_VISUALIZATION_STAGES, VisualizationConfig, loadConfig
-from instatarget.core.types import BBoxXYWH, FrameIndex, FramePacket, SequenceId, TrackResult
-from instatarget.eval.otb_metrics import auc, bboxIoU, circularBBoxIoU, trackingLossRate
-from instatarget.eval.profiler import RuntimeProfiler
+from instatarget.core.config import loadConfig
+from instatarget.core.types import FrameIndex, FramePacket, SequenceId, TrackResult
+from instatarget.eval.otb_metrics import auc, circularBBoxIoU, trackingLossRate
 from instatarget.eval.spherical_metrics import bfovSphericalIoU, centerAngularErrorRad
 from instatarget.training.dataset import (
     ManifestRecord,
     _bfovToNormalizedLocal,
     _erpBoxToNormalizedLocal,
     loadManifest,
-)
-
-EXPERIMENT_VARIANTS = (
-    "shared_control_production",
-    "erp_crop_2x_strict",
-    "erp_crop_2x_relaxed",
-    "erp_crop_4x_relaxed",
-    "erp_crop_2x_3x_best",
-    "template_strict",
-    "template_relaxed",
-    "fusor_weighted_box",
-    "fusor_robust_spherical_consensus",
-    "fov_adaptive_both_rounds",
-    "fov_adaptive_round1_only",
-    "iou_refine_head",
-    "distractor_identity_verifier",
-    "local_global_recovery_verifier",
-    "pipeline_only",
-    "gpu_geometry_only",
-    "pipeline_gpu_geometry",
 )
 
 
@@ -124,84 +98,45 @@ class IntervalTimer:
 
 
 class CandidateRecorder:
-    def __init__(self, truth: dict[int, ManifestRecord], visualRecorder: Any = None) -> None:
+    def __init__(self, truth: dict[int, ManifestRecord]) -> None:
         self._truth = truth
-        self._visualRecorder = visualRecorder
         self._local: dict[tuple[int, int], Any] = {}
         self._views: dict[tuple[int, int], Any] = {}
-        self._rounds: dict[tuple[int, int], int] = {}
-        self._activeTemplateFrameIndex = 0
         self.viewCounts: Counter[int] = Counter()
         self.forwardCounts: Counter[int] = Counter()
         self.rows: list[dict[str, Any]] = []
 
-    def setActiveTemplateFrame(self, frameIndex: int, templateFrameIndex: int) -> None:
-        self._activeTemplateFrameIndex = int(templateFrameIndex)
-
     def recordLocalRgb(self, frame: FramePacket, views: Any) -> None:
-        if self._visualRecorder is not None:
-            self._visualRecorder.recordLocalRgb(frame, views)
         self.viewCounts[int(frame.frameIndex)] += len(views)
         self.forwardCounts[int(frame.frameIndex)] += 1
-        roundIndex = self.forwardCounts[int(frame.frameIndex)]
         for view in views:
             self._views[(int(frame.frameIndex), view.spec.viewId)] = view.spec
-            self._rounds[(int(frame.frameIndex), view.spec.viewId)] = roundIndex
 
     def recordBackendBoxes(self, frame: FramePacket, views: Any, observations: Any) -> None:
-        if self._visualRecorder is not None:
-            self._visualRecorder.recordBackendBoxes(frame, views, observations)
+        del views
         for observation in observations:
             self._local[(int(frame.frameIndex), observation.viewId)] = observation
 
     def recordGeometryBoxes(self, frame: FramePacket, observations: Any) -> None:
-        if self._visualRecorder is not None:
-            self._visualRecorder.recordGeometryBoxes(frame, observations)
         record = self._truth[int(frame.frameIndex)]
         for observation in observations:
             local = self._local.pop((int(frame.frameIndex), observation.viewId))
             spec = self._views.pop((int(frame.frameIndex), observation.viewId))
-            roundIndex = self._rounds.pop((int(frame.frameIndex), observation.viewId))
             targetLocalBox = None
             if record.visible:
-                if spec.erpCrop is not None:
-                    targetLocalBox = _directErpTargetLocalBox(record.bbox, spec)
-                else:
-                    targetLocalBox = (
-                        _bfovToNormalizedLocal(record.bfov, spec)
-                        if record.bfov is not None
-                        else _erpBoxToNormalizedLocal(
-                            record.bbox,
-                            spec,
-                            record.width,
-                            record.height,
-                        )
+                targetLocalBox = (
+                    _bfovToNormalizedLocal(record.bfov, spec)
+                    if record.bfov is not None
+                    else _erpBoxToNormalizedLocal(
+                        record.bbox,
+                        spec,
+                        record.width,
+                        record.height,
                     )
+                )
             iou = (
                 circularBBoxIoU(observation.bbox, record.bbox, record.width)
                 if record.visible and record.bbox is not None
-                else 0.0
-            )
-            localIoU = (
-                bboxIoU(
-                    local.bbox,
-                    BBoxXYWH(
-                        xPx=float(
-                            (targetLocalBox[0] - targetLocalBox[2] / 2.0) * spec.outputWidthPx
-                        ),
-                        yPx=float(
-                            (targetLocalBox[1] - targetLocalBox[3] / 2.0) * spec.outputHeightPx
-                        ),
-                        widthPx=float(targetLocalBox[2] * spec.outputWidthPx),
-                        heightPx=float(targetLocalBox[3] * spec.outputHeightPx),
-                    ),
-                )
-                if targetLocalBox is not None
-                else 0.0
-            )
-            sphericalIoU = (
-                bfovSphericalIoU(observation.bfov, record.bfov, samplesYaw=64, samplesPitch=32)
-                if record.visible and record.bfov is not None
                 else 0.0
             )
             self.rows.append(
@@ -210,15 +145,12 @@ class CandidateRecorder:
                     "split": record.split,
                     "frameIndex": int(frame.frameIndex),
                     "viewId": observation.viewId,
-                    "roundIndex": roundIndex,
                     "visible": record.visible,
                     "targetPresent": targetLocalBox is not None,
                     "targetLocalBoxCxCyWh": (
                         targetLocalBox.tolist() if targetLocalBox is not None else None
                     ),
                     "circularErpIoU": iou,
-                    "localIoU": localIoU,
-                    "sphericalIoU": sphericalIoU,
                     "hitAt0.5": bool(record.visible and iou >= 0.5),
                     "modelScore": local.modelScore,
                     "presenceLogit": local.presenceLogit,
@@ -230,20 +162,15 @@ class CandidateRecorder:
                     "appearanceProbability": observation.appearanceProbability,
                     "motionProbability": observation.motionProbability,
                     "singleScore": observation.singleScore,
-                    "localBBox": asdict(local.bbox),
-                    "projectedBBox": asdict(observation.bbox),
-                    "projectedBFoV": asdict(observation.bfov),
                     "normalizedRadius": observation.normalizedRadius,
                     "edgeMargin": observation.edgeMargin,
                     "envelopeInflation": observation.envelopeInflation,
-                    "templateFrameIndex": self._activeTemplateFrameIndex,
-                    "templateIsAnchor": bool(self._activeTemplateFrameIndex == 0),
                     "viewYawDeg": float(np.degrees(spec.bfov.center.yawRad)),
                     "viewPitchDeg": float(np.degrees(spec.bfov.center.pitchRad)),
-                    "viewHorizontalFovDeg": float(np.degrees(spec.bfov.horizontalFovRad)),
+                    "viewHorizontalFovDeg": float(
+                        np.degrees(spec.bfov.horizontalFovRad)
+                    ),
                     "viewVerticalFovDeg": float(np.degrees(spec.bfov.verticalFovRad)),
-                    "directErpCrop": spec.erpCrop is not None,
-                    "erpCrop": asdict(spec.erpCrop) if spec.erpCrop is not None else None,
                     "targetPitchDeg": (
                         float(np.degrees(record.bfov.center.pitchRad))
                         if record.bfov is not None
@@ -272,28 +199,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--sequence", required=True)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--variant", choices=EXPERIMENT_VARIANTS, default="shared_control_production")
-    parser.add_argument(
-        "--fusion-box-mode",
-        choices=("reference_adaptive", "best_source", "weighted_box", "robust_spherical_consensus"),
-    )
-    parser.add_argument(
-        "--visual-output-root",
-        type=Path,
-        help="Optional midVisual root; only backend_box and geometry_box are written.",
-    )
-    parser.add_argument(
-        "--result-visual-root",
-        type=Path,
-        help="Optional root for one final ERP result image per frame.",
-    )
     parser.add_argument("--max-frames", type=int)
-    parser.add_argument("--profile", action="store_true")
-    parser.add_argument("--precision", choices=("fp32", "fp16"))
-    parser.add_argument("--cudnn-benchmark", action="store_true")
-    parser.add_argument("--channels-last", action="store_true")
-    parser.add_argument("--reuse-buffers", action="store_true")
-    parser.add_argument("--pinned-nonblocking", action="store_true")
     parser.add_argument("--spherical-samples-yaw", type=int, default=128)
     parser.add_argument("--spherical-samples-pitch", type=int, default=64)
     parser.add_argument("--allow-holdout", action="store_true")
@@ -302,24 +208,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use raw Stage 3 presence*quality for pre-calibration E01 only.",
     )
-    parser.add_argument("--quiet", action="store_true", help="suppress the full JSON summary")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    for enabled, names in (
-        (args.profile, ("INSTARGET_PROFILE",)),
-        (args.cudnn_benchmark, ("INSTARGET_CUDNN_BENCHMARK",)),
-        (args.channels_last, ("INSTARGET_CHANNELS_LAST",)),
-        (args.reuse_buffers, ("INSTARGET_REUSE_BUFFERS",)),
-        (
-            args.pinned_nonblocking,
-            ("INSTARGET_PINNED_MEMORY", "INSTARGET_NON_BLOCKING"),
-        ),
-    ):
-        for name in names:
-            os.environ[name] = "1" if enabled else "0"
     if args.split == "holdout" and not args.allow_holdout:
         raise RuntimeError("holdout evaluation requires --allow-holdout after model freeze")
     datasetRoot = args.dataset_root.expanduser().resolve()
@@ -351,21 +244,9 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--max-frames must be at least 2")
 
     appConfig = loadConfig(args.config)
-    fusionMode = args.fusion_box_mode
-    if fusionMode is None:
-        fusionMode = {
-            "fusor_weighted_box": "weighted_box",
-            "fusor_robust_spherical_consensus": "robust_spherical_consensus",
-        }.get(args.variant)
-    if fusionMode is not None:
-        appConfig = replace(appConfig, evaluator=replace(appConfig.evaluator, fusionBoxMode=fusionMode))
     appConfig = replace(
         appConfig,
-        model=replace(
-            appConfig.model,
-            weights=args.weights.resolve(),
-            precision=args.precision or appConfig.model.precision,
-        ),
+        model=replace(appConfig.model, weights=args.weights.resolve()),
         scoring=(
             replace(appConfig.scoring, calibrationArtifact=None)
             if args.uncalibrated_stage3
@@ -378,28 +259,10 @@ def main(argv: list[str] | None = None) -> int:
     source = ManifestVideoSource(records, args.max_frames)
     sink = MemoryResultSink()
     timer = IntervalTimer()
-    visualRecorder = None
-    if args.visual_output_root is not None:
-        from instatarget.visualization.recorder import VisualizationRecorder
-
-        visualRecorder = VisualizationRecorder(
-            VisualizationConfig(
-                enabled=True,
-                outputRoot=args.visual_output_root,
-                stages=DEFAULT_VISUALIZATION_STAGES,
-            )
-        )
-    recorder = CandidateRecorder(truth, visualRecorder)
-    profiler = RuntimeProfiler(enabled=args.profile)
-    resultVisualRecorder = None
-    if args.result_visual_root is not None:
-        from instatarget.visualization.result import ResultVisualizationRecorder
-
-        resultVisualRecorder = ResultVisualizationRecorder(args.result_visual_root)
+    recorder = CandidateRecorder(truth)
     runtime = buildRuntime(
         appConfig,
         allowUncalibratedScoring=args.uncalibrated_stage3,
-        experimentVariant=args.variant,
     )
     source.open("")
     try:
@@ -411,30 +274,15 @@ def main(argv: list[str] | None = None) -> int:
             backend=runtime.backend,
             sink=sink,
             recorder=recorder,
-            resultRecorder=resultVisualRecorder,
             processingTimer=timer,
-            profiler=profiler,
             scoreCalibration=runtime.scoreCalibration,
-            experimentVariant=args.variant,
         )
         sink.finalize(count)
     finally:
         closeBackend(runtime.backend)
         source.close()
 
-    if profiler.enabled:
-        profiler.metadata.update(_runtimeProfileMetadata(profiler.frameRows))
-    report = _summarize(
-        args,
-        selected,
-        sink.results,
-        timer,
-        recorder,
-        profiler,
-        candidateMinScore=appConfig.tracking.candidateMinScore,
-    )
-    report["experiment"] = _experimentMetadata(args, appConfig)
-    report["experiment"].update(_variantMetadata(args.variant, appConfig))
+    report = _summarize(args, selected, sink.results, timer, recorder)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix(args.output.suffix + ".tmp")
     temporary.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
@@ -448,7 +296,6 @@ def main(argv: list[str] | None = None) -> int:
     candidateTemporary.replace(candidates)
     timings = args.output.with_name(f"{args.output.stem}.timings.jsonl")
     timingTemporary = timings.with_suffix(timings.suffix + ".tmp")
-    profiledRows = {int(row["frameIndex"]): row for row in profiler.frameRows}
     timingTemporary.write_text(
         "".join(
             json.dumps(
@@ -458,7 +305,6 @@ def main(argv: list[str] | None = None) -> int:
                     "totalProcessingMs": interval / 1_000_000.0,
                     "viewCount": recorder.viewCounts[int(record.frameIndex)],
                     "forwardCount": recorder.forwardCounts[int(record.frameIndex)],
-                    **profiledRows.get(int(record.frameIndex), {}),
                 },
                 separators=(",", ":"),
             )
@@ -468,8 +314,7 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     timingTemporary.replace(timings)
-    if not args.quiet:
-        print(json.dumps(report["summary"], indent=2))
+    print(json.dumps(report["summary"], indent=2))
     return 0
 
 
@@ -479,9 +324,6 @@ def _summarize(
     results: list[TrackResult],
     timer: IntervalTimer,
     recorder: CandidateRecorder,
-    profiler: RuntimeProfiler,
-    *,
-    candidateMinScore: float,
 ) -> dict[str, Any]:
     candidates = recorder.rows
     erpIous: list[float] = []
@@ -492,35 +334,26 @@ def _summarize(
     absentCount = falsePositives = 0
     invalidSphericalPredictions = 0
     frameRows: list[dict[str, Any]] = []
-    for offset, (record, result) in enumerate(zip(records[1:], results[1:], strict=True), 1):
-        previous = records[offset - 1]
-        speedDegPerSec = 0.0
-        if record.bfov is not None and previous.bfov is not None:
-            deltaSeconds = max(record.timestamp - previous.timestamp, 1e-9)
-            speedDegPerSec = float(
-                np.degrees(centerAngularErrorRad(record.bfov, previous.bfov)) / deltaSeconds
-            )
+    for record, result in zip(records[1:], results[1:], strict=True):
         if not record.visible or record.bbox is None or record.bfov is None:
             absentCount += 1
             falsePositives += int(result.valid)
             frameRows.append(
                 {
-                    "sequenceId": record.sequenceId,
                     "frameIndex": record.frameIndex,
                     "visible": False,
                     "valid": result.valid,
                     "circularErpIoU": 0.0,
                     "sphericalIoU": 0.0,
-                    "difficultType": record.difficultType,
-                    "domain": "real" if "real" in record.sequenceId.lower() else "sim",
-                    "occluded": record.occluded,
-                    "truncated": record.truncated,
                 }
             )
             continue
         erpIoU = circularBBoxIoU(result.bbox, record.bbox, record.width)
         erpIous.append(erpIoU)
-        if not (0.0 < result.bfov.horizontalFovRad < pi and 0.0 < result.bfov.verticalFovRad < pi):
+        if not (
+            0.0 < result.bfov.horizontalFovRad < pi
+            and 0.0 < result.bfov.verticalFovRad < pi
+        ):
             sphericalIous.append(0.0)
             invalidSphericalPredictions += 1
         else:
@@ -538,7 +371,6 @@ def _summarize(
         frameRows.append(
             {
                 "frameIndex": record.frameIndex,
-                "sequenceId": record.sequenceId,
                 "visible": True,
                 "valid": result.valid,
                 "circularErpIoU": erpIoU,
@@ -552,27 +384,7 @@ def _summarize(
                     record.bbox.widthPx * record.bbox.heightPx
                     <= 0.01 * record.width * record.height
                 ),
-                "targetSizeBand": _targetSizeBand(record),
                 "difficultType": record.difficultType,
-                "domain": "real" if "real" in record.sequenceId.lower() else "sim",
-                "occluded": record.occluded,
-                "truncated": record.truncated,
-                "speedDegPerSec": speedDegPerSec,
-                "speedBand": (
-                    "fast"
-                    if speedDegPerSec >= 90.0
-                    else "medium"
-                    if speedDegPerSec >= 30.0
-                    else "slow"
-                ),
-                "horizontalFovDeg": float(np.degrees(record.bfov.horizontalFovRad)),
-                "fovBand": _fovBand(float(np.degrees(record.bfov.horizontalFovRad))),
-                "viewEdge": bool(
-                    any(
-                        row["frameIndex"] == record.frameIndex and row["edgeMargin"] <= 0.02
-                        for row in candidates
-                    )
-                ),
             }
         )
     frameIntervals = timer.intervalsNs[1:-1]
@@ -603,7 +415,9 @@ def _summarize(
         "invalidSphericalPredictions": invalidSphericalPredictions,
         "absentFalsePositiveRate": falsePositives / absentCount if absentCount else 0.0,
         "validRate": (
-            float(np.mean([result.valid for result in results[1:]])) if len(results) > 1 else 0.0
+            float(np.mean([result.valid for result in results[1:]]))
+            if len(results) > 1
+            else 0.0
         ),
         "statusCounts": dict(Counter(result.status.value for result in results[1:])),
         "resultSourceCounts": dict(Counter(result.resultSource.value for result in results[1:])),
@@ -624,21 +438,11 @@ def _summarize(
             else 0.0
         ),
         "candidateHitRateAt0.5": (
-            float(np.mean([row["hitAt0.5"] for row in candidates])) if candidates else 0.0
+            float(np.mean([row["hitAt0.5"] for row in candidates]))
+            if candidates
+            else 0.0
         ),
         "sphericalSamples": [args.spherical_samples_yaw, args.spherical_samples_pitch],
-        "profiler": profiler.summarize(),
-        "profilerPerFrame": profiler.summarizeFrames(),
-        "profilerMetadata": dict(profiler.metadata),
-        "profilerEnabled": profiler.enabled,
-        "lossEpisodes": _lossEpisodeReport(
-            frameRows,
-            candidates,
-            candidateMinScore=candidateMinScore,
-        ),
-        "coverageStrata": _coverageStrata(frameRows),
-        "geometryEvidence": _geometryEvidence(candidates),
-        "templateEvidence": _templateEvidence(candidates),
     }
     return {
         "format": "instatarget.manifest-controller-eval.v1",
@@ -651,7 +455,6 @@ def _summarize(
                 "status": result.status.value,
                 "resultSource": result.resultSource.value,
                 "bbox": asdict(result.bbox),
-                "bfov": asdict(result.bfov),
             }
             for result in results
         ],
@@ -663,368 +466,8 @@ def _percentile(values: list[float], percentile: float) -> float:
     return float(np.percentile(np.asarray(values, dtype=np.float64), percentile)) if values else 0.0
 
 
-def _lossEpisodeReport(
-    frameRows: list[dict[str, Any]],
-    candidates: list[dict[str, Any]],
-    *,
-    candidateMinScore: float,
-) -> dict[str, Any]:
-    byFrame: dict[int, list[dict[str, Any]]] = {}
-    for candidate in candidates:
-        byFrame.setdefault(int(candidate["frameIndex"]), []).append(candidate)
-    lost = [row for row in frameRows if row["visible"] and float(row["circularErpIoU"]) <= 1e-12]
-    episodes: list[list[dict[str, Any]]] = []
-    for row in lost:
-        if not episodes or int(row["frameIndex"]) != int(episodes[-1][-1]["frameIndex"]) + 1:
-            episodes.append([])
-        episodes[-1].append(row)
-    frameMetrics = {int(row["frameIndex"]): row for row in frameRows}
-    details = []
-    for episode in episodes:
-        first = episode[0]
-        firstFrame = int(first["frameIndex"])
-        rows = byFrame.get(firstFrame, [])
-        round1 = [row for row in rows if int(row.get("roundIndex", 0)) == 1]
-        round2 = [row for row in rows if int(row.get("roundIndex", 0)) == 2]
-        details.append(
-            {
-                "startFrame": int(first["frameIndex"]),
-                "endFrame": int(episode[-1]["frameIndex"]),
-                "length": len(episode),
-                "firstCenterErrorDeg": first.get("centerErrorDeg"),
-                "firstWidthRelativeError": first.get("widthRelativeError"),
-                "firstHeightRelativeError": first.get("heightRelativeError"),
-                "round1Covered": any(float(row["circularErpIoU"]) > 0.0 for row in round1),
-                "round2Covered": any(float(row["circularErpIoU"]) > 0.0 for row in round2),
-                "maxPresence": max(
-                    (float(row["presenceProbability"]) for row in rows), default=0.0
-                ),
-                "maxQuality": max((float(row["qualityProbability"]) for row in rows), default=0.0),
-                "maxMotion": max((float(row["motionProbability"]) for row in rows), default=0.0),
-                "maxSingleScore": max((float(row["singleScore"]) for row in rows), default=0.0),
-                "preLossTrajectory": [
-                    _signalRow(
-                        frameIndex,
-                        frameMetrics.get(frameIndex),
-                        byFrame.get(frameIndex, []),
-                    )
-                    for frameIndex in range(max(1, firstFrame - 5), firstFrame + 1)
-                ],
-            }
-        )
-    lengths = [item["length"] for item in details]
-    shadowTriggers: list[int] = []
-    lowRun = 0
-    for row in sorted(frameRows, key=lambda item: int(item["frameIndex"])):
-        candidatesForFrame = byFrame.get(int(row["frameIndex"]), [])
-        maxScore = max((float(item["singleScore"]) for item in candidatesForFrame), default=0.0)
-        lowRun = lowRun + 1 if maxScore < candidateMinScore else 0
-        if lowRun == 2:
-            shadowTriggers.append(int(row["frameIndex"]))
-    matchedEpisodes = 0
-    trueTriggers = 0
-    for trigger in shadowTriggers:
-        matching = [
-            episode
-            for episode in details
-            if int(episode["startFrame"]) - 2 <= trigger <= int(episode["endFrame"])
-        ]
-        trueTriggers += bool(matching)
-    for episode in details:
-        if any(
-            int(episode["startFrame"]) - 2 <= trigger <= int(episode["endFrame"])
-            for trigger in shadowTriggers
-        ):
-            matchedEpisodes += 1
-    return {
-        "count": len(details),
-        "lengthP50": _percentile(lengths, 50),
-        "lengthP95": _percentile(lengths, 95),
-        "maxLength": max(lengths, default=0),
-        "shadowLostCandidateTriggers": len(shadowTriggers),
-        "shadowLostCandidatePrecision": trueTriggers / len(shadowTriggers)
-        if shadowTriggers
-        else 0.0,
-        "shadowLostCandidateRecall": matchedEpisodes / len(details) if details else 0.0,
-        "shadowLostCandidateThreshold": candidateMinScore,
-        "shadowLostCandidateFrames": shadowTriggers,
-        "episodes": details,
-    }
-
-
-def _coverageStrata(frameRows: list[dict[str, Any]]) -> dict[str, Any]:
-    dimensions = (
-        "domain",
-        "smallTarget",
-        "targetSizeBand",
-        "speedBand",
-        "occluded",
-        "seam",
-        "highLatitude",
-        "difficultType",
-        "viewEdge",
-        "fovBand",
-    )
-    result: dict[str, Any] = {}
-    visible = [row for row in frameRows if row["visible"]]
-    for dimension in dimensions:
-        groups: dict[str, list[dict[str, Any]]] = {}
-        for row in visible:
-            groups.setdefault(str(row.get(dimension)), []).append(row)
-        result[dimension] = {
-            key: {
-                "frameCount": len(rows),
-                "meanIoU": float(np.mean([float(row["circularErpIoU"]) for row in rows])),
-                "lossRate": float(np.mean([float(row["circularErpIoU"]) <= 1e-12 for row in rows])),
-            }
-            for key, rows in groups.items()
-        }
-    return result
-
-
-def _geometryEvidence(candidates: list[dict[str, Any]]) -> dict[str, Any]:
-    visible = [row for row in candidates if row.get("targetPresent")]
-    inflation = [float(row["envelopeInflation"]) for row in visible]
-    local = [float(row.get("localIoU", 0.0)) for row in visible]
-    circular = [float(row["circularErpIoU"]) for row in visible]
-    spherical = [float(row.get("sphericalIoU", 0.0)) for row in visible]
-    return {
-        "sampleCount": len(visible),
-        "localIoUMean": _mean(local),
-        "circularErpIoUMean": _mean(circular),
-        "sphericalIoUMean": _mean(spherical),
-        "inflationCorrelationWithLocalToErpGap": _correlation(
-            inflation, [a - b for a, b in zip(local, circular, strict=True)]
-        ),
-        "inflationCorrelationWithLocalToSphericalGap": _correlation(
-            inflation, [a - b for a, b in zip(local, spherical, strict=True)]
-        ),
-    }
-
-
-def _templateEvidence(candidates: list[dict[str, Any]]) -> dict[str, Any]:
-    visible = [row for row in candidates if row.get("targetPresent")]
-    anchor = [row for row in visible if int(row.get("templateFrameIndex", 0)) == 0]
-    non_anchor = [row for row in visible if int(row.get("templateFrameIndex", 0)) != 0]
-    return {
-        "visibleSampleCount": len(visible),
-        "anchorSampleCount": len(anchor),
-        "nonAnchorSampleCount": len(non_anchor),
-        "anchorMeanIoU": _mean([float(row["circularErpIoU"]) for row in anchor]),
-        "nonAnchorMeanIoU": _mean([float(row["circularErpIoU"]) for row in non_anchor]),
-        "nonAnchorSuccessAt0.5": float(
-            np.mean([float(row["circularErpIoU"]) >= 0.5 for row in non_anchor])
-        )
-        if non_anchor
-        else 0.0,
-    }
-
-
-def _mean(values: list[float]) -> float:
-    return float(np.mean(np.asarray(values, dtype=np.float64))) if values else 0.0
-
-
-def _correlation(first: list[float], second: list[float]) -> float | None:
-    if len(first) < 2 or np.std(first) <= 1e-12 or np.std(second) <= 1e-12:
-        return None
-    return float(np.corrcoef(first, second)[0, 1])
-
-
 def _percentileDegrees(values: list[float], percentile: float) -> float:
     return float(np.degrees(_percentile(values, percentile)))
-
-
-def _signalRow(
-    frameIndex: int,
-    metric: dict[str, Any] | None,
-    candidates: list[dict[str, Any]],
-) -> dict[str, Any]:
-    return {
-        "frameIndex": frameIndex,
-        "visible": bool(metric and metric.get("visible")),
-        "circularErpIoU": float(metric.get("circularErpIoU", 0.0)) if metric else None,
-        "maxPresence": max(
-            (float(row["presenceProbability"]) for row in candidates), default=0.0
-        ),
-        "maxQuality": max((float(row["qualityProbability"]) for row in candidates), default=0.0),
-        "maxMotion": max((float(row["motionProbability"]) for row in candidates), default=0.0),
-        "maxSingleScore": max((float(row["singleScore"]) for row in candidates), default=0.0),
-    }
-
-
-def _targetSizeBand(record: ManifestRecord) -> str:
-    if record.bbox is None:
-        return "absent"
-    ratio = record.bbox.widthPx * record.bbox.heightPx / (record.width * record.height)
-    if ratio <= 0.01:
-        return "small"
-    if ratio <= 0.05:
-        return "medium"
-    return "large"
-
-
-def _fovBand(horizontalFovDeg: float) -> str:
-    if horizontalFovDeg <= 30.0:
-        return "narrow"
-    if horizontalFovDeg <= 75.0:
-        return "medium"
-    return "wide"
-
-
-def _directErpTargetLocalBox(
-    bbox: BBoxXYWH | None,
-    spec: Any,
-) -> np.ndarray | None:
-    crop = spec.erpCrop
-    if bbox is None or crop is None:
-        return None
-    x0 = max(bbox.xPx, crop.xPx)
-    y0 = max(bbox.yPx, crop.yPx)
-    x1 = min(bbox.xPx + bbox.widthPx, crop.xPx + crop.widthPx)
-    y1 = min(bbox.yPx + bbox.heightPx, crop.yPx + crop.heightPx)
-    if x1 <= x0 or y1 <= y0:
-        return None
-    return np.asarray(
-        (
-            ((x0 + x1) / 2.0 - crop.xPx) / crop.widthPx,
-            ((y0 + y1) / 2.0 - crop.yPx) / crop.heightPx,
-            (x1 - x0) / crop.widthPx,
-            (y1 - y0) / crop.heightPx,
-        ),
-        dtype=np.float32,
-    )
-
-
-def _runtimeProfileMetadata(frameRows: list[dict[str, Any]]) -> dict[str, Any]:
-    backendRows = [
-        batch
-        for row in frameRows
-        for batch in row.get("backendBatches", [])
-        if isinstance(batch, dict)
-    ]
-    metadata: dict[str, Any] = {
-        "oomCount": max((int(row.get("oomCount", 0)) for row in backendRows), default=0),
-        "fp16FallbackCount": max(
-            (int(row.get("fp16FallbackCount", 0)) for row in backendRows),
-            default=0,
-        ),
-    }
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            device = torch.cuda.current_device()
-            metadata.update(
-                {
-                    "device": torch.cuda.get_device_name(device),
-                    "cudaVersion": torch.version.cuda,
-                    "torchVersion": torch.__version__,
-                    "maxMemoryAllocatedBytes": int(torch.cuda.max_memory_allocated(device)),
-                    "maxMemoryReservedBytes": int(torch.cuda.max_memory_reserved(device)),
-                }
-            )
-    except Exception as error:
-        metadata["cudaMetadataError"] = str(error)
-    try:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=temperature.gpu",
-                "--format=csv,noheader,nounits",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        metadata["gpuTemperatureC"] = float(result.stdout.splitlines()[0].strip())
-    except Exception as error:
-        metadata["temperatureError"] = str(error)
-    return metadata
-
-
-def _experimentMetadata(args: argparse.Namespace, appConfig: Any) -> dict[str, Any]:
-    calibration = appConfig.scoring.calibrationArtifact
-    paths = {
-        "config": args.config.expanduser().resolve(),
-        "checkpoint": args.weights.expanduser().resolve(),
-        "calibration": calibration,
-    }
-    return {
-        "precision": appConfig.model.precision,
-        "optimizations": {
-            "cudnnBenchmark": bool(args.cudnn_benchmark),
-            "channelsLast": bool(args.channels_last),
-            "reuseBuffers": bool(args.reuse_buffers),
-            "pinnedNonBlocking": bool(args.pinned_nonblocking),
-            "pipelineEnabled": bool(args.variant in {"pipeline_only", "pipeline_gpu_geometry"}),
-            "gpuGeometryEnabled": bool(args.variant in {"gpu_geometry_only", "pipeline_gpu_geometry"}),
-        },
-        "profilerEnabled": bool(args.profile),
-        "artifacts": {
-            name: {
-                "path": str(path) if path is not None else None,
-                "sha256": _sha256(path) if path is not None and path.is_file() else None,
-            }
-            for name, path in paths.items()
-        },
-        "environment": {
-            "python": sys.version,
-            "platform": platform.platform(),
-            "gitCommit": _gitCommit(args.config.expanduser().resolve().parents[1]),
-        },
-    }
-
-
-def _variantMetadata(variant: str, appConfig: Any) -> dict[str, Any]:
-    implemented = {
-        "shared_control_production": True,
-        "erp_crop_2x_strict": True,
-        "erp_crop_2x_relaxed": True,
-        "erp_crop_4x_relaxed": True,
-        "erp_crop_2x_3x_best": True,
-        "template_strict": True,
-        "template_relaxed": True,
-        "fusor_weighted_box": True,
-        "fusor_robust_spherical_consensus": True,
-        "fov_adaptive_both_rounds": True,
-        "fov_adaptive_round1_only": True,
-        "iou_refine_head": True,
-        "distractor_identity_verifier": True,
-        "local_global_recovery_verifier": True,
-        "pipeline_only": True,
-        "gpu_geometry_only": True,
-        "pipeline_gpu_geometry": True,
-    }.get(variant, False)
-    fallback = None if implemented else "isolated_production_fallback_pending_runtime_head"
-    return {
-        "variant": variant,
-        "variantImplemented": implemented,
-        "variantFallback": fallback,
-        "fusionBoxMode": appConfig.evaluator.fusionBoxMode,
-        "usesValidationTruthForControl": False,
-    }
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _gitCommit(root: Path) -> str | None:
-    try:
-        return subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        return None
 
 
 if __name__ == "__main__":

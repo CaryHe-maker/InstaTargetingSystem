@@ -1,4 +1,4 @@
-"""Experimental GPU Geometry path for direct HiT device-tensor inference."""
+"""CUDA perspective geometry for direct HiT device-tensor inference."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ class GpuGeometryImpl(SphericalGeometryImpl):
         result: list[LocalView] = []
         cropStarted = perf_counter_ns()
         for spec in specs:
-            tensor = self._directCrop(spec) if spec.erpCrop is not None else self._perspectiveCrop(spec)
+            tensor = self._perspectiveCrop(spec)
             # Compatibility RGB is never consumed by the GPU backend.
             placeholder = np.zeros(
                 (spec.outputHeightPx, spec.outputWidthPx, 3),
@@ -98,27 +98,6 @@ class GpuGeometryImpl(SphericalGeometryImpl):
         self._frameIndex = frameIndex
         self._synchronizeForProfile()
         self._frameToDeviceNs = perf_counter_ns() - started
-
-    def _directCrop(self, spec: ViewSpec) -> Any:
-        crop = spec.erpCrop
-        if crop is None:
-            raise GeometryError("GPU direct crop requires erpCrop")
-        _, height, width = self._frameTensor.shape
-        x0 = max(0, int(np.floor(crop.xPx)))
-        y0 = max(0, int(np.floor(crop.yPx)))
-        x1 = min(width, int(np.ceil(crop.xPx + crop.widthPx)))
-        y1 = min(height, int(np.ceil(crop.yPx + crop.heightPx)))
-        if x1 <= x0 or y1 <= y0:
-            raise GeometryError("GPU direct crop has no pixels")
-        import torch.nn.functional as functional
-
-        sampled = functional.interpolate(
-            self._frameTensor[:, y0:y1, x0:x1].unsqueeze(0),
-            size=(spec.outputHeightPx, spec.outputWidthPx),
-            mode="bilinear",
-            align_corners=False,
-        ).squeeze(0)
-        return self._normalizeSampledRgb(sampled)
 
     def _perspectiveCrop(self, spec: ViewSpec) -> Any:
         height = int(self._frameTensor.shape[1])

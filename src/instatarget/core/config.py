@@ -96,13 +96,10 @@ class EvaluatorConfig:
         _requireProbability(
             "evaluator.fusionSourceMinConfidence", self.fusionSourceMinConfidence
         )
-        if self.fusionBoxMode not in {
-            "reference_adaptive",
-            "best_source",
-            "weighted_box",
-            "robust_spherical_consensus",
-        }:
-            raise ConfigError("evaluator.fusionBoxMode is not a supported geometry mode")
+        if self.fusionBoxMode not in {"reference_adaptive", "best_source"}:
+            raise ConfigError(
+                "evaluator.fusionBoxMode must be 'reference_adaptive' or 'best_source'"
+            )
         if self.firstRoundFusionOverlap >= self.overlapThreshold:
             raise ConfigError(
                 "evaluator thresholds must satisfy firstRoundFusionOverlap < overlapThreshold"

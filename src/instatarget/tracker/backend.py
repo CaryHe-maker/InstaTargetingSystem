@@ -24,12 +24,11 @@ from instatarget.tracker.template import TemplateCache
 class TrackerBackendImpl(TrackerBackendProtocol):
     """Own one RGB HiT session, its template cache, and local observations."""
 
-    def __init__(self, hitBackend: HiTBackend, *, useDynamicTemplates: bool = False) -> None:
+    def __init__(self, hitBackend: HiTBackend) -> None:
         self._hitBackend = hitBackend
         self._templates = TemplateCache()
         self._previousViews: dict[int, LocalView] = {}
         self._previousViewsFrameIndex: int | None = None
-        self._useDynamicTemplates = useDynamicTemplates
         self._initialized = False
         self._closed = False
 
@@ -53,10 +52,7 @@ class TrackerBackendImpl(TrackerBackendProtocol):
         self._templates.initialize(self._hitBackend, template, templateBox)
         self._initialized = True
         self._previousViews = {
-            template.spec.viewId: _copyView(
-                template,
-                includeDeviceRgb=self._useDynamicTemplates,
-            )
+            template.spec.viewId: _copyView(template)
         }
         self._previousViewsFrameIndex = 0
 
@@ -122,9 +118,7 @@ class TrackerBackendImpl(TrackerBackendProtocol):
             raise ProtocolError("tracker backend has not been initialized")
         self._templates.apply(self._hitBackend, command, self._previousViews)
         snapshot = self._templates.snapshot()
-        templateFeatures = (
-            snapshot.features if self._useDynamicTemplates else (snapshot.anchor.features,)
-        )
+        templateFeatures = (snapshot.anchor.features,)
         self._activeTemplateFrameIndex = (
             int(snapshot.stable.frameIndex)
             if snapshot.stable is not None
@@ -158,10 +152,7 @@ class TrackerBackendImpl(TrackerBackendProtocol):
         if not views:
             return
         currentViews = {
-            view.spec.viewId: _copyView(
-                view,
-                includeDeviceRgb=self._useDynamicTemplates,
-            )
+            view.spec.viewId: _copyView(view)
             for view in views
         }
         if self._previousViewsFrameIndex == frameIndex:
@@ -186,13 +177,13 @@ def _validateViewSequence(views: Sequence[LocalView]) -> None:
         raise ProtocolError("tracker infer views must have unique viewIds")
 
 
-def _copyView(view: LocalView, *, includeDeviceRgb: bool) -> LocalView:
+def _copyView(view: LocalView) -> LocalView:
     rgb = view.rgb.copy()
     rgb.setflags(write=False)
     return LocalView(
         spec=view.spec,
         rgb=rgb,
-        deviceRgb=view.deviceRgb if includeDeviceRgb else None,
+        deviceRgb=None,
     )
 
 

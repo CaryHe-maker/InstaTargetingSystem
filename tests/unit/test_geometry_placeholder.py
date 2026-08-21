@@ -78,66 +78,6 @@ class GeometryTest(unittest.TestCase):
         self.assertEqual([view.spec.viewId for view in views], [7, 2])
         self.assertTrue(np.array_equal(views[0].rgb[0, 0], rgb[2, 2]))
 
-    def testDirectErpCropAndProjectionUseLinearPixelMapping(self) -> None:
-        rgb = np.zeros((80, 160, 3), dtype=np.uint8)
-        rgb[20:60, 40:100, 0] = 200
-        frame = FramePacket(
-            sequenceId=SequenceId("direct-erp"),
-            frameIndex=FrameIndex(1),
-            timestampNs=1,
-            rgb=rgb,
-        )
-        crop = BBoxXYWH(40.0, 20.0, 60.0, 40.0)
-        spec = ViewSpec(
-            viewId=5,
-            bfov=self.geometry.bboxToBfov(crop, 160, 80),
-            outputWidthPx=40,
-            outputHeightPx=40,
-            erpCrop=crop,
-        )
-
-        view = self.geometry.cropViews(frame, (spec,))[0]
-        projection = self.geometry.projectLocalBoxBoundary(
-            BBoxXYWH(10.0, 10.0, 20.0, 20.0),
-            spec,
-            160,
-            80,
-        )
-
-        self.assertEqual(view.rgb.shape, (40, 40, 3))
-        self.assertGreater(float(view.rgb[..., 0].mean()), 190.0)
-        self.assertEqual(projection.bbox, BBoxXYWH(55.0, 30.0, 30.0, 20.0))
-
-    def testDirectErpProjectionCapsOverHemisphereCrop(self) -> None:
-        frame = FramePacket(
-            sequenceId=SequenceId("direct-erp-wide"),
-            frameIndex=FrameIndex(1),
-            timestampNs=1,
-            rgb=np.zeros((180, 360, 3), dtype=np.uint8),
-        )
-        crop = BBoxXYWH(20.0, 20.0, 340.0, 140.0)
-        spec = ViewSpec(
-            viewId=6,
-            bfov=BFoV(
-                center=erpPixelToSphericalPoint(190.0, 90.0, 360, 180),
-                horizontalFovRad=2.0,
-                verticalFovRad=2.0,
-            ),
-            outputWidthPx=256,
-            outputHeightPx=256,
-            erpCrop=crop,
-        )
-
-        projection = self.geometry.projectLocalBoxBoundary(
-            BBoxXYWH(0.0, 0.0, 256.0, 256.0),
-            spec,
-            360,
-            180,
-        )
-
-        self.assertLess(projection.bfov.horizontalFovRad, np.pi)
-        self.assertLess(projection.bfov.verticalFovRad, np.pi)
-
     def testSeamHelpersSplitAndContainCircularBoxes(self) -> None:
         bbox = BBoxXYWH(xPx=14.0, yPx=1.0, widthPx=4.0, heightPx=2.0)
         parts = splitSeamBox(bbox, 16)
