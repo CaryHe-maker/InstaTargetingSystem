@@ -28,6 +28,7 @@ class GpuGeometryImpl(SphericalGeometryImpl):
             raise GeometryError("GPU Geometry requires CUDA")
         self._torch = torch
         self._device = torch.device("cuda")
+        self._stream = torch.cuda.default_stream(self._device)
         self._frameIndex: int | None = None
         self._frameTensor: Any = None
         self._hostTensor: Any = None
@@ -67,21 +68,25 @@ class GpuGeometryImpl(SphericalGeometryImpl):
         self._localGridCache.clear()
         self._mean = None
         self._std = None
+        self._stream = None
         self._closed = True
 
     def cropViews(self, frame: FramePacket, specs: Sequence[ViewSpec]) -> list[LocalView]:
         started = perf_counter_ns()
-        self._ensureFrame(frame)
         result: list[LocalView] = []
         cropStarted = perf_counter_ns()
-        for spec in specs:
-            tensor = self._perspectiveCrop(spec)
-            # Compatibility RGB is never consumed by the GPU backend.
-            placeholder = np.zeros(
-                (spec.outputHeightPx, spec.outputWidthPx, 3),
-                dtype=np.uint8,
-            )
-            result.append(LocalView(spec=spec, rgb=placeholder, deviceRgb=tensor))
+        with self._torch.cuda.stream(self._stream):
+            self._ensureFrame(frame)
+            for spec in specs:
+                tensor = self._perspectiveCrop(spec)
+                # Compatibility RGB is never consumed by the GPU backend.
+                placeholder = np.zeros(
+                    (spec.outputHeightPx, spec.outputWidthPx, 3),
+                    dtype=np.uint8,
+                )
+                result.append(LocalView(spec=spec, rgb=placeholder, deviceRgb=tensor))
+        # Establish a synchronous ownership boundary before HiT consumes the tensors.
+        self._stream.synchronize()
         self._synchronizeForProfile()
         gpuCropNs = perf_counter_ns() - cropStarted
         self._lastProfile = {

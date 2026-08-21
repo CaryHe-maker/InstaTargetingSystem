@@ -63,6 +63,7 @@ class PyTorchHiTSession:
         if not self._weights.is_file():
             raise ModelError(f"HiT checkpoint does not exist: {self._weights}")
         self._device = self._torch.device("cuda")
+        self._stream = self._torch.cuda.default_stream(self._device)
         self._previousCudnnBenchmark = bool(self._torch.backends.cudnn.benchmark)
         self._torch.backends.cudnn.benchmark = self._benchmark
         self._model = self._loadModel()
@@ -89,14 +90,17 @@ class PyTorchHiTSession:
 
     def encodeTemplateDevice(self, deviceRgb: Any, bbox: BBoxXYWH) -> object:
         self._requireOpen()
-        tensor = self._validateDeviceRgb(deviceRgb)
-        return _sampleTargetDevice(
-            tensor,
-            bbox,
-            _TEMPLATE_FACTOR,
-            _TEMPLATE_SIZE,
-            self._torch,
-        ).unsqueeze(0)
+        with self._torch.cuda.stream(self._stream):
+            tensor = self._validateDeviceRgb(deviceRgb)
+            template = _sampleTargetDevice(
+                tensor,
+                bbox,
+                _TEMPLATE_FACTOR,
+                _TEMPLATE_SIZE,
+                self._torch,
+            ).unsqueeze(0)
+        self._stream.synchronize()
+        return template
 
     def infer(
         self,
@@ -358,6 +362,7 @@ class PyTorchHiTSession:
         self._cpuBuffers.clear()
         self._pinnedBuffers.clear()
         self._gpuBuffers.clear()
+        self._stream = None
         self._closed = True
         self._torch.backends.cudnn.benchmark = self._previousCudnnBenchmark
         try:
@@ -455,17 +460,24 @@ class PyTorchHiTSession:
             if useFp16
             else nullcontext()
         )
+        # Geometry and HiT are separate owners of CUDA tensors. Pin every model
+        # call to the shared default stream and make both handoff boundaries
+        # explicit; otherwise a thread-local stream change can mismatch cuBLAS or
+        # cuDNN handles with tensors created by GPU Geometry.
+        self._stream.synchronize()
         startEvent = endEvent = None
-        if self._profileEnabled:
-            startEvent = self._torch.cuda.Event(enable_timing=True)
-            endEvent = self._torch.cuda.Event(enable_timing=True)
-            startEvent.record()
-        with self._torch.inference_mode(), autocast:
-            output = self._model(template, search)
+        with self._torch.cuda.stream(self._stream):
+            if self._profileEnabled:
+                startEvent = self._torch.cuda.Event(enable_timing=True)
+                endEvent = self._torch.cuda.Event(enable_timing=True)
+                startEvent.record(self._stream)
+            with self._torch.inference_mode(), autocast:
+                output = self._model(template, search)
+            if endEvent is not None:
+                endEvent.record(self._stream)
+        self._stream.synchronize()
         elapsedNs = 0
         if startEvent is not None and endEvent is not None:
-            endEvent.record()
-            endEvent.synchronize()
             elapsedNs = int(startEvent.elapsed_time(endEvent) * 1_000_000.0)
         boxes = output.get("predBoxes")
         if boxes is None or boxes.numel() == 0:
