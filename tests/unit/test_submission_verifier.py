@@ -72,6 +72,8 @@ class SubmissionVerifierTest(unittest.TestCase):
         self.assertIn("docker", runtimeCommand)
         self.assertIn("run", runtimeCommand)
         self.assertIn("validateHiTCheckpoint", runtimeCommand[-1])
+        self.assertIn("SphericalGeometryImpl", runtimeCommand[-1])
+        self.assertIn("wrapped_bfov", runtimeCommand[-1])
         self.assertIn("torch.version.cuda == '12.8'", runtimeCommand[-1])
         self.assertIn("sm_120", runtimeCommand[-1])
         self.assertIn("--network", runtimeCommand)
