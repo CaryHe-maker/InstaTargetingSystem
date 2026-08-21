@@ -7,7 +7,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from instatarget.app.driver import buildRuntime, finalizeSink, openSink, runTracking
+from instatarget.app.driver import buildRuntime, closeRuntime, finalizeSink, openSink, runTracking
 from instatarget.core.config import VisualizationConfig, loadConfig
 from instatarget.core.errors import (
     ConfigError,
@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if runtime is not None:
             try:
-                runtime.backend.close()
+                closeRuntime(runtime)
             except Exception:
                 pass
         try:
