@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from math import asin, atan2, tan
+from math import asin, atan2, ceil, floor, pi, tan
 from typing import TYPE_CHECKING
 
 from instatarget.controller.motion_estimator import SphericalMotionEstimator
@@ -59,7 +59,12 @@ from instatarget.core.types import (
     TrackStatus,
     ViewSpec,
 )
-from instatarget.geometry.projection_math import fovToFocalLengthPx, makeSphericalPoint
+from instatarget.geometry.projection_math import (
+    erpPixelToSphericalPoint,
+    fovToFocalLengthPx,
+    makeSphericalPoint,
+    sphericalPointToErpPixel,
+)
 
 if TYPE_CHECKING:
     from instatarget.core.protocols import MotionEstimator
@@ -90,6 +95,7 @@ class TrackControllerImpl(TrackControllerProtocol):
         evaluatorConfig: EvaluatorConfig | None = None,
         motionConfig: MotionConfig | None = None,
         motionEstimator: MotionEstimator | None = None,
+        experimentVariant: str = "shared_control_production",
     ) -> None:
         if config is not None:
             geometryConfig = config.geometry
@@ -104,6 +110,7 @@ class TrackControllerImpl(TrackControllerProtocol):
         evaluatorConfig = evaluatorConfig or EvaluatorConfig()
         motionConfig = motionConfig or MotionConfig()
         self._geometry = geometry
+        self._experimentVariant = experimentVariant
         self._geometryConfig = geometryConfig
         self._trackingConfig = trackingConfig
         self._recoveryConfig = recoveryConfig
@@ -119,9 +126,14 @@ class TrackControllerImpl(TrackControllerProtocol):
             maxLogScaleRatePerSec=motionConfig.maxLogScaleRatePerSec,
         )
         self._evaluator = StateEvaluator(decisionGateConfig, trackingConfig, evaluatorConfig)
-        self._planner = RecoveryPlanner(geometryConfig, trackingConfig, recoveryConfig)
+        self._planner = RecoveryPlanner(
+            geometryConfig,
+            trackingConfig,
+            recoveryConfig,
+            experimentVariant,
+        )
         self._stateMachine = TrackStateMachine(trackingConfig)
-        self._templatePolicy = TemplatePolicy(trackingConfig)
+        self._templatePolicy = TemplatePolicy(trackingConfig, experimentVariant)
         self._recovery = RecoveryMemory()
 
         self._initialized = False
@@ -148,6 +160,7 @@ class TrackControllerImpl(TrackControllerProtocol):
         self._initialPlan: InitializationPlan | None = None
         self._lastStateObservation: StateObservation | None = None
         self._lastTransition: TransitionDecision | None = None
+        self._lastPipelineProfile: dict[str, object] = {}
 
     @property
     def status(self) -> TrackStatus | None:
@@ -166,6 +179,10 @@ class TrackControllerImpl(TrackControllerProtocol):
     @property
     def lastTransition(self) -> TransitionDecision | None:
         return self._lastTransition
+
+    @property
+    def lastPipelineProfile(self) -> dict[str, object]:
+        return dict(self._lastPipelineProfile)
 
     def buildInitialization(self, frame: FramePacket, initialBox: BBoxXYWH) -> InitializationPlan:
         if self._initialized or self._initialPlan is not None:
@@ -349,6 +366,19 @@ class TrackControllerImpl(TrackControllerProtocol):
             and planned.state.mode in {TrackMode.TRACKING, TrackMode.UNCERTAIN}
             else ()
         )
+        directErp = any(view.erpCrop is not None for view in plan.views)
+        if directErp:
+            priorObservations = ()
+            if observations:
+                observations = (
+                    max(
+                        observations,
+                        key=lambda item: (
+                            item.singleScore if item.singleScore is not None else item.fusedScore,
+                            -item.viewId,
+                        ),
+                    ),
+                )
         evaluation = self._evaluator.evaluate(
             state=planned.state,
             plan=plan,
@@ -384,11 +414,41 @@ class TrackControllerImpl(TrackControllerProtocol):
         if self._shouldEscalate(evaluation, transaction, allowEscalation):
             transaction.attemptIndex += 1
             self._planned = None
+            nextPrediction = planned.prediction
+            if self._experimentVariant in {"pipeline_only", "pipeline_gpu_geometry"}:
+                nextPrediction = self._provisionalRoundPrediction(planned, evaluation)
+                transaction.provisionalPrediction = nextPrediction
+                transaction.provisionalPredictionRevision = planned.plan.stateRevision
+                self._lastPipelineProfile = {
+                    "pipelinePredictionEnabled": True,
+                    "frameIndex": int(planned.frame.frameIndex),
+                    "round1PredictionRevision": int(planned.plan.stateRevision),
+                    "round2UsesProvisionalPrediction": nextPrediction is not planned.prediction,
+                    "formalMotionSamplesBeforeCommit": int(nextPrediction.sampleCount - 1)
+                    if nextPrediction is not planned.prediction
+                    else int(nextPrediction.sampleCount),
+                }
             nextPlan = self._buildAttempt(
                 frame=planned.frame,
                 state=planned.state,
-                prediction=planned.prediction,
-                predictedBfov=planned.predictedBfov,
+                prediction=nextPrediction,
+                predictedBfov=(
+                    BFoV(
+                        center=nextPrediction.center,
+                        horizontalFovRad=(
+                            nextPrediction.horizontalSizeRad
+                            if nextPrediction.horizontalSizeRad > 0.0
+                            else planned.predictedBfov.horizontalFovRad
+                        ),
+                        verticalFovRad=(
+                            nextPrediction.verticalSizeRad
+                            if nextPrediction.verticalSizeRad > 0.0
+                            else planned.predictedBfov.verticalFovRad
+                        ),
+                    )
+                    if nextPrediction is not planned.prediction
+                    else planned.predictedBfov
+                ),
                 attemptIndex=transaction.attemptIndex,
                 searchSeed=evaluation.searchSeedCenter,
                 viewIdStart=max((view.viewId for view in plan.views), default=-1) + 1,
@@ -400,10 +460,45 @@ class TrackControllerImpl(TrackControllerProtocol):
             measurementAccepted=evaluation.measurementAccepted,
         )
         result = self._commit(planned, evaluation, decision)
+        if self._experimentVariant in {"pipeline_only", "pipeline_gpu_geometry"}:
+            self._lastPipelineProfile.update(
+                {
+                    "finalAttemptIndex": int(plan.attemptIndex),
+                    "finalMeasurementAccepted": bool(decision.acceptMeasurement),
+                    "finalStateRevision": int(planned.plan.stateRevision),
+                    "provisionalReplacedAtCommit": bool(
+                        transaction.provisionalPrediction is not None
+                    ),
+                }
+            )
         self._stateMachine.recordScore(evaluation.stateScore)
         self._lastStateObservation = evaluation
         self._lastTransition = decision
         return FrameCommitted(result)
+
+    def _provisionalRoundPrediction(
+        self,
+        planned: _PlannedAttempt,
+        evaluation: StateObservation,
+    ) -> MotionPrediction:
+        measured = evaluation.measuredBfov
+        method = getattr(self._motion, "predictWithProvisionalMeasurement", None)
+        if measured is None or not callable(method):
+            return planned.prediction
+        prediction = method(
+            frameIndex=int(planned.frame.frameIndex),
+            timestampNs=planned.frame.timestampNs,
+            point=measured.center,
+            confidence=max(self._trackingConfig.candidateMinScore, evaluation.stateScore),
+            horizontalSizeRad=measured.horizontalFovRad,
+            verticalSizeRad=measured.verticalFovRad,
+        )
+        return replace(
+            prediction,
+            sourceRevision=planned.plan.stateRevision,
+            targetFrameIndex=planned.frame.frameIndex,
+            degradedReasons=tuple((*prediction.degradedReasons, "round1_provisional")),
+        )
 
     def _buildAttempt(
         self,
@@ -435,6 +530,14 @@ class TrackControllerImpl(TrackControllerProtocol):
             viewBudget=transaction.remainingViews,
             recoveryMemory=transaction.recoveryMemory,
         )
+        if attemptIndex == 1 and self._experimentVariant.startswith("erp_crop_"):
+            directViews = self._erpDirectViews(
+                frame,
+                searchSeed,
+                viewIdStart,
+            )
+            if directViews:
+                views = directViews
         if not views:
             raise ProtocolError("view planner returned an empty attempt")
         transaction.remainingViews -= len(views)
@@ -473,6 +576,68 @@ class TrackControllerImpl(TrackControllerProtocol):
         )
         self._pendingTemplate = TemplateDecision(TemplateCommandKind.KEEP)
         return searchPlan
+
+    def _erpDirectViews(
+        self,
+        frame: FramePacket,
+        center,
+        viewIdStart: int,
+    ) -> tuple[PlannedView, ...]:
+        current = self._currentBox
+        if current is None:
+            return ()
+        frameHeight, frameWidth = frame.rgb.shape[:2]
+        centerX, centerY = sphericalPointToErpPixel(center, frameWidth, frameHeight)
+        triggerScale = (
+            2.0
+            if self._experimentVariant in {"erp_crop_2x_strict", "erp_crop_4x_relaxed"}
+            else 1.25
+        )
+        trigger = _centeredBox(centerX, centerY, current, triggerScale)
+        if not _insideFrame(trigger, frameWidth, frameHeight):
+            return ()
+        scales = (
+            (2.0, 3.0)
+            if self._experimentVariant == "erp_crop_2x_3x_best"
+            else (4.0,)
+            if self._experimentVariant == "erp_crop_4x_relaxed"
+            else (2.0,)
+        )
+        planned = []
+        for index, scale in enumerate(scales):
+            requested = _centeredBox(centerX, centerY, current, scale)
+            clipped = _integerClippedBox(requested, frameWidth, frameHeight)
+            if clipped is None:
+                return ()
+            bfov = BFoV(
+                center=erpPixelToSphericalPoint(
+                    clipped.xPx + clipped.widthPx / 2.0,
+                    clipped.yPx + clipped.heightPx / 2.0,
+                    frameWidth,
+                    frameHeight,
+                ),
+                horizontalFovRad=min(
+                    pi - 1e-6,
+                    max(1e-6, 2.0 * pi * clipped.widthPx / frameWidth),
+                ),
+                verticalFovRad=min(
+                    pi - 1e-6,
+                    max(1e-6, pi * clipped.heightPx / frameHeight),
+                ),
+            )
+            planned.append(
+                PlannedView(
+                    spec=ViewSpec(
+                        viewId=viewIdStart + index,
+                        bfov=bfov,
+                        outputWidthPx=self._geometryConfig.viewWidthPx,
+                        outputHeightPx=self._geometryConfig.viewHeightPx,
+                        erpCrop=clipped,
+                    ),
+                    role=f"round2_erp_direct_{int(scale)}x",
+                )
+            )
+        return tuple(planned)
 
     def _shouldEscalate(
         self,
@@ -704,6 +869,51 @@ def _aggregateAdapter(observation):
         supported=observation.supported,
         clusterCount=observation.clusterCount,
         agreementScore=observation.agreementScore,
+    )
+
+
+def _centeredBox(
+    centerX: float,
+    centerY: float,
+    reference: BBoxXYWH,
+    scale: float,
+) -> BBoxXYWH:
+    width = reference.widthPx * scale
+    height = reference.heightPx * scale
+    return BBoxXYWH(
+        xPx=centerX - width / 2.0,
+        yPx=centerY - height / 2.0,
+        widthPx=width,
+        heightPx=height,
+    )
+
+
+def _insideFrame(box: BBoxXYWH, frameWidth: int, frameHeight: int) -> bool:
+    tolerance = 1e-6
+    return (
+        box.xPx >= -tolerance
+        and box.yPx >= -tolerance
+        and box.xPx + box.widthPx <= frameWidth + tolerance
+        and box.yPx + box.heightPx <= frameHeight + tolerance
+    )
+
+
+def _integerClippedBox(
+    box: BBoxXYWH,
+    frameWidth: int,
+    frameHeight: int,
+) -> BBoxXYWH | None:
+    x0 = max(0, floor(box.xPx))
+    y0 = max(0, floor(box.yPx))
+    x1 = min(frameWidth, ceil(box.xPx + box.widthPx))
+    y1 = min(frameHeight, ceil(box.yPx + box.heightPx))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return BBoxXYWH(
+        xPx=float(x0),
+        yPx=float(y0),
+        widthPx=float(x1 - x0),
+        heightPx=float(y1 - y0),
     )
 
 

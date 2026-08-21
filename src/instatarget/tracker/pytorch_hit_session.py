@@ -87,6 +87,17 @@ class PyTorchHiTSession:
         patch = _sampleTarget(rgb, bbox, _TEMPLATE_FACTOR, _TEMPLATE_SIZE)
         return self._preprocess(patch)
 
+    def encodeTemplateDevice(self, deviceRgb: Any, bbox: BBoxXYWH) -> object:
+        self._requireOpen()
+        tensor = self._validateDeviceRgb(deviceRgb)
+        return _sampleTargetDevice(
+            tensor,
+            bbox,
+            _TEMPLATE_FACTOR,
+            _TEMPLATE_SIZE,
+            self._torch,
+        ).unsqueeze(0)
+
     def infer(
         self,
         rgb: NDArray[np.uint8],
@@ -225,6 +236,110 @@ class PyTorchHiTSession:
             )
         )
 
+    def inferDeviceBatch(
+        self,
+        deviceRgbs: Sequence[Any],
+        imageSizes: Sequence[tuple[int, int]],
+        templateFeatures: Sequence[object],
+    ) -> tuple[HiTPrediction, ...]:
+        """Infer directly from normalized GPU tensors produced by GPU Geometry."""
+        self._requireOpen()
+        if not deviceRgbs:
+            return ()
+        if len(deviceRgbs) != len(imageSizes):
+            raise ProtocolError("device RGBs and image sizes must have equal lengths")
+        if not templateFeatures:
+            raise ProtocolError("HiT device inference requires at least one template")
+        template = templateFeatures[-1]
+        if not self._torch.is_tensor(template) or template.ndim != 4 or template.shape[0] != 1:
+            raise ProtocolError("HiT device template must have shape [1,C,H,W]")
+        tensors = tuple(self._validateDeviceRgb(item) for item in deviceRgbs)
+        batchSize = len(tensors)
+        search = self._torch.stack(tensors, dim=0)
+        batchTemplate = template.expand(batchSize, -1, -1, -1)
+        if self._channelsLast:
+            search = search.contiguous(memory_format=self._torch.channels_last)
+            batchTemplate = batchTemplate.contiguous(memory_format=self._torch.channels_last)
+        try:
+            output, cudaForwardNs = self._forward(
+                search, batchTemplate, useFp16=self._precision == "fp16"
+            )
+        except self._torch.cuda.OutOfMemoryError as error:
+            self._oomCount += 1
+            self._lastProfile = self._profileSnapshot(
+                preprocessNs=0,
+                hostToDeviceNs=0,
+                cudaForwardNs=0,
+                batchSize=batchSize,
+                fp16Fallback=False,
+            )
+            raise ModelError(f"HiT CUDA out of memory for device batch size {batchSize}") from error
+        outputsInvalid = not _outputsAreFinite(output, self._torch)
+        if self._precision == "fp16" and outputsInvalid:
+            self._fp16FallbackCount += 1
+            output, fallbackForwardNs = self._forward(search, batchTemplate, useFp16=False)
+            cudaForwardNs += fallbackForwardNs
+            if not _outputsAreFinite(output, self._torch):
+                raise ModelError("HiT FP32 fallback returned non-finite outputs")
+        elif outputsInvalid:
+            raise ModelError("HiT device inference returned non-finite outputs")
+        self._lastProfile = self._profileSnapshot(
+            preprocessNs=0,
+            hostToDeviceNs=0,
+            cudaForwardNs=cudaForwardNs,
+            batchSize=batchSize,
+            fp16Fallback=bool(self._precision == "fp16" and outputsInvalid),
+        )
+        self._lastProfile["deviceInput"] = True
+        boxes = output["predBoxes"]
+        if boxes.numel() == 0 or boxes.shape[0] != batchSize:
+            raise ModelError("HiT returned an invalid device prediction batch")
+        boxRows = boxes.reshape(batchSize, -1, 4).float().mean(dim=1).tolist()
+        certainties = _heatmapCertainties(
+            (output["cornerHeatmapTl"], output["cornerHeatmapBr"]),
+            self._torch,
+            batchSize,
+        )
+        presenceLogits = output["presenceLogit"].float().reshape(-1).tolist()
+        qualityLogits = output["qualityLogit"].float().reshape(-1).tolist()
+        presenceProbabilities = output["presenceProbability"].float().reshape(-1).tolist()
+        qualityProbabilities = output["qualityProbability"].float().reshape(-1).tolist()
+        return tuple(
+            HiTPrediction(
+                bbox=_normalizedBoxToPixels(
+                    *boxRow,
+                    imageWidth=size[0],
+                    imageHeight=size[1],
+                ),
+                modelScore=float(presenceProbability * qualityProbability),
+                appearanceScore=float(presenceProbability * qualityProbability),
+                presenceLogit=presenceLogit,
+                qualityLogit=qualityLogit,
+                presenceProbability=presenceProbability,
+                qualityProbability=qualityProbability,
+                predictedIoU=qualityProbability,
+                cornerScore=certainty,
+            )
+            for (
+                boxRow,
+                certainty,
+                presenceLogit,
+                qualityLogit,
+                presenceProbability,
+                qualityProbability,
+                size,
+            ) in zip(
+                boxRows,
+                certainties,
+                presenceLogits,
+                qualityLogits,
+                presenceProbabilities,
+                qualityProbabilities,
+                imageSizes,
+                strict=True,
+            )
+        )
+
     def close(self) -> None:
         if self._closed:
             return
@@ -234,7 +349,12 @@ class PyTorchHiTSession:
         self._gpuBuffers.clear()
         self._closed = True
         self._torch.backends.cudnn.benchmark = self._previousCudnnBenchmark
-        self._torch.cuda.empty_cache()
+        try:
+            self._torch.cuda.empty_cache()
+        except RuntimeError:
+            # A prior asynchronous CUDA failure can poison cache cleanup. Closing must not mask
+            # the original inference exception or abort interpreter shutdown.
+            pass
 
     def _loadModel(self) -> Any:
         _activateVendorTree(self._hitRoot)
@@ -277,6 +397,27 @@ class PyTorchHiTSession:
     def _preprocess(self, rgb: NDArray[np.uint8]) -> Any:
         return self._preprocessBatch(np.ascontiguousarray(rgb)[None, ...])[0]
 
+    def _validateDeviceRgb(self, value: Any) -> Any:
+        if not self._torch.is_tensor(value):
+            raise ProtocolError("HiT device input must be a torch tensor")
+        if not _devicesMatch(value.device, self._device, self._torch):
+            raise ProtocolError(
+                f"HiT device input must be on {self._device}, actual={value.device}"
+            )
+        if value.ndim != 3 or tuple(value.shape[:1]) != (3,):
+            raise ProtocolError(
+                f"HiT device input must have shape [3,H,W], actual={tuple(value.shape)}"
+            )
+        if value.shape[1] != _SEARCH_SIZE or value.shape[2] != _SEARCH_SIZE:
+            raise ProtocolError(
+                f"HiT device input must be {_SEARCH_SIZE}x{_SEARCH_SIZE}, "
+                f"actual={tuple(value.shape)}"
+            )
+        if value.dtype != self._torch.float32:
+            raise ProtocolError(f"HiT device input must be float32, actual={value.dtype}")
+        if not bool(self._torch.isfinite(value).all()):
+            raise ProtocolError("HiT device input contains non-finite values")
+        return value
     def _resizeBatch(self, rgbs: Sequence[NDArray[np.uint8]]) -> NDArray[np.uint8]:
         shape = (len(rgbs), _SEARCH_SIZE, _SEARCH_SIZE, 3)
         if self._reuseBuffers:
@@ -385,6 +526,18 @@ class PyTorchHiTSession:
             raise ProtocolError("HiT session is closed")
 
 
+def _devicesMatch(actual: Any, expected: Any, torchModule: Any) -> bool:
+    """Compare devices while treating ``cuda`` as the current CUDA device."""
+    if actual.type != expected.type:
+        return False
+    if actual.type != "cuda":
+        return actual == expected
+    currentIndex = int(torchModule.cuda.current_device())
+    actualIndex = currentIndex if actual.index is None else int(actual.index)
+    expectedIndex = currentIndex if expected.index is None else int(expected.index)
+    return actualIndex == expectedIndex
+
+
 def _importTorch() -> ModuleType:
     try:
         import torch
@@ -444,6 +597,36 @@ def _sampleTarget(
     crop = rgb[y1 + top : y2 - bottom, x1 + left : x2 - right]
     padded = cv2.copyMakeBorder(crop, top, bottom, left, right, cv2.BORDER_CONSTANT)
     return np.ascontiguousarray(cv2.resize(padded, (outputSize, outputSize)))
+
+
+def _sampleTargetDevice(
+    rgb: Any,
+    bbox: BBoxXYWH,
+    factor: float,
+    outputSize: int,
+    torch: ModuleType,
+) -> Any:
+    """Crop a normalized [C,H,W] tensor without moving image data to the host."""
+    import torch.nn.functional as functional
+
+    height, width = int(rgb.shape[1]), int(rgb.shape[2])
+    cropSize = max(1, int(math.ceil(math.sqrt(bbox.widthPx * bbox.heightPx) * factor)))
+    x1 = int(round(bbox.xPx + 0.5 * bbox.widthPx - 0.5 * cropSize))
+    y1 = int(round(bbox.yPx + 0.5 * bbox.heightPx - 0.5 * cropSize))
+    x2, y2 = x1 + cropSize, y1 + cropSize
+    left, right = max(0, -x1), max(x2 - width, 0)
+    top, bottom = max(0, -y1), max(y2 - height, 0)
+    clipped = rgb[:, max(0, y1) : min(height, y2), max(0, x1) : min(width, x2)]
+    if clipped.numel() == 0:
+        raise ProtocolError("HiT device template crop has no pixels")
+    if left or right or top or bottom:
+        clipped = functional.pad(clipped.unsqueeze(0), (left, right, top, bottom)).squeeze(0)
+    return functional.interpolate(
+        clipped.unsqueeze(0),
+        size=(outputSize, outputSize),
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze(0).to(dtype=torch.float32)
 
 
 def _resizeRgb(rgb: NDArray[np.uint8], size: int) -> NDArray[np.uint8]:

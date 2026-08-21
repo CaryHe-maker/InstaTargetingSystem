@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import queue
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from time import perf_counter_ns
@@ -34,7 +36,7 @@ from instatarget.core.types import (
     MotionState3D,
     ProjectedObservation,
 )
-from instatarget.geometry import SphericalGeometryImpl
+from instatarget.geometry import GpuGeometryImpl, SphericalGeometryImpl
 from instatarget.io.result_sink import FileResultSink
 from instatarget.tracker import HiTBackend, PyTorchHiTSession, TrackerBackendImpl
 
@@ -55,6 +57,79 @@ class RuntimeBundle:
     scoreCalibration: ScoreCalibration
     recorder: VisualizationRecorder | None = None
     speculativePipeline: SpeculativePipeline | None = None
+    experimentVariant: str = "shared_control_production"
+
+
+class _PrefetchReader:
+    """Small decode worker used only by the isolated pipeline experiment."""
+
+    _END = object()
+
+    def __init__(self, source: FrameSourceProtocol) -> None:
+        self._source = source
+        self._queue: queue.Queue[object] = queue.Queue(maxsize=2)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._error: BaseException | None = None
+        self._decodeNs: dict[int, int] = {}
+        self._readyNs: dict[int, int] = {}
+        self._lastProfile: dict[str, int | bool] = {}
+
+    @property
+    def lastProfile(self) -> dict[str, int | bool]:
+        return dict(self._lastProfile)
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("prefetch reader already started")
+        self._thread = threading.Thread(target=self._worker, name="instatarget-decode", daemon=True)
+        self._thread.start()
+
+    def read(self) -> FramePacket | None:
+        waitStartedNs = perf_counter_ns()
+        item = self._queue.get()
+        waitNs = perf_counter_ns() - waitStartedNs
+        if isinstance(item, BaseException):
+            raise item
+        if item is self._END:
+            return None
+        if not isinstance(item, FramePacket):
+            raise RuntimeError("prefetch reader returned an invalid item")
+        frameIndex = int(item.frameIndex)
+        self._lastProfile = {
+            "pipelinePrefetchEnabled": True,
+            "pipelineDecodeNs": int(self._decodeNs.pop(frameIndex, 0)),
+            "pipelineQueueWaitNs": int(waitNs),
+            "pipelineReadyLeadNs": int(max(0, perf_counter_ns() - self._readyNs.pop(frameIndex, 0))),
+            "pipelineFrameIndex": frameIndex,
+        }
+        return item
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+
+    def _worker(self) -> None:
+        try:
+            while not self._stop.is_set():
+                decodeStartedNs = perf_counter_ns()
+                frame = self._source.read()
+                decodeNs = perf_counter_ns() - decodeStartedNs
+                if frame is not None:
+                    frameIndex = int(frame.frameIndex)
+                    self._decodeNs[frameIndex] = int(decodeNs)
+                    self._readyNs[frameIndex] = perf_counter_ns()
+                self._queue.put(self._END if frame is None else frame)
+                if frame is None:
+                    return
+        except BaseException as error:
+            self._error = error
+            try:
+                self._queue.put(error, timeout=1.0)
+            except queue.Full:
+                pass
 
 
 def buildRuntime(
@@ -62,14 +137,27 @@ def buildRuntime(
     *,
     hitSessionFactory: Callable[[ModelConfig], HiTSession] | None = None,
     allowUncalibratedScoring: bool = False,
+    experimentVariant: str = "shared_control_production",
 ) -> RuntimeBundle:
     sessionFactory = hitSessionFactory or PyTorchHiTSession
-    geometry = SphericalGeometryImpl(
-        boundarySamplesPerEdge=config.geometry.boundarySamplesPerEdge,
-    )
+    if experimentVariant in {"gpu_geometry_only", "pipeline_gpu_geometry"}:
+        geometry = GpuGeometryImpl(
+            boundarySamplesPerEdge=config.geometry.boundarySamplesPerEdge,
+        )
+    else:
+        geometry = SphericalGeometryImpl(
+            boundarySamplesPerEdge=config.geometry.boundarySamplesPerEdge,
+        )
     rgbSession = sessionFactory(config.model)
-    backend = TrackerBackendImpl(HiTBackend(rgbSession))
-    controller = TrackControllerImpl(geometry, config)
+    backend = TrackerBackendImpl(
+        HiTBackend(rgbSession),
+        useDynamicTemplates=experimentVariant in {"template_strict", "template_relaxed"},
+    )
+    controller = TrackControllerImpl(
+        geometry,
+        config,
+        experimentVariant=experimentVariant,
+    )
     sink = FileResultSink()
     recorder = None
     if config.visualization.enabled:
@@ -97,6 +185,7 @@ def buildRuntime(
         scoreCalibration=scoreCalibration,
         recorder=recorder,
         speculativePipeline=speculativePipeline,
+        experimentVariant=experimentVariant,
     )
 
 
@@ -113,6 +202,7 @@ def runTracking(
     processingTimer: TimeCounter | None = None,
     profiler: RuntimeProfiler | None = None,
     scoreCalibration: ScoreCalibration,
+    experimentVariant: str = "shared_control_production",
 ) -> int:
     """Run the sequential tracking pipeline and publish one result per frame."""
     try:
@@ -126,6 +216,7 @@ def runTracking(
                 initPlan = controller.buildInitialization(frame0, initialBox)
             with _profile(profiler, "crop"):
                 templateView = geometry.cropViews(frame0, [initPlan.templateView])[0]
+            _recordGeometryProfile(profiler, geometry)
             backend.initialize(templateView, initPlan.templateBox)
             initialResult = controller.commitInitialization(initPlan)
         finally:
@@ -138,95 +229,133 @@ def runTracking(
         if recorder is not None:
             recorder.recordLocalRgb(frame0, [templateView])
 
-        while True:
-            iterationStartedNs = (
-                perf_counter_ns() if profiler is not None and profiler.enabled else None
-            )
-            _startProcessing(processingTimer)
-            try:
-                decodeStartedNs = _profileNow(profiler)
-                frame = source.read()
-                if frame is not None:
-                    _startProfileFrame(profiler, int(frame.frameIndex), decodeStartedNs)
-                    with _profile(profiler, "controller"):
-                        plan = controller.beginFrame(frame)
-                    batchSizes: list[int] = []
-                    visualizationBatches: list[
-                        tuple[
-                            tuple[LocalView, ...],
-                            tuple[LocalObservation, ...],
-                            tuple[ProjectedObservation, ...],
-                        ]
-                    ] = []
-                    while True:
-                        with _profile(profiler, "crop"):
-                            views = tuple(geometry.cropViews(frame, plan.views))
-                        batchSizes.append(len(views))
-                        with _profile(profiler, "backend"):
-                            rawObservations = tuple(backend.infer(views, plan.templateCommand))
-                        _recordBackendProfile(profiler, backend)
-                        with _profile(profiler, "calibration"):
-                            observations = calibrateLocalAppearanceProbabilities(
-                                rawObservations,
-                                scoreCalibration,
-                            )
-                        with _profile(profiler, "projection"):
-                            projected = tuple(
-                                _projectObservation(
-                                    frame=frame,
-                                    view=view,
-                                    observation=observation,
-                                    predictedMotion=plan.predictedMotion,
-                                    geometry=geometry,
-                                    scoreCalibration=scoreCalibration,
-                                )
-                                for view, observation in zip(views, observations, strict=True)
-                            )
-                        visualizationBatches.append((views, observations, projected))
+        pipelineReader = (
+            _PrefetchReader(source)
+            if experimentVariant in {"pipeline_only", "pipeline_gpu_geometry"}
+            else None
+        )
+        if pipelineReader is not None:
+            pipelineReader.start()
+        try:
+            while True:
+                iterationStartedNs = (
+                    perf_counter_ns() if profiler is not None and profiler.enabled else None
+                )
+                _startProcessing(processingTimer)
+                frame = None
+                try:
+                    decodeStartedNs = _profileNow(profiler)
+                    frame = pipelineReader.read() if pipelineReader is not None else source.read()
+                    if frame is not None:
+                        _startProfileFrame(profiler, int(frame.frameIndex), decodeStartedNs)
+                        if pipelineReader is not None:
+                            _recordPipelineProfile(profiler, pipelineReader, controller)
                         with _profile(profiler, "controller"):
-                            step = controller.consume(plan, projected)
-                        if isinstance(step, MoreViewsRequired):
-                            plan = step.plan
-                            continue
-                        result = step.result
-                        break
-            finally:
-                _stopProcessing(processingTimer)
-            if frame is None:
-                break
-            _finishProfileFrame(
-                profiler,
-                iterationStartedNs,
-                batchSizes=batchSizes,
-                forwardCount=len(batchSizes),
-            )
-            if recorder is not None:
-                for views, observations, projected in visualizationBatches:
-                    recorder.recordLocalRgb(frame, views)
-                    recorder.recordBackendBoxes(frame, views, observations)
-                    recorder.recordGeometryBoxes(frame, projected)
-            sink.write(result)
-            if resultRecorder is not None:
-                stateObservation = controller.lastStateObservation
-                stateScore = (
-                    stateObservation.stateScore
-                    if stateObservation is not None
-                    and stateObservation.frameIndex == frame.frameIndex
-                    else None
+                            plan = controller.beginFrame(frame)
+                        batchSizes: list[int] = []
+                        visualizationBatches: list[
+                            tuple[
+                                tuple[LocalView, ...],
+                                tuple[LocalObservation, ...],
+                                tuple[ProjectedObservation, ...],
+                            ]
+                        ] = []
+                        while True:
+                            with _profile(profiler, "crop"):
+                                views = tuple(geometry.cropViews(frame, plan.views))
+                            _recordGeometryProfile(profiler, geometry)
+                            batchSizes.append(len(views))
+                            with _profile(profiler, "backend"):
+                                rawObservations = tuple(
+                                    backend.infer(views, plan.templateCommand)
+                                )
+                                if experimentVariant == "iou_refine_head":
+                                    from instatarget.tracker.observation import refineObservations
+
+                                    rawObservations = refineObservations(rawObservations, views)
+                                if recorder is not None and hasattr(
+                                    recorder, "setActiveTemplateFrame"
+                                ):
+                                    recorder.setActiveTemplateFrame(  # type: ignore[attr-defined]
+                                        int(frame.frameIndex),
+                                        getattr(backend, "activeTemplateFrameIndex", 0),
+                                    )
+                            _recordBackendProfile(profiler, backend)
+                            with _profile(profiler, "calibration"):
+                                observations = calibrateLocalAppearanceProbabilities(
+                                    rawObservations,
+                                    scoreCalibration,
+                                )
+                            with _profile(profiler, "projection"):
+                                projected = tuple(
+                                    _projectObservation(
+                                        frame=frame,
+                                        view=view,
+                                        observation=observation,
+                                        predictedMotion=plan.predictedMotion,
+                                        geometry=geometry,
+                                        scoreCalibration=scoreCalibration,
+                                    )
+                                    for view, observation in zip(
+                                        views, observations, strict=True
+                                    )
+                                )
+                            visualizationBatches.append((views, observations, projected))
+                            with _profile(profiler, "controller"):
+                                step = controller.consume(plan, projected)
+                            if isinstance(step, MoreViewsRequired):
+                                _recordPipelineProfile(profiler, pipelineReader, controller)
+                                plan = step.plan
+                                continue
+                            result = step.result
+                            _recordPipelineProfile(profiler, pipelineReader, controller)
+                            break
+                finally:
+                    _stopProcessing(processingTimer)
+                if frame is None:
+                    break
+                _finishProfileFrame(
+                    profiler,
+                    iterationStartedNs,
+                    batchSizes=batchSizes,
+                    forwardCount=len(batchSizes),
                 )
-                roundCount = (
-                    stateObservation.attemptIndex + 1
-                    if stateObservation is not None
-                    and stateObservation.frameIndex == frame.frameIndex
-                    else None
-                )
-                resultRecorder.record(
-                    frame,
-                    result,
-                    stateScore=stateScore,
-                    roundCount=roundCount,
-                )
-            resultCount += 1
+                if recorder is not None:
+                    for views, observations, projected in visualizationBatches:
+                        recorder.recordLocalRgb(frame, views)
+                        recorder.recordBackendBoxes(frame, views, observations)
+                        recorder.recordGeometryBoxes(frame, projected)
+                sink.write(result)
+                if resultRecorder is not None:
+                    stateObservation = controller.lastStateObservation
+                    stateScore = (
+                        stateObservation.stateScore
+                        if stateObservation is not None
+                        and stateObservation.frameIndex == frame.frameIndex
+                        else None
+                    )
+                    roundCount = (
+                        stateObservation.attemptIndex + 1
+                        if stateObservation is not None
+                        and stateObservation.frameIndex == frame.frameIndex
+                        else None
+                    )
+                    resultRecorder.record(
+                        frame,
+                        result,
+                        stateScore=stateScore,
+                        roundCount=roundCount,
+                    )
+                releaseFrame = getattr(geometry, "releaseFrame", None)
+                if callable(releaseFrame):
+                    releaseFrame()
+                resultCount += 1
+        finally:
+            if pipelineReader is not None:
+                pipelineReader.close()
+            releaseFrame = getattr(geometry, "releaseFrame", None)
+            if callable(releaseFrame):
+                releaseFrame()
         return resultCount
     except Exception:
         if hasattr(sink, "close"):
@@ -396,6 +525,44 @@ def _recordBackendProfile(
             if isinstance(value, (bool, int, float, str))
         },
     )
+
+
+def _recordGeometryProfile(
+    profiler: RuntimeProfiler | None,
+    geometry: SphericalGeometry,
+) -> None:
+    if profiler is None or not profiler.enabled:
+        return
+    values = getattr(geometry, "lastProfile", {})
+    if not isinstance(values, dict) or not values:
+        return
+    for name in ("frameToDevice", "gpuCrop", "gpuGeometryTotal"):
+        value = values.get(name)
+        if isinstance(value, (int, float)):
+            profiler.record(name, int(value))
+    profiler.appendFrameMetadata(
+        "geometryBatches",
+        {
+            name: value
+            for name, value in values.items()
+            if isinstance(value, (bool, int, float, str))
+        },
+    )
+
+
+def _recordPipelineProfile(
+    profiler: RuntimeProfiler | None,
+    pipelineReader: _PrefetchReader | None,
+    controller: TrackControllerImpl,
+) -> None:
+    if profiler is None or not profiler.enabled or pipelineReader is None:
+        return
+    readerValues = pipelineReader.lastProfile
+    for source in (readerValues, controller.lastPipelineProfile):
+        for name, value in source.items():
+            if name.endswith("Ns") and isinstance(value, (int, float)):
+                profiler.record(name, int(value))
+        profiler.appendFrameMetadata("pipelineBatches", source)
 
 
 __all__ = [

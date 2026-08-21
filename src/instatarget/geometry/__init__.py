@@ -23,9 +23,11 @@ from instatarget.geometry.seam import (
     wrapPixelX,
 )
 from instatarget.geometry.spherical_geometry import SphericalGeometryImpl
+from instatarget.geometry.gpu_geometry import GpuGeometryImpl
 
 __all__ = [
     "BfovProjector",
+    "GpuGeometryImpl",
     "SphericalGeometryImpl",
     "angleToPixelOffsetPx",
     "cameraBasis",

@@ -32,6 +32,26 @@ from instatarget.training.dataset import (
     loadManifest,
 )
 
+EXPERIMENT_VARIANTS = (
+    "shared_control_production",
+    "erp_crop_2x_strict",
+    "erp_crop_2x_relaxed",
+    "erp_crop_4x_relaxed",
+    "erp_crop_2x_3x_best",
+    "template_strict",
+    "template_relaxed",
+    "fusor_weighted_box",
+    "fusor_robust_spherical_consensus",
+    "fov_adaptive_both_rounds",
+    "fov_adaptive_round1_only",
+    "iou_refine_head",
+    "distractor_identity_verifier",
+    "local_global_recovery_verifier",
+    "pipeline_only",
+    "gpu_geometry_only",
+    "pipeline_gpu_geometry",
+)
+
 
 class ManifestVideoSource:
     def __init__(self, records: tuple[ManifestRecord, ...], maxFrames: int | None) -> None:
@@ -110,9 +130,13 @@ class CandidateRecorder:
         self._local: dict[tuple[int, int], Any] = {}
         self._views: dict[tuple[int, int], Any] = {}
         self._rounds: dict[tuple[int, int], int] = {}
+        self._activeTemplateFrameIndex = 0
         self.viewCounts: Counter[int] = Counter()
         self.forwardCounts: Counter[int] = Counter()
         self.rows: list[dict[str, Any]] = []
+
+    def setActiveTemplateFrame(self, frameIndex: int, templateFrameIndex: int) -> None:
+        self._activeTemplateFrameIndex = int(templateFrameIndex)
 
     def recordLocalRgb(self, frame: FramePacket, views: Any) -> None:
         if self._visualRecorder is not None:
@@ -140,16 +164,19 @@ class CandidateRecorder:
             roundIndex = self._rounds.pop((int(frame.frameIndex), observation.viewId))
             targetLocalBox = None
             if record.visible:
-                targetLocalBox = (
-                    _bfovToNormalizedLocal(record.bfov, spec)
-                    if record.bfov is not None
-                    else _erpBoxToNormalizedLocal(
-                        record.bbox,
-                        spec,
-                        record.width,
-                        record.height,
+                if spec.erpCrop is not None:
+                    targetLocalBox = _directErpTargetLocalBox(record.bbox, spec)
+                else:
+                    targetLocalBox = (
+                        _bfovToNormalizedLocal(record.bfov, spec)
+                        if record.bfov is not None
+                        else _erpBoxToNormalizedLocal(
+                            record.bbox,
+                            spec,
+                            record.width,
+                            record.height,
+                        )
                     )
-                )
             iou = (
                 circularBBoxIoU(observation.bbox, record.bbox, record.width)
                 if record.visible and record.bbox is not None
@@ -209,10 +236,14 @@ class CandidateRecorder:
                     "normalizedRadius": observation.normalizedRadius,
                     "edgeMargin": observation.edgeMargin,
                     "envelopeInflation": observation.envelopeInflation,
+                    "templateFrameIndex": self._activeTemplateFrameIndex,
+                    "templateIsAnchor": bool(self._activeTemplateFrameIndex == 0),
                     "viewYawDeg": float(np.degrees(spec.bfov.center.yawRad)),
                     "viewPitchDeg": float(np.degrees(spec.bfov.center.pitchRad)),
                     "viewHorizontalFovDeg": float(np.degrees(spec.bfov.horizontalFovRad)),
                     "viewVerticalFovDeg": float(np.degrees(spec.bfov.verticalFovRad)),
+                    "directErpCrop": spec.erpCrop is not None,
+                    "erpCrop": asdict(spec.erpCrop) if spec.erpCrop is not None else None,
                     "targetPitchDeg": (
                         float(np.degrees(record.bfov.center.pitchRad))
                         if record.bfov is not None
@@ -241,6 +272,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--sequence", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--variant", choices=EXPERIMENT_VARIANTS, default="shared_control_production")
+    parser.add_argument(
+        "--fusion-box-mode",
+        choices=("reference_adaptive", "best_source", "weighted_box", "robust_spherical_consensus"),
+    )
     parser.add_argument(
         "--visual-output-root",
         type=Path,
@@ -266,6 +302,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use raw Stage 3 presence*quality for pre-calibration E01 only.",
     )
+    parser.add_argument("--quiet", action="store_true", help="suppress the full JSON summary")
     return parser
 
 
@@ -314,6 +351,14 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--max-frames must be at least 2")
 
     appConfig = loadConfig(args.config)
+    fusionMode = args.fusion_box_mode
+    if fusionMode is None:
+        fusionMode = {
+            "fusor_weighted_box": "weighted_box",
+            "fusor_robust_spherical_consensus": "robust_spherical_consensus",
+        }.get(args.variant)
+    if fusionMode is not None:
+        appConfig = replace(appConfig, evaluator=replace(appConfig.evaluator, fusionBoxMode=fusionMode))
     appConfig = replace(
         appConfig,
         model=replace(
@@ -354,6 +399,7 @@ def main(argv: list[str] | None = None) -> int:
     runtime = buildRuntime(
         appConfig,
         allowUncalibratedScoring=args.uncalibrated_stage3,
+        experimentVariant=args.variant,
     )
     source.open("")
     try:
@@ -369,6 +415,7 @@ def main(argv: list[str] | None = None) -> int:
             processingTimer=timer,
             profiler=profiler,
             scoreCalibration=runtime.scoreCalibration,
+            experimentVariant=args.variant,
         )
         sink.finalize(count)
     finally:
@@ -387,6 +434,7 @@ def main(argv: list[str] | None = None) -> int:
         candidateMinScore=appConfig.tracking.candidateMinScore,
     )
     report["experiment"] = _experimentMetadata(args, appConfig)
+    report["experiment"].update(_variantMetadata(args.variant, appConfig))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix(args.output.suffix + ".tmp")
     temporary.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
@@ -420,7 +468,8 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     timingTemporary.replace(timings)
-    print(json.dumps(report["summary"], indent=2))
+    if not args.quiet:
+        print(json.dumps(report["summary"], indent=2))
     return 0
 
 
@@ -589,6 +638,7 @@ def _summarize(
         ),
         "coverageStrata": _coverageStrata(frameRows),
         "geometryEvidence": _geometryEvidence(candidates),
+        "templateEvidence": _templateEvidence(candidates),
     }
     return {
         "format": "instatarget.manifest-controller-eval.v1",
@@ -752,6 +802,24 @@ def _geometryEvidence(candidates: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _templateEvidence(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    visible = [row for row in candidates if row.get("targetPresent")]
+    anchor = [row for row in visible if int(row.get("templateFrameIndex", 0)) == 0]
+    non_anchor = [row for row in visible if int(row.get("templateFrameIndex", 0)) != 0]
+    return {
+        "visibleSampleCount": len(visible),
+        "anchorSampleCount": len(anchor),
+        "nonAnchorSampleCount": len(non_anchor),
+        "anchorMeanIoU": _mean([float(row["circularErpIoU"]) for row in anchor]),
+        "nonAnchorMeanIoU": _mean([float(row["circularErpIoU"]) for row in non_anchor]),
+        "nonAnchorSuccessAt0.5": float(
+            np.mean([float(row["circularErpIoU"]) >= 0.5 for row in non_anchor])
+        )
+        if non_anchor
+        else 0.0,
+    }
+
+
 def _mean(values: list[float]) -> float:
     return float(np.mean(np.asarray(values, dtype=np.float64))) if values else 0.0
 
@@ -801,6 +869,30 @@ def _fovBand(horizontalFovDeg: float) -> str:
     if horizontalFovDeg <= 75.0:
         return "medium"
     return "wide"
+
+
+def _directErpTargetLocalBox(
+    bbox: BBoxXYWH | None,
+    spec: Any,
+) -> np.ndarray | None:
+    crop = spec.erpCrop
+    if bbox is None or crop is None:
+        return None
+    x0 = max(bbox.xPx, crop.xPx)
+    y0 = max(bbox.yPx, crop.yPx)
+    x1 = min(bbox.xPx + bbox.widthPx, crop.xPx + crop.widthPx)
+    y1 = min(bbox.yPx + bbox.heightPx, crop.yPx + crop.heightPx)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return np.asarray(
+        (
+            ((x0 + x1) / 2.0 - crop.xPx) / crop.widthPx,
+            ((y0 + y1) / 2.0 - crop.yPx) / crop.heightPx,
+            (x1 - x0) / crop.widthPx,
+            (y1 - y0) / crop.heightPx,
+        ),
+        dtype=np.float32,
+    )
 
 
 def _runtimeProfileMetadata(frameRows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -865,6 +957,8 @@ def _experimentMetadata(args: argparse.Namespace, appConfig: Any) -> dict[str, A
             "channelsLast": bool(args.channels_last),
             "reuseBuffers": bool(args.reuse_buffers),
             "pinnedNonBlocking": bool(args.pinned_nonblocking),
+            "pipelineEnabled": bool(args.variant in {"pipeline_only", "pipeline_gpu_geometry"}),
+            "gpuGeometryEnabled": bool(args.variant in {"gpu_geometry_only", "pipeline_gpu_geometry"}),
         },
         "profilerEnabled": bool(args.profile),
         "artifacts": {
@@ -879,6 +973,36 @@ def _experimentMetadata(args: argparse.Namespace, appConfig: Any) -> dict[str, A
             "platform": platform.platform(),
             "gitCommit": _gitCommit(args.config.expanduser().resolve().parents[1]),
         },
+    }
+
+
+def _variantMetadata(variant: str, appConfig: Any) -> dict[str, Any]:
+    implemented = {
+        "shared_control_production": True,
+        "erp_crop_2x_strict": True,
+        "erp_crop_2x_relaxed": True,
+        "erp_crop_4x_relaxed": True,
+        "erp_crop_2x_3x_best": True,
+        "template_strict": True,
+        "template_relaxed": True,
+        "fusor_weighted_box": True,
+        "fusor_robust_spherical_consensus": True,
+        "fov_adaptive_both_rounds": True,
+        "fov_adaptive_round1_only": True,
+        "iou_refine_head": True,
+        "distractor_identity_verifier": True,
+        "local_global_recovery_verifier": True,
+        "pipeline_only": True,
+        "gpu_geometry_only": True,
+        "pipeline_gpu_geometry": True,
+    }.get(variant, False)
+    fallback = None if implemented else "isolated_production_fallback_pending_runtime_head"
+    return {
+        "variant": variant,
+        "variantImplemented": implemented,
+        "variantFallback": fallback,
+        "fusionBoxMode": appConfig.evaluator.fusionBoxMode,
+        "usesValidationTruthForControl": False,
     }
 
 
