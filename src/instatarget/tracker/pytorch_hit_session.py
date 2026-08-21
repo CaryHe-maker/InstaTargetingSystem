@@ -357,41 +357,14 @@ class PyTorchHiTSession:
             pass
 
     def _loadModel(self) -> Any:
-        _activateVendorTree(self._hitRoot)
-        try:
-            import lib.models.HiT.backbone as backboneModule
-            from lib.config.HiT.config import cfg, update_config_from_file
-            from lib.models.HiT import build_hit
-            from lib.models.HiT.levit_utils import replace_batchnorm
-
-            from instatarget.training.model import HiTTrainingModel
-        except Exception as error:
-            raise ModelError(
-                f"cannot import bundled HiT runtime from {self._hitRoot}: {error}"
-            ) from error
-
-        yamlPath = self._hitRoot / "configs" / "HiT_Small.yaml"
-        if not yamlPath.is_file():
-            raise ModelError(f"HiT-Small config does not exist: {yamlPath}")
-        update_config_from_file(str(yamlPath))
-        backboneModule.is_main_process = lambda: False
-        try:
-            model = build_hit(cfg)
-            checkpoint = _loadCheckpoint(self._torch, self._weights)
-            state = checkpoint.get("model") if isinstance(checkpoint, dict) else None
-            if not isinstance(state, dict):
-                raise ModelError("Stage 3 HiT checkpoint has no 'model' state")
-            runtimeModel = HiTTrainingModel(model)
-            runtimeModel.load_state_dict(state, strict=True)
-            replace_batchnorm(model.backbone.body)
-            runtimeModel = runtimeModel.to(self._device).eval()
-            if self._channelsLast:
-                runtimeModel = runtimeModel.to(memory_format=self._torch.channels_last)
-        except ModelError:
-            raise
-        except Exception as error:
-            raise ModelError(f"cannot construct HiT-Small from {self._weights}: {error}") from error
-
+        runtimeModel = _constructRuntimeModel(
+            self._torch,
+            weights=self._weights,
+            hitRoot=self._hitRoot,
+        )
+        runtimeModel = runtimeModel.to(self._device).eval()
+        if self._channelsLast:
+            runtimeModel = runtimeModel.to(memory_format=self._torch.channels_last)
         return runtimeModel
 
     def _preprocess(self, rgb: NDArray[np.uint8]) -> Any:
@@ -544,6 +517,72 @@ def _importTorch() -> ModuleType:
     except ImportError as error:
         raise ModelError("PyTorch HiT requires torch and torchvision") from error
     return torch
+
+
+def validateHiTCheckpoint(
+    weights: str | Path,
+    *,
+    hitRoot: str | Path | None = None,
+) -> int:
+    """Strictly load the production checkpoint into the bundled HiT model on CPU."""
+    torch = _importTorch()
+    model = _constructRuntimeModel(
+        torch,
+        weights=Path(weights).expanduser().resolve(),
+        hitRoot=_resolveHitRoot(hitRoot),
+        cpuOnly=True,
+    )
+    return sum(parameter.numel() for parameter in model.parameters())
+
+
+def _constructRuntimeModel(
+    torch: ModuleType,
+    *,
+    weights: Path,
+    hitRoot: Path,
+    cpuOnly: bool = False,
+) -> Any:
+    _activateVendorTree(hitRoot)
+    try:
+        import lib.models.HiT.backbone as backboneModule
+        from lib.config.HiT.config import cfg, update_config_from_file
+        from lib.models.HiT import build_hit
+        from lib.models.HiT.levit_utils import replace_batchnorm
+
+        from instatarget.training.model import HiTTrainingModel
+    except Exception as error:
+        raise ModelError(f"cannot import bundled HiT runtime from {hitRoot}: {error}") from error
+
+    yamlPath = hitRoot / "configs" / "HiT_Small.yaml"
+    if not yamlPath.is_file():
+        raise ModelError(f"HiT-Small config does not exist: {yamlPath}")
+    update_config_from_file(str(yamlPath))
+    backboneModule.is_main_process = lambda: False
+    try:
+        baseModel = _buildBaseModel(torch, build_hit, cfg, cpuOnly=cpuOnly)
+        checkpoint = _loadCheckpoint(torch, weights)
+        state = checkpoint.get("model") if isinstance(checkpoint, dict) else None
+        if not isinstance(state, dict):
+            raise ModelError("Stage 3 HiT checkpoint has no 'model' state")
+        runtimeModel = HiTTrainingModel(baseModel)
+        runtimeModel.load_state_dict(state, strict=True)
+        replace_batchnorm(baseModel.backbone.body)
+        return runtimeModel
+    except ModelError:
+        raise
+    except Exception as error:
+        raise ModelError(f"cannot construct HiT-Small from {weights}: {error}") from error
+
+
+def _buildBaseModel(torch: ModuleType, buildHit: Any, cfg: Any, *, cpuOnly: bool) -> Any:
+    if not cpuOnly:
+        return buildHit(cfg)
+    originalCuda = torch.Tensor.cuda
+    setattr(torch.Tensor, "cuda", lambda tensor, *args, **kwargs: tensor)
+    try:
+        return buildHit(cfg)
+    finally:
+        setattr(torch.Tensor, "cuda", originalCuda)
 
 
 def _resolveHitRoot(value: str | Path | None = None) -> Path:
@@ -703,4 +742,4 @@ def _envFlag(name: str) -> bool:
     return value in {"1", "true"}
 
 
-__all__ = ["PyTorchHiTSession"]
+__all__ = ["PyTorchHiTSession", "validateHiTCheckpoint"]
