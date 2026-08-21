@@ -36,6 +36,14 @@ class TrackerBackendImpl(TrackerBackendProtocol):
     def templateRevision(self) -> int:
         return self._templates.revision
 
+    @property
+    def lastProfile(self) -> dict[str, int | float | bool | str]:
+        return self._hitBackend.lastProfile
+
+    @property
+    def activeTemplateFrameIndex(self) -> int:
+        return self._templates.activeTemplateFrameIndex
+
     def initialize(self, template: LocalView, templateBox: BBoxXYWH) -> None:
         if self._closed:
             raise ProtocolError("tracker backend is closed")
@@ -43,7 +51,9 @@ class TrackerBackendImpl(TrackerBackendProtocol):
             raise ProtocolError("tracker backend is already initialized")
         self._templates.initialize(self._hitBackend, template, templateBox)
         self._initialized = True
-        self._previousViews = {template.spec.viewId: _copyView(template)}
+        self._previousViews = {
+            template.spec.viewId: _copyView(template)
+        }
         self._previousViewsFrameIndex = 0
 
     def infer(
@@ -108,14 +118,31 @@ class TrackerBackendImpl(TrackerBackendProtocol):
             raise ProtocolError("tracker backend has not been initialized")
         self._templates.apply(self._hitBackend, command, self._previousViews)
         snapshot = self._templates.snapshot()
+        templateFeatures = (snapshot.anchor.features,)
+        self._activeTemplateFrameIndex = (
+            int(snapshot.stable.frameIndex)
+            if snapshot.stable is not None
+            else int(snapshot.recent.frameIndex)
+            if snapshot.recent is not None
+            else int(snapshot.anchor.frameIndex)
+        )
         inferenceStartedNs = perf_counter_ns()
-        predictions = self._hitBackend.inferBatch(
-            tuple(view.rgb for view in views),
-            (snapshot.anchor.features,),
-        )
-        sharedInferenceNs = (
-            (perf_counter_ns() - inferenceStartedNs) // len(views) if views else 0
-        )
+        deviceViews = tuple(getattr(view, "deviceRgb", None) for view in views)
+        if all(item is not None for item in deviceViews):
+            predictions = self._hitBackend.inferDeviceBatch(
+                tuple(deviceViews),
+                tuple(
+                    (view.spec.outputWidthPx, view.spec.outputHeightPx)
+                    for view in views
+                ),
+                templateFeatures,
+            )
+        else:
+            predictions = self._hitBackend.inferBatch(
+                tuple(view.rgb for view in views),
+                templateFeatures,
+            )
+        sharedInferenceNs = (perf_counter_ns() - inferenceStartedNs) // len(views) if views else 0
         return tuple(
             buildRgbObservation(view, prediction, sharedInferenceNs)
             for view, prediction in zip(views, predictions, strict=True)
@@ -124,7 +151,10 @@ class TrackerBackendImpl(TrackerBackendProtocol):
     def _rememberViews(self, views: Sequence[LocalView], frameIndex: int) -> None:
         if not views:
             return
-        currentViews = {view.spec.viewId: _copyView(view) for view in views}
+        currentViews = {
+            view.spec.viewId: _copyView(view)
+            for view in views
+        }
         if self._previousViewsFrameIndex == frameIndex:
             self._previousViews.update(currentViews)
         else:
@@ -150,7 +180,11 @@ def _validateViewSequence(views: Sequence[LocalView]) -> None:
 def _copyView(view: LocalView) -> LocalView:
     rgb = view.rgb.copy()
     rgb.setflags(write=False)
-    return LocalView(spec=view.spec, rgb=rgb)
+    return LocalView(
+        spec=view.spec,
+        rgb=rgb,
+        deviceRgb=None,
+    )
 
 
 TrackerBackend = TrackerBackendImpl

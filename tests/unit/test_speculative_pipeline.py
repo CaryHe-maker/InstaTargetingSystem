@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 
 import numpy as np
 
@@ -292,6 +293,116 @@ class SpeculativePipelineTest(unittest.TestCase):
                 (round2[0].key, round2[0].key),
                 (round2[0].key, round2[0].key),
             )
+
+    def testSequenceFrameAgeAndDirectionConfidenceRollbackReasons(self) -> None:
+        cases = (
+            (
+                replace(_committed(), sequenceId=SequenceId("other")),
+                RollbackReason.SEQUENCE_MISMATCH,
+            ),
+            (
+                replace(_committed(), frameIndex=FrameIndex(0)),
+                RollbackReason.FRAME_AGE_MISMATCH,
+            ),
+        )
+        for committed, expected in cases:
+            with self.subTest(reason=expected):
+                pipeline = SpeculativePipeline(_config())
+                state = _createPending(pipeline)
+                decision = evaluateSpeculation(
+                    config=_config(),
+                    state=state,
+                    committedResult=committed,
+                    formalStateRevision=1,
+                    currentGeneration=state.generation,
+                    routedObservations=_routedStateOutput(state),
+                )
+                self.assertEqual(decision.rollbackReason, expected)
+
+        pipeline = SpeculativePipeline(_config(minimumDirectionConfidence=0.95))
+        state = _createPending(pipeline)
+        decision = pipeline.evaluate(
+            committedResult=_committed(),
+            formalStateRevision=1,
+            routedObservations=_routedStateOutput(state),
+        )
+        self.assertEqual(decision.rollbackReason, RollbackReason.DIRECTION_CONFIDENCE)
+
+    def testInvalidatedPendingRollsBackAsStale(self) -> None:
+        pipeline = SpeculativePipeline(_config())
+        state = _createPending(pipeline)
+        pipeline.invalidatePending()
+        assert pipeline.pending is not None
+
+        decision = pipeline.evaluate(
+            committedResult=_committed(),
+            formalStateRevision=1,
+            routedObservations=_routedStateOutput(state),
+        )
+
+        self.assertEqual(decision.rollbackReason, RollbackReason.STALE)
+        self.assertIsNone(pipeline.pending)
+
+    def testRoutedObservationOrderMismatchRollsBack(self) -> None:
+        pipeline = SpeculativePipeline(_config())
+        state = pipeline.create(
+            sequenceId=SequenceId("sequence"),
+            frameIndex=FrameIndex(2),
+            directionCenter=makeSphericalPoint(0.0, 0.0),
+            horizontalSizeRad=0.4,
+            verticalSizeRad=0.3,
+            motionUncertaintyRad=0.05,
+            directionConfidence=0.9,
+            sourceStateRevision=1,
+            views=(_view(0), _view(1)),
+        )
+        outputs = tuple(
+            _output(RoutedInferenceTask(key, LocalView(view, np.zeros((4, 4, 3), dtype=np.uint8))))
+            for key, view in zip(state.taskKeys, state.views, strict=True)
+        )
+
+        decision = pipeline.evaluate(
+            committedResult=_committed(),
+            formalStateRevision=1,
+            routedObservations=tuple(reversed(outputs)),
+        )
+
+        self.assertEqual(decision.rollbackReason, RollbackReason.ROUTING_MISMATCH)
+
+    def testSummaryAggregatesAcceptanceAndRollbackRates(self) -> None:
+        pipeline = SpeculativePipeline(_config(maxRollbackRate=0.50))
+        state = _createPending(pipeline)
+        accepted = pipeline.evaluate(
+            committedResult=_committed(),
+            formalStateRevision=1,
+            routedObservations=_routedStateOutput(state),
+        )
+        self.assertTrue(accepted.accepted)
+
+        state = _createPending(pipeline)
+        rejected = pipeline.evaluate(
+            committedResult=_committed(TrackStatus.LOST),
+            formalStateRevision=1,
+            routedObservations=_routedStateOutput(state),
+        )
+        self.assertFalse(rejected.accepted)
+
+        summary = pipeline.summary()
+        self.assertEqual(summary.evaluatedCount, 2)
+        self.assertEqual(summary.acceptedCount, 1)
+        self.assertEqual(summary.rollbackCount, 1)
+        self.assertEqual(summary.acceptanceRate, 0.5)
+        self.assertEqual(summary.rollbackRate, 0.5)
+        self.assertTrue(summary.rollbackTargetMet)
+
+    def testGenerationMonotonicallyAdvancesAcrossLifecycle(self) -> None:
+        pipeline = SpeculativePipeline(_config())
+        first = _createPending(pipeline)
+        second = _createPending(pipeline)
+        self.assertGreater(second.generation, first.generation)
+        generation = pipeline.generation
+        pipeline.closeSequence(SequenceId("sequence"))
+        self.assertGreater(pipeline.generation, generation)
 
 
 if __name__ == "__main__":

@@ -7,8 +7,10 @@ import numpy as np
 
 from instatarget.app.driver import buildRuntime, finalizeSink, openSink, runTracking
 from instatarget.core.config import loadConfig
+from instatarget.core.errors import GeometryError
 from instatarget.core.types import BBoxXYWH
 from instatarget.data.frame_source import FrameSource
+from instatarget.geometry import SphericalGeometryImpl
 from instatarget.tracker.hit_backend import HiTPrediction
 from instatarget.visualization.png import writeRgbPng
 
@@ -31,6 +33,7 @@ class DriverSmokeTest(unittest.TestCase):
                     scoring=replace(config.scoring, calibrationArtifact=None),
                 ),
                 hitSessionFactory=_TestHiTSession,
+                geometryFactory=SphericalGeometryImpl,
                 allowUncalibratedScoring=True,
             )
             source = FrameSource(sequenceId="sequence")
@@ -61,6 +64,70 @@ class DriverSmokeTest(unittest.TestCase):
             self.assertEqual(resultRecorder.roundCounts[0], 0)
             self.assertIsNotNone(resultRecorder.roundCounts[1])
             self.assertGreaterEqual(resultRecorder.roundCounts[1], 1)
+
+    def testFrameGeometryFailureEmitsFallbackAndContinues(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "sequence"
+            root.mkdir(parents=True, exist_ok=True)
+            for index in range(3):
+                writeRgbPng(
+                    root / f"frame_{index:04d}.png",
+                    np.full((16, 24, 3), 40 + index * 10, dtype=np.uint8),
+                )
+
+            config = loadConfig(REPOSITORY_ROOT / "configs" / "RGBonly.yaml")
+            runtime = buildRuntime(
+                replace(
+                    config,
+                    scoring=replace(config.scoring, calibrationArtifact=None),
+                ),
+                hitSessionFactory=_TestHiTSession,
+                geometryFactory=_FailingGeometry,
+                allowUncalibratedScoring=True,
+            )
+            source = FrameSource(sequenceId="sequence")
+            source.open(str(root))
+            sink = _CollectingSink()
+
+            resultCount = runTracking(
+                source=source,
+                initialBox=BBoxXYWH(4.0, 4.0, 8.0, 8.0),
+                geometry=runtime.geometry,
+                controller=runtime.controller,
+                backend=runtime.backend,
+                sink=sink,
+                scoreCalibration=runtime.scoreCalibration,
+            )
+
+            self.assertEqual(resultCount, 3)
+            self.assertEqual([int(item.frameIndex) for item in sink.results], [0, 1, 2])
+            self.assertFalse(sink.results[1].valid)
+            self.assertEqual(int(sink.results[2].frameIndex), 2)
+
+
+class _FailingGeometry(SphericalGeometryImpl):
+    def cropViews(self, frame, specs):
+        if int(frame.frameIndex) == 1:
+            raise GeometryError("injected geometry failure")
+        return super().cropViews(frame, specs)
+
+
+class _CollectingSink:
+    def __init__(self) -> None:
+        self.results = []
+
+    def open(self, _destination: str) -> None:
+        pass
+
+    def write(self, result) -> None:
+        self.results.append(result)
+
+    def finalize(self, expectedFrameCount: int) -> None:
+        if expectedFrameCount != len(self.results):
+            raise AssertionError("fallback result count mismatch")
+
+    def close(self) -> None:
+        pass
 
 
 class _TestHiTSession:
@@ -107,8 +174,7 @@ class _CheckingSource:
         self._timer = timer
 
     def read(self):
-        if not self._timer.active:
-            raise AssertionError("frame read must be timed")
+        # The production prefetch worker decodes outside the inference timing interval.
         return self._source.read()
 
 

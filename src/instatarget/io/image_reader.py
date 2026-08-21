@@ -58,13 +58,14 @@ def _readPng(path: Path) -> np.ndarray:
         data = payload[offset + 8 : offset + 8 + length]
         offset += 12 + length
         if kind == b"IHDR":
-            width, height, bitDepth, colorType, compression, filterMethod, interlace = struct.unpack(
-                ">IIBBBBB", data
-            )
+            header = struct.unpack(">IIBBBBB", data)
+            width, height, bitDepth, colorType, compression, filterMethod, interlace = header
             if compression != 0 or filterMethod != 0 or interlace != 0:
                 raise DecodeError(f"unsupported PNG compression/filter/interlace: {path}")
             if bitDepth != 8 or colorType not in {0, 2, 6}:
-                raise DecodeError(f"unsupported PNG format: bitDepth={bitDepth}, colorType={colorType}")
+                raise DecodeError(
+                    f"unsupported PNG format: bitDepth={bitDepth}, colorType={colorType}"
+                )
         elif kind == b"IDAT":
             compressed.extend(data)
         elif kind == b"IEND":

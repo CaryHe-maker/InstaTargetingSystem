@@ -8,6 +8,7 @@ import sys
 from collections.abc import Sequence
 from contextlib import nullcontext
 from pathlib import Path
+from time import perf_counter_ns
 from types import ModuleType
 from typing import Any
 
@@ -39,6 +40,20 @@ class PyTorchHiTSession:
             )
         self._closed = False
         self._precision = config.precision
+        self._profileEnabled = _envFlag("INSTARGET_PROFILE")
+        self._benchmark = _envFlag("INSTARGET_CUDNN_BENCHMARK")
+        self._channelsLast = _envFlag("INSTARGET_CHANNELS_LAST")
+        self._reuseBuffers = _envFlag("INSTARGET_REUSE_BUFFERS")
+        self._pinnedMemory = _envFlag("INSTARGET_PINNED_MEMORY")
+        self._nonBlocking = _envFlag("INSTARGET_NON_BLOCKING")
+        if self._nonBlocking and not self._pinnedMemory:
+            raise ModelError("INSTARGET_NON_BLOCKING requires INSTARGET_PINNED_MEMORY")
+        self._cpuBuffers: dict[tuple[int, ...], Any] = {}
+        self._pinnedBuffers: dict[tuple[int, ...], Any] = {}
+        self._gpuBuffers: dict[tuple[int, ...], Any] = {}
+        self._lastProfile: dict[str, int | float | bool | str] = {}
+        self._fp16FallbackCount = 0
+        self._oomCount = 0
         self._torch = _importTorch()
         if not self._torch.cuda.is_available():
             raise ModelError("official HiT-Small requires a CUDA-capable PyTorch runtime")
@@ -48,6 +63,8 @@ class PyTorchHiTSession:
         if not self._weights.is_file():
             raise ModelError(f"HiT checkpoint does not exist: {self._weights}")
         self._device = self._torch.device("cuda")
+        self._previousCudnnBenchmark = bool(self._torch.backends.cudnn.benchmark)
+        self._torch.backends.cudnn.benchmark = self._benchmark
         self._model = self._loadModel()
         self._mean = self._torch.tensor(
             [0.485, 0.456, 0.406], device=self._device, dtype=self._torch.float32
@@ -56,11 +73,30 @@ class PyTorchHiTSession:
             [0.229, 0.224, 0.225], device=self._device, dtype=self._torch.float32
         ).view(1, 3, 1, 1)
 
+    @property
+    def lastProfile(self) -> dict[str, int | float | bool | str]:
+        return dict(self._lastProfile)
+
+    @property
+    def fp16FallbackCount(self) -> int:
+        return self._fp16FallbackCount
+
     def encodeTemplate(self, rgb: NDArray[np.uint8], bbox: BBoxXYWH) -> object:
         self._requireOpen()
         _requireRgb(rgb)
         patch = _sampleTarget(rgb, bbox, _TEMPLATE_FACTOR, _TEMPLATE_SIZE)
         return self._preprocess(patch)
+
+    def encodeTemplateDevice(self, deviceRgb: Any, bbox: BBoxXYWH) -> object:
+        self._requireOpen()
+        tensor = self._validateDeviceRgb(deviceRgb)
+        return _sampleTargetDevice(
+            tensor,
+            bbox,
+            _TEMPLATE_FACTOR,
+            _TEMPLATE_SIZE,
+            self._torch,
+        ).unsqueeze(0)
 
     def infer(
         self,
@@ -87,18 +123,67 @@ class PyTorchHiTSession:
             raise ProtocolError("HiT template feature must be a torch tensor")
         if template.ndim != 4 or template.shape[0] != 1:
             raise ProtocolError(
-                "HiT template feature must have shape [1, C, H, W], "
-                f"actual={tuple(template.shape)}"
+                f"HiT template feature must have shape [1, C, H, W], actual={tuple(template.shape)}"
             )
 
         batchSize = len(images)
-        resized = np.stack([_resizeRgb(rgb, _SEARCH_SIZE) for rgb in images])
-        search = self._preprocessBatch(resized)
+        preprocessStartedNs = perf_counter_ns() if self._profileEnabled else None
+        resized = self._resizeBatch(images)
+        preprocessNs = (
+            perf_counter_ns() - preprocessStartedNs if preprocessStartedNs is not None else 0
+        )
+        search, hostToDeviceNs = self._preprocessBatch(resized)
         batchTemplate = template.expand(batchSize, -1, -1, -1)
-        output = self._forward(search, batchTemplate, useFp16=self._precision == "fp16")
-        fp16Invalid = not _outputsAreFinite(output, self._torch)
-        if self._precision == "fp16" and fp16Invalid:
-            output = self._forward(search, batchTemplate, useFp16=False)
+        if self._channelsLast:
+            search = search.contiguous(memory_format=self._torch.channels_last)
+            batchTemplate = batchTemplate.contiguous(memory_format=self._torch.channels_last)
+        try:
+            output, cudaForwardNs = self._forward(
+                search, batchTemplate, useFp16=self._precision == "fp16"
+            )
+        except self._torch.cuda.OutOfMemoryError as error:
+            self._oomCount += 1
+            self._lastProfile = self._profileSnapshot(
+                preprocessNs=preprocessNs,
+                hostToDeviceNs=hostToDeviceNs,
+                cudaForwardNs=0,
+                batchSize=batchSize,
+                fp16Fallback=False,
+            )
+            raise ModelError(f"HiT CUDA out of memory for batch size {batchSize}") from error
+        outputsInvalid = not _outputsAreFinite(output, self._torch)
+        if self._precision == "fp16" and outputsInvalid:
+            self._fp16FallbackCount += 1
+            try:
+                output, fallbackForwardNs = self._forward(
+                    search,
+                    batchTemplate,
+                    useFp16=False,
+                )
+            except self._torch.cuda.OutOfMemoryError as error:
+                self._oomCount += 1
+                self._lastProfile = self._profileSnapshot(
+                    preprocessNs=preprocessNs,
+                    hostToDeviceNs=hostToDeviceNs,
+                    cudaForwardNs=cudaForwardNs,
+                    batchSize=batchSize,
+                    fp16Fallback=True,
+                )
+                raise ModelError(
+                    f"HiT FP32 fallback ran out of memory for batch size {batchSize}"
+                ) from error
+            cudaForwardNs += fallbackForwardNs
+            if not _outputsAreFinite(output, self._torch):
+                raise ModelError("HiT FP32 fallback returned non-finite outputs")
+        elif outputsInvalid:
+            raise ModelError("HiT FP32 inference returned non-finite outputs")
+        self._lastProfile = self._profileSnapshot(
+            preprocessNs=preprocessNs,
+            hostToDeviceNs=hostToDeviceNs,
+            cudaForwardNs=cudaForwardNs,
+            batchSize=batchSize,
+            fp16Fallback=bool(self._precision == "fp16" and outputsInvalid),
+        )
         boxes = output["predBoxes"]
         if boxes.numel() == 0 or boxes.shape[0] != batchSize:
             raise ModelError(
@@ -122,12 +207,8 @@ class PyTorchHiTSession:
                     imageWidth=rgb.shape[1],
                     imageHeight=rgb.shape[0],
                 ),
-                modelScore=(
-                    float(presenceProbability * qualityProbability)
-                ),
-                appearanceScore=(
-                    float(presenceProbability * qualityProbability)
-                ),
+                modelScore=(float(presenceProbability * qualityProbability)),
+                appearanceScore=(float(presenceProbability * qualityProbability)),
                 presenceLogit=presenceLogit,
                 qualityLogit=qualityLogit,
                 presenceProbability=presenceProbability,
@@ -155,12 +236,136 @@ class PyTorchHiTSession:
             )
         )
 
+    def inferDeviceBatch(
+        self,
+        deviceRgbs: Sequence[Any],
+        imageSizes: Sequence[tuple[int, int]],
+        templateFeatures: Sequence[object],
+    ) -> tuple[HiTPrediction, ...]:
+        """Infer directly from normalized GPU tensors produced by GPU Geometry."""
+        self._requireOpen()
+        if not deviceRgbs:
+            return ()
+        if len(deviceRgbs) != len(imageSizes):
+            raise ProtocolError("device RGBs and image sizes must have equal lengths")
+        if not templateFeatures:
+            raise ProtocolError("HiT device inference requires at least one template")
+        template = templateFeatures[-1]
+        if not self._torch.is_tensor(template) or template.ndim != 4 or template.shape[0] != 1:
+            raise ProtocolError("HiT device template must have shape [1,C,H,W]")
+        tensors = tuple(self._validateDeviceRgb(item) for item in deviceRgbs)
+        batchSize = len(tensors)
+        search = self._torch.stack(tensors, dim=0)
+        batchTemplate = template.expand(batchSize, -1, -1, -1)
+        if self._channelsLast:
+            search = search.contiguous(memory_format=self._torch.channels_last)
+            batchTemplate = batchTemplate.contiguous(memory_format=self._torch.channels_last)
+        try:
+            output, cudaForwardNs = self._forward(
+                search, batchTemplate, useFp16=self._precision == "fp16"
+            )
+        except self._torch.cuda.OutOfMemoryError as error:
+            self._oomCount += 1
+            self._lastProfile = self._profileSnapshot(
+                preprocessNs=0,
+                hostToDeviceNs=0,
+                cudaForwardNs=0,
+                batchSize=batchSize,
+                fp16Fallback=False,
+            )
+            raise ModelError(f"HiT CUDA out of memory for device batch size {batchSize}") from error
+        outputsInvalid = not _outputsAreFinite(output, self._torch)
+        if self._precision == "fp16" and outputsInvalid:
+            self._fp16FallbackCount += 1
+            output, fallbackForwardNs = self._forward(search, batchTemplate, useFp16=False)
+            cudaForwardNs += fallbackForwardNs
+            if not _outputsAreFinite(output, self._torch):
+                raise ModelError("HiT FP32 fallback returned non-finite outputs")
+        elif outputsInvalid:
+            raise ModelError("HiT device inference returned non-finite outputs")
+        self._lastProfile = self._profileSnapshot(
+            preprocessNs=0,
+            hostToDeviceNs=0,
+            cudaForwardNs=cudaForwardNs,
+            batchSize=batchSize,
+            fp16Fallback=bool(self._precision == "fp16" and outputsInvalid),
+        )
+        self._lastProfile["deviceInput"] = True
+        boxes = output["predBoxes"]
+        if boxes.numel() == 0 or boxes.shape[0] != batchSize:
+            raise ModelError("HiT returned an invalid device prediction batch")
+        boxRows = boxes.reshape(batchSize, -1, 4).float().mean(dim=1).tolist()
+        certainties = _heatmapCertainties(
+            (output["cornerHeatmapTl"], output["cornerHeatmapBr"]),
+            self._torch,
+            batchSize,
+        )
+        presenceLogits = output["presenceLogit"].float().reshape(-1).tolist()
+        qualityLogits = output["qualityLogit"].float().reshape(-1).tolist()
+        presenceProbabilities = output["presenceProbability"].float().reshape(-1).tolist()
+        qualityProbabilities = output["qualityProbability"].float().reshape(-1).tolist()
+        return tuple(
+            HiTPrediction(
+                bbox=_normalizedBoxToPixels(
+                    *boxRow,
+                    imageWidth=size[0],
+                    imageHeight=size[1],
+                ),
+                modelScore=float(presenceProbability * qualityProbability),
+                appearanceScore=float(presenceProbability * qualityProbability),
+                presenceLogit=presenceLogit,
+                qualityLogit=qualityLogit,
+                presenceProbability=presenceProbability,
+                qualityProbability=qualityProbability,
+                predictedIoU=qualityProbability,
+                cornerScore=certainty,
+            )
+            for (
+                boxRow,
+                certainty,
+                presenceLogit,
+                qualityLogit,
+                presenceProbability,
+                qualityProbability,
+                size,
+            ) in zip(
+                boxRows,
+                certainties,
+                presenceLogits,
+                qualityLogits,
+                presenceProbabilities,
+                qualityProbabilities,
+                imageSizes,
+                strict=True,
+            )
+        )
+
     def close(self) -> None:
         if self._closed:
             return
+        try:
+            # GPU Geometry and HiT inference enqueue asynchronous work.  Synchronize
+            # before dropping the model and reusable buffers so the CUDA caching
+            # allocator does not need to record events while the interpreter is
+            # tearing down the context.  On Windows this otherwise makes a
+            # subsequent evaluation process intermittently abort in CUDAEvent::record.
+            self._torch.cuda.synchronize(self._device)
+        except RuntimeError:
+            # Preserve the original inference failure when a prior asynchronous
+            # CUDA error has already poisoned the context.
+            pass
         self._model = None
+        self._cpuBuffers.clear()
+        self._pinnedBuffers.clear()
+        self._gpuBuffers.clear()
         self._closed = True
-        self._torch.cuda.empty_cache()
+        self._torch.backends.cudnn.benchmark = self._previousCudnnBenchmark
+        try:
+            self._torch.cuda.empty_cache()
+        except RuntimeError:
+            # A prior asynchronous CUDA failure can poison cache cleanup. Closing must not mask
+            # the original inference exception or abort interpreter shutdown.
+            pass
 
     def _loadModel(self) -> Any:
         runtimeModel = _constructRuntimeModel(
@@ -168,34 +373,153 @@ class PyTorchHiTSession:
             weights=self._weights,
             hitRoot=self._hitRoot,
         )
-        return runtimeModel.to(self._device).eval()
+        runtimeModel = runtimeModel.to(self._device).eval()
+        if self._channelsLast:
+            runtimeModel = runtimeModel.to(memory_format=self._torch.channels_last)
+        return runtimeModel
 
     def _preprocess(self, rgb: NDArray[np.uint8]) -> Any:
-        return self._preprocessBatch(np.ascontiguousarray(rgb)[None, ...])
+        return self._preprocessBatch(np.ascontiguousarray(rgb)[None, ...])[0]
 
-    def _preprocessBatch(self, rgbs: NDArray[np.uint8]) -> Any:
-        tensor = self._torch.from_numpy(np.ascontiguousarray(rgbs)).to(
-            device=self._device, dtype=self._torch.float32
+    def _validateDeviceRgb(self, value: Any) -> Any:
+        if not self._torch.is_tensor(value):
+            raise ProtocolError("HiT device input must be a torch tensor")
+        if not _devicesMatch(value.device, self._device, self._torch):
+            raise ProtocolError(
+                f"HiT device input must be on {self._device}, actual={value.device}"
+            )
+        if value.ndim != 3 or tuple(value.shape[:1]) != (3,):
+            raise ProtocolError(
+                f"HiT device input must have shape [3,H,W], actual={tuple(value.shape)}"
+            )
+        if value.shape[1] != _SEARCH_SIZE or value.shape[2] != _SEARCH_SIZE:
+            raise ProtocolError(
+                f"HiT device input must be {_SEARCH_SIZE}x{_SEARCH_SIZE}, "
+                f"actual={tuple(value.shape)}"
+            )
+        if value.dtype != self._torch.float32:
+            raise ProtocolError(f"HiT device input must be float32, actual={value.dtype}")
+        if not bool(self._torch.isfinite(value).all()):
+            raise ProtocolError("HiT device input contains non-finite values")
+        return value
+    def _resizeBatch(self, rgbs: Sequence[NDArray[np.uint8]]) -> NDArray[np.uint8]:
+        shape = (len(rgbs), _SEARCH_SIZE, _SEARCH_SIZE, 3)
+        if self._reuseBuffers:
+            resized = self._cpuBuffers.get(shape)
+            if resized is None:
+                resized = np.empty(shape, dtype=np.uint8)
+                self._cpuBuffers[shape] = resized
+            for index, rgb in enumerate(rgbs):
+                resized[index] = _resizeRgb(rgb, _SEARCH_SIZE)
+            return resized
+        return np.stack([_resizeRgb(rgb, _SEARCH_SIZE) for rgb in rgbs])
+
+    def _preprocessBatch(self, rgbs: NDArray[np.uint8]) -> tuple[Any, int]:
+        contiguous = np.ascontiguousarray(rgbs)
+        if self._pinnedMemory:
+            host = self._pinnedBuffers.get(tuple(contiguous.shape))
+            if host is None:
+                host = self._torch.empty(
+                    contiguous.shape,
+                    dtype=self._torch.uint8,
+                    pin_memory=True,
+                )
+                self._pinnedBuffers[tuple(contiguous.shape)] = host
+            host.copy_(self._torch.from_numpy(contiguous))
+        else:
+            host = self._torch.from_numpy(contiguous)
+        transferStartedNs = perf_counter_ns() if self._profileEnabled else None
+        if self._reuseBuffers:
+            deviceTensor = self._gpuBuffers.get(tuple(contiguous.shape))
+            if deviceTensor is None:
+                deviceTensor = self._torch.empty(
+                    contiguous.shape, device=self._device, dtype=self._torch.uint8
+                )
+                self._gpuBuffers[tuple(contiguous.shape)] = deviceTensor
+            deviceTensor.copy_(host, non_blocking=self._nonBlocking)
+            tensor = deviceTensor
+        else:
+            tensor = host.to(device=self._device, non_blocking=self._nonBlocking)
+        if self._nonBlocking and self._profileEnabled:
+            self._torch.cuda.current_stream().synchronize()
+        hostToDeviceNs = (
+            perf_counter_ns() - transferStartedNs if transferStartedNs is not None else 0
         )
-        tensor = tensor.permute(0, 3, 1, 2).div_(255.0)
-        return (tensor - self._mean) / self._std
+        normalized = tensor.permute(0, 3, 1, 2).to(dtype=self._torch.float32)
+        normalized.div_(255.0).sub_(self._mean).div_(self._std)
+        return normalized, hostToDeviceNs
 
-    def _forward(self, search: Any, template: Any, *, useFp16: bool) -> dict[str, Any]:
+    def _forward(self, search: Any, template: Any, *, useFp16: bool) -> tuple[dict[str, Any], int]:
         autocast = (
             self._torch.autocast(device_type="cuda", dtype=self._torch.float16)
             if useFp16
             else nullcontext()
         )
+        startEvent = endEvent = None
+        if self._profileEnabled:
+            startEvent = self._torch.cuda.Event(enable_timing=True)
+            endEvent = self._torch.cuda.Event(enable_timing=True)
+            startEvent.record()
         with self._torch.inference_mode(), autocast:
             output = self._model(template, search)
+        elapsedNs = 0
+        if startEvent is not None and endEvent is not None:
+            endEvent.record()
+            endEvent.synchronize()
+            elapsedNs = int(startEvent.elapsed_time(endEvent) * 1_000_000.0)
         boxes = output.get("predBoxes")
         if boxes is None or boxes.numel() == 0:
             raise ModelError("HiT returned no predicted boxes")
-        return output
+        return output, elapsedNs
+
+    def _profileSnapshot(
+        self,
+        *,
+        preprocessNs: int,
+        hostToDeviceNs: int,
+        cudaForwardNs: int,
+        batchSize: int,
+        fp16Fallback: bool,
+    ) -> dict[str, int | float | bool | str]:
+        snapshot: dict[str, int | float | bool | str] = {
+            "preprocess": preprocessNs,
+            "hostToDevice": hostToDeviceNs,
+            "cudaForward": cudaForwardNs,
+            "batchSize": batchSize,
+            "fp16Fallback": fp16Fallback,
+            "fp16FallbackCount": self._fp16FallbackCount,
+            "oomCount": self._oomCount,
+            "precision": self._precision,
+            "cudnnBenchmark": self._benchmark,
+            "channelsLast": self._channelsLast,
+            "reuseBuffers": self._reuseBuffers,
+            "pinnedMemory": self._pinnedMemory,
+            "nonBlocking": self._nonBlocking,
+        }
+        if self._profileEnabled:
+            snapshot["maxMemoryAllocatedBytes"] = int(
+                self._torch.cuda.max_memory_allocated(self._device)
+            )
+            snapshot["maxMemoryReservedBytes"] = int(
+                self._torch.cuda.max_memory_reserved(self._device)
+            )
+        return snapshot
 
     def _requireOpen(self) -> None:
         if self._closed:
             raise ProtocolError("HiT session is closed")
+
+
+def _devicesMatch(actual: Any, expected: Any, torchModule: Any) -> bool:
+    """Compare devices while treating ``cuda`` as the current CUDA device."""
+    if actual.type != expected.type:
+        return False
+    if actual.type != "cuda":
+        return actual == expected
+    currentIndex = int(torchModule.cuda.current_device())
+    actualIndex = currentIndex if actual.index is None else int(actual.index)
+    expectedIndex = currentIndex if expected.index is None else int(expected.index)
+    return actualIndex == expectedIndex
 
 
 def _importTorch() -> ModuleType:
@@ -325,6 +649,36 @@ def _sampleTarget(
     return np.ascontiguousarray(cv2.resize(padded, (outputSize, outputSize)))
 
 
+def _sampleTargetDevice(
+    rgb: Any,
+    bbox: BBoxXYWH,
+    factor: float,
+    outputSize: int,
+    torch: ModuleType,
+) -> Any:
+    """Crop a normalized [C,H,W] tensor without moving image data to the host."""
+    import torch.nn.functional as functional
+
+    height, width = int(rgb.shape[1]), int(rgb.shape[2])
+    cropSize = max(1, int(math.ceil(math.sqrt(bbox.widthPx * bbox.heightPx) * factor)))
+    x1 = int(round(bbox.xPx + 0.5 * bbox.widthPx - 0.5 * cropSize))
+    y1 = int(round(bbox.yPx + 0.5 * bbox.heightPx - 0.5 * cropSize))
+    x2, y2 = x1 + cropSize, y1 + cropSize
+    left, right = max(0, -x1), max(x2 - width, 0)
+    top, bottom = max(0, -y1), max(y2 - height, 0)
+    clipped = rgb[:, max(0, y1) : min(height, y2), max(0, x1) : min(width, x2)]
+    if clipped.numel() == 0:
+        raise ProtocolError("HiT device template crop has no pixels")
+    if left or right or top or bottom:
+        clipped = functional.pad(clipped.unsqueeze(0), (left, right, top, bottom)).squeeze(0)
+    return functional.interpolate(
+        clipped.unsqueeze(0),
+        size=(outputSize, outputSize),
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze(0).to(dtype=torch.float32)
+
+
 def _resizeRgb(rgb: NDArray[np.uint8], size: int) -> NDArray[np.uint8]:
     if rgb.shape[:2] == (size, size):
         return np.ascontiguousarray(rgb)
@@ -390,6 +744,13 @@ def _requireRgb(rgb: NDArray[np.uint8]) -> None:
         raise ProtocolError("HiT input must be a uint8 RGB NumPy array")
     if rgb.ndim != 3 or rgb.shape[2] != 3 or 0 in rgb.shape[:2]:
         raise ProtocolError(f"HiT input must have shape [H, W, 3], actual={rgb.shape}")
+
+
+def _envFlag(name: str) -> bool:
+    value = os.environ.get(name, "0").strip().lower()
+    if value not in {"0", "1", "false", "true"}:
+        raise ModelError(f"{name} must be 0/1/false/true")
+    return value in {"1", "true"}
 
 
 __all__ = ["PyTorchHiTSession", "validateHiTCheckpoint"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -12,14 +13,23 @@ import numpy as np
 
 from instatarget.app.driver import (
     buildRuntime,
-    closeBackend,
+    closeRuntime,
     finalizeSink,
     openSink,
     runTracking,
 )
 from instatarget.core.config import loadConfig
 from instatarget.core.errors import DecodeError, OutputError, ProtocolError
-from instatarget.core.types import BFoV, FrameIndex, FramePacket, SequenceId, TrackResult
+from instatarget.core.types import (
+    BBoxXYWH,
+    BFoV,
+    FrameIndex,
+    FramePacket,
+    ResultSource,
+    SequenceId,
+    TrackResult,
+    TrackStatus,
+)
 from instatarget.geometry import makeSphericalPoint
 
 DEFAULT_DATASET_DIR = "data"
@@ -172,13 +182,20 @@ def formatCompetitionResult(result: TrackResult) -> str:
 
 def formatBfov(bfov: BFoV) -> str:
     """Format a valid BFoV using the official degree convention."""
+    horizontalDeg = float(np.degrees(bfov.horizontalFovRad))
+    verticalDeg = float(np.degrees(bfov.verticalFovRad))
+    # Keep rounded text inside the strict open FOV interval used by the
+    # submission checker.  The internal protocol permits a wider horizontal
+    # envelope for intermediate geometry calculations.
+    horizontalDeg = min(179.999, max(0.001, horizontalDeg))
+    verticalDeg = min(179.999, max(0.001, verticalDeg))
     return ",".join(
         f"{value:.3f}"
         for value in (
             np.degrees(bfov.center.yawRad),
             np.degrees(bfov.center.pitchRad),
-            np.degrees(bfov.horizontalFovRad),
-            np.degrees(bfov.verticalFovRad),
+            horizontalDeg,
+            verticalDeg,
         )
     )
 
@@ -265,7 +282,7 @@ def trackOneSequence(
         try:
             sink.close()
         finally:
-            closeBackend(runtime.backend)
+            closeRuntime(runtime)
             source.close()
 
 
@@ -284,16 +301,141 @@ def runCompetition(
     totalFrames = 0
     start = time.monotonic()
     for index, sequence in enumerate(sequences, 1):
-        frames = trackOneSequence(
-            sequenceDir=dataset / sequence,
-            configPath=config,
-            resultPath=output / f"{sequence}.txt",
-        )
+        resultPath = output / f"{sequence}.txt"
+        try:
+            frames = trackOneSequence(
+                sequenceDir=dataset / sequence,
+                configPath=config,
+                resultPath=resultPath,
+            )
+        except Exception as error:
+            # A single malformed frame, geometry envelope, or model/runtime error
+            # must not abort the official 118-sequence submission.  Emit a complete
+            # zero-scored sequence so the evaluator receives the required line count,
+            # then continue with the remaining sequences.
+            print(
+                "[competition] sequence failed; writing fallback output: "
+                f"{sequence}: {error}",
+                file=sys.stderr,
+            )
+            try:
+                frames = writeSequenceFallback(dataset / sequence, resultPath, error)
+            except Exception as fallbackError:
+                # Even a damaged init/video file must not stop the remaining
+                # submission.  Keep a valid emergency artifact at the expected
+                # path; a zero-frame count is preferable to an aborted container.
+                print(
+                    "[competition] fallback output failed; writing emergency row: "
+                    f"{sequence}: {fallbackError}",
+                    file=sys.stderr,
+                )
+                expectedFrames = _bestEffortFrameCount(dataset / sequence)
+                frames = writeEmergencyFallback(resultPath, expectedFrames)
         totalFrames += frames
         print(f"[competition] [{index}/{len(sequences)}] {sequence}: {frames} frames")
     elapsed = max(time.monotonic() - start, 1e-9)
     print(f"[competition] completed {totalFrames} frames ({totalFrames / elapsed:.1f} FPS)")
     return 0
+
+
+def writeSequenceFallback(
+    sequenceDir: str | Path,
+    resultPath: str | Path,
+    error: BaseException | None = None,
+) -> int:
+    """Write one valid default output row for every decodable sequence frame."""
+    sequencePath = Path(sequenceDir)
+    video = findVideo(sequencePath)
+    if video is None:
+        raise DecodeError(f"sequence has no .mp4 video: {sequencePath}") from error
+    try:
+        initialBfov = loadInitialBfov(sequencePath / "init.txt")
+    except Exception as initError:
+        # A malformed init must not prevent a complete zero-scored submission.
+        print(
+            f"[competition] invalid init; using default BFoV for {sequencePath}: {initError}",
+            file=sys.stderr,
+        )
+        initialBfov = _defaultInitialBfov()
+    source = OpenCvVideoSource(sequencePath.name)
+    sink = BfovResultSink(initialBfov)
+    try:
+        source.open(str(video))
+        frameCount = source.frameCount
+        if frameCount <= 0:
+            frameCount = 0
+            while source.read() is not None:
+                frameCount += 1
+        openSink(sink, str(resultPath))
+        fallbackBbox = BBoxXYWH(0.0, 0.0, 1.0, 1.0)
+        for frameIndex in range(frameCount):
+            sink.write(
+                TrackResult(
+                    sequenceId=SequenceId(sequencePath.name),
+                    frameIndex=FrameIndex(frameIndex),
+                    bbox=fallbackBbox,
+                    bfov=initialBfov,
+                    confidence=0.0,
+                    status=TrackStatus.LOST,
+                    valid=False,
+                    resultSource=ResultSource.MOTION_PREDICTED,
+                )
+            )
+        finalizeSink(sink, frameCount)
+        return frameCount
+    finally:
+        sink.close()
+        source.close()
+
+
+def writeEmergencyFallback(resultPath: str | Path, frameCount: int = 1) -> int:
+    """Write a complete zero-scored artifact using the best known frame count."""
+    if frameCount < 1:
+        frameCount = 1
+    destination = Path(resultPath)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["0.000,0.000,60.000,40.000"]
+    lines.extend("0.000,0.000,0.000,0.000" for _ in range(frameCount - 1))
+    destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return frameCount
+
+
+def _bestEffortFrameCount(sequenceDir: str | Path) -> int:
+    """Read the declared video count, decoding when the container omits it."""
+    video = findVideo(sequenceDir)
+    if video is None:
+        return 1
+    try:
+        import cv2
+    except ImportError:
+        return 1
+    capture = cv2.VideoCapture(str(video))
+    if not capture.isOpened():
+        capture.release()
+        return 1
+    try:
+        declared = float(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        if np.isfinite(declared) and declared >= 1.0:
+            return int(declared)
+        count = 0
+        while True:
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                break
+            count += 1
+        return max(1, count)
+    except Exception:
+        return 1
+    finally:
+        capture.release()
+
+
+def _defaultInitialBfov() -> BFoV:
+    return BFoV(
+        center=makeSphericalPoint(0.0, 0.0),
+        horizontalFovRad=float(np.radians(60.0)),
+        verticalFovRad=float(np.radians(40.0)),
+    )
 
 
 def _loadCompetitionConfig(path: str | Path):

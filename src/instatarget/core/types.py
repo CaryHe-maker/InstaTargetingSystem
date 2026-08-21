@@ -267,6 +267,7 @@ class LocalView:
 
     spec: ViewSpec
     rgb: NDArray[np.uint8]
+    deviceRgb: object | None = None
 
     def __post_init__(self) -> None:
         expectedShape = (self.spec.outputHeightPx, self.spec.outputWidthPx)
@@ -276,6 +277,17 @@ class LocalView:
             raise ProtocolError(
                 f"local rgb shape must be {(*expectedShape, 3)}, actual={self.rgb.shape}"
             )
+        if self.deviceRgb is not None:
+            shape = getattr(self.deviceRgb, "shape", None)
+            ndim = getattr(self.deviceRgb, "ndim", None)
+            if shape is None or ndim != 3:
+                raise ProtocolError("local deviceRgb must be a [C, H, W] tensor-like object")
+            if tuple(shape) != (3, self.spec.outputHeightPx, self.spec.outputWidthPx):
+                raise ProtocolError(
+                    "local deviceRgb shape must be "
+                    f"{(3, self.spec.outputHeightPx, self.spec.outputWidthPx)}, "
+                    f"actual={tuple(shape)}"
+                )
 
 
 class InferenceRole(StrEnum):

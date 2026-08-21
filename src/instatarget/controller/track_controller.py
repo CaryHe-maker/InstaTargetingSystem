@@ -9,7 +9,11 @@ from math import asin, atan2, tan
 from typing import TYPE_CHECKING
 
 from instatarget.controller.motion_estimator import SphericalMotionEstimator
-from instatarget.controller.recovery_planner import PlannedView, RecoveryPlanner
+from instatarget.controller.recovery_planner import (
+    PlannedView,
+    RecoveryPlanner,
+    _clampFov,
+)
 from instatarget.controller.state_evaluator import StateEvaluator
 from instatarget.controller.state_machine import TrackStateMachine
 from instatarget.controller.state_model import (
@@ -59,7 +63,10 @@ from instatarget.core.types import (
     TrackStatus,
     ViewSpec,
 )
-from instatarget.geometry.projection_math import fovToFocalLengthPx, makeSphericalPoint
+from instatarget.geometry.projection_math import (
+    fovToFocalLengthPx,
+    makeSphericalPoint,
+)
 
 if TYPE_CHECKING:
     from instatarget.core.protocols import MotionEstimator
@@ -119,7 +126,11 @@ class TrackControllerImpl(TrackControllerProtocol):
             maxLogScaleRatePerSec=motionConfig.maxLogScaleRatePerSec,
         )
         self._evaluator = StateEvaluator(decisionGateConfig, trackingConfig, evaluatorConfig)
-        self._planner = RecoveryPlanner(geometryConfig, trackingConfig, recoveryConfig)
+        self._planner = RecoveryPlanner(
+            geometryConfig,
+            trackingConfig,
+            recoveryConfig,
+        )
         self._stateMachine = TrackStateMachine(trackingConfig)
         self._templatePolicy = TemplatePolicy(trackingConfig)
         self._recovery = RecoveryMemory()
@@ -148,6 +159,7 @@ class TrackControllerImpl(TrackControllerProtocol):
         self._initialPlan: InitializationPlan | None = None
         self._lastStateObservation: StateObservation | None = None
         self._lastTransition: TransitionDecision | None = None
+        self._lastPipelineProfile: dict[str, object] = {}
 
     @property
     def status(self) -> TrackStatus | None:
@@ -166,6 +178,10 @@ class TrackControllerImpl(TrackControllerProtocol):
     @property
     def lastTransition(self) -> TransitionDecision | None:
         return self._lastTransition
+
+    @property
+    def lastPipelineProfile(self) -> dict[str, object]:
+        return dict(self._lastPipelineProfile)
 
     def buildInitialization(self, frame: FramePacket, initialBox: BBoxXYWH) -> InitializationPlan:
         if self._initialized or self._initialPlan is not None:
@@ -314,6 +330,64 @@ class TrackControllerImpl(TrackControllerProtocol):
             raise ProtocolError("legacy update path cannot return a second search plan")
         return step.result
 
+    def commitFallback(
+        self,
+        frame: FramePacket,
+        *,
+        backendRevision: int | None = None,
+        reason: str = "frame_error",
+    ) -> TrackResult:
+        """Advance past one failed frame and emit an invalid, zero-scored result.
+
+        Competition execution must preserve one output per input frame. This method
+        keeps the last confirmed target state, clears any partial same-frame
+        transaction, and advances protocol revisions so tracking can resume.
+        """
+        self._requireInitialized()
+        if self._sequenceId != str(frame.sequenceId):
+            raise ProtocolError("fallback frame sequence does not match controller state")
+        expectedFrameIndex = self._lastFrameIndex + 1
+        if int(frame.frameIndex) != expectedFrameIndex:
+            raise ProtocolError(
+                "fallback frame order mismatch: "
+                f"expected={expectedFrameIndex}, actual={int(frame.frameIndex)}"
+            )
+        if self._currentBox is None or self._currentBfov is None:
+            raise ProtocolError("fallback frame requires a confirmed target state")
+
+        plannedRevision = (
+            self._planned.plan.stateRevision
+            if self._planned is not None
+            else self._stateRevision + 1
+        )
+        self._stateRevision = max(self._stateRevision + 1, plannedRevision)
+        if backendRevision is not None:
+            self._backendRevision = max(self._backendRevision, int(backendRevision))
+        self._lastFrameIndex = int(frame.frameIndex)
+        self._lastFrame = frame
+        self._planned = None
+        self._transaction = None
+        self._pendingTemplate = TemplateDecision(TemplateCommandKind.KEEP)
+        self._stableFrames = 0
+        self._lastStateObservation = None
+        self._lastTransition = None
+        self._lastPipelineProfile = {
+            "pipelineFrameFallback": True,
+            "frameIndex": int(frame.frameIndex),
+            "reason": reason,
+            "finalStateRevision": int(self._stateRevision),
+        }
+        return TrackResult(
+            sequenceId=frame.sequenceId,
+            frameIndex=frame.frameIndex,
+            bbox=self._currentBox,
+            bfov=self._currentBfov,
+            confidence=0.0,
+            status=_publicStatus(self._mode),
+            valid=False,
+            resultSource=ResultSource.MOTION_PREDICTED,
+        )
+
     def _consume(
         self,
         plan: SearchPlan,
@@ -384,11 +458,45 @@ class TrackControllerImpl(TrackControllerProtocol):
         if self._shouldEscalate(evaluation, transaction, allowEscalation):
             transaction.attemptIndex += 1
             self._planned = None
+            nextPrediction = self._provisionalRoundPrediction(planned, evaluation)
+            transaction.provisionalPrediction = nextPrediction
+            transaction.provisionalPredictionRevision = planned.plan.stateRevision
+            self._lastPipelineProfile = {
+                "pipelinePredictionEnabled": True,
+                "frameIndex": int(planned.frame.frameIndex),
+                "round1PredictionRevision": int(planned.plan.stateRevision),
+                "round2UsesProvisionalPrediction": nextPrediction is not planned.prediction,
+                "formalMotionSamplesBeforeCommit": int(nextPrediction.sampleCount - 1)
+                if nextPrediction is not planned.prediction
+                else int(nextPrediction.sampleCount),
+            }
             nextPlan = self._buildAttempt(
                 frame=planned.frame,
                 state=planned.state,
-                prediction=planned.prediction,
-                predictedBfov=planned.predictedBfov,
+                prediction=nextPrediction,
+                predictedBfov=(
+                    BFoV(
+                        center=nextPrediction.center,
+                        horizontalFovRad=(
+                            _clampFov(
+                                nextPrediction.horizontalSizeRad
+                                if nextPrediction.horizontalSizeRad > 0.0
+                                else planned.predictedBfov.horizontalFovRad,
+                                self._geometryConfig,
+                            )
+                        ),
+                        verticalFovRad=(
+                            _clampFov(
+                                nextPrediction.verticalSizeRad
+                                if nextPrediction.verticalSizeRad > 0.0
+                                else planned.predictedBfov.verticalFovRad,
+                                self._geometryConfig,
+                            )
+                        ),
+                    )
+                    if nextPrediction is not planned.prediction
+                    else planned.predictedBfov
+                ),
                 attemptIndex=transaction.attemptIndex,
                 searchSeed=evaluation.searchSeedCenter,
                 viewIdStart=max((view.viewId for view in plan.views), default=-1) + 1,
@@ -400,10 +508,44 @@ class TrackControllerImpl(TrackControllerProtocol):
             measurementAccepted=evaluation.measurementAccepted,
         )
         result = self._commit(planned, evaluation, decision)
+        self._lastPipelineProfile.update(
+            {
+                "finalAttemptIndex": int(plan.attemptIndex),
+                "finalMeasurementAccepted": bool(decision.acceptMeasurement),
+                "finalStateRevision": int(planned.plan.stateRevision),
+                "provisionalReplacedAtCommit": bool(
+                    transaction.provisionalPrediction is not None
+                ),
+            }
+        )
         self._stateMachine.recordScore(evaluation.stateScore)
         self._lastStateObservation = evaluation
         self._lastTransition = decision
         return FrameCommitted(result)
+
+    def _provisionalRoundPrediction(
+        self,
+        planned: _PlannedAttempt,
+        evaluation: StateObservation,
+    ) -> MotionPrediction:
+        measured = evaluation.measuredBfov
+        method = getattr(self._motion, "predictWithProvisionalMeasurement", None)
+        if measured is None or not callable(method):
+            return planned.prediction
+        prediction = method(
+            frameIndex=int(planned.frame.frameIndex),
+            timestampNs=planned.frame.timestampNs,
+            point=measured.center,
+            confidence=max(self._trackingConfig.candidateMinScore, evaluation.stateScore),
+            horizontalSizeRad=measured.horizontalFovRad,
+            verticalSizeRad=measured.verticalFovRad,
+        )
+        return replace(
+            prediction,
+            sourceRevision=planned.plan.stateRevision,
+            targetFrameIndex=planned.frame.frameIndex,
+            degradedReasons=tuple((*prediction.degradedReasons, "round1_provisional")),
+        )
 
     def _buildAttempt(
         self,

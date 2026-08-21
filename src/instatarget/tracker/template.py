@@ -61,11 +61,20 @@ class TemplateCache:
     def revision(self) -> int:
         return self._revision
 
+    @property
+    def activeTemplateFrameIndex(self) -> int:
+        snapshot = self.snapshot()
+        if snapshot.stable is not None:
+            return int(snapshot.stable.frameIndex)
+        if snapshot.recent is not None:
+            return int(snapshot.recent.frameIndex)
+        return int(snapshot.anchor.frameIndex)
+
     def initialize(self, backend: HiTBackend, template: LocalView, templateBox: BBoxXYWH) -> None:
         if self.initialized:
             raise ProtocolError("template cache is already initialized")
         _validateBox(templateBox, template)
-        features = backend.encodeTemplate(template.rgb, templateBox)
+        features = backend.encodeTemplateView(template, templateBox)
         self._anchor = TemplateSample(
             viewId=template.spec.viewId,
             frameIndex=FrameIndex(0),
@@ -106,7 +115,7 @@ class TemplateCache:
         if view is None:
             raise ProtocolError(f"template update viewId is not available: {command.viewId}")
         _validateBox(command.localBox, view)
-        features = backend.encodeTemplate(view.rgb, command.localBox)
+        features = backend.encodeTemplateView(view, command.localBox)
         sample = TemplateSample(
             viewId=command.viewId,
             frameIndex=command.frameIndex,

@@ -1,5 +1,6 @@
 import math
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -140,6 +141,125 @@ class ControllerV2Test(unittest.TestCase):
         self.assertEqual(secondStep.result.frameIndex, FrameIndex(1))
         self.assertFalse(secondStep.result.valid)
         self.assertEqual(secondStep.result.status, TrackStatus.TRACKING)
+
+    def testPipelineUsesRound1AsProvisionalPredictionWithoutCommittingHistory(self) -> None:
+        estimator = SphericalMotionEstimator(windowLength=4, minSamplesForVelocity=2)
+        frame0 = FramePacket(
+            SequenceId("pipeline-provisional"),
+            FrameIndex(0),
+            0,
+            np.zeros((180, 360, 3), dtype=np.uint8),
+        )
+        controller = TrackControllerImpl(
+            self.geometry,
+            self.config,
+            motionEstimator=estimator,
+        )
+        controller.commitInitialization(
+            controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
+        )
+        frame1 = FramePacket(
+            SequenceId("pipeline-provisional"),
+            FrameIndex(1),
+            1_000_000_000,
+            frame0.rgb,
+        )
+        firstPlan = controller.beginFrame(frame1)
+        firstCenter = firstPlan.views[0].bfov.center.yawRad
+        step = controller.consume(
+            firstPlan,
+            (_boxedCandidate(firstPlan.views[0].viewId, firstCenter + 0.20, 0.95),),
+        )
+
+        self.assertIsInstance(step, MoreViewsRequired)
+        assert isinstance(step, MoreViewsRequired)
+        self.assertIn("round1_provisional", controller._planned.prediction.degradedReasons)
+        self.assertEqual(len(estimator.samples), 1)
+        committed = controller.consume(step.plan, ())
+        self.assertIsInstance(committed, FrameCommitted)
+        # The provisional update itself never mutates history. The existing fallback may select
+        # the R1 observation as the frame's final measurement, at which point it is committed once.
+        self.assertEqual(len(estimator.samples), 2)
+        self.assertEqual(estimator.samples[-1].frameIndex, FrameIndex(1))
+
+    def testEscalationClampsInvalidProvisionalFovToGeometryBounds(self) -> None:
+        frame0 = FramePacket(
+            SequenceId("provisional-fov-bounds"),
+            FrameIndex(0),
+            0,
+            np.zeros((180, 360, 3), dtype=np.uint8),
+        )
+        controller = TrackControllerImpl(self.geometry, self.config)
+        controller.commitInitialization(
+            controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
+        )
+        frame1 = FramePacket(
+            SequenceId("provisional-fov-bounds"),
+            FrameIndex(1),
+            1_000_000_000,
+            frame0.rgb,
+        )
+        firstPlan = controller.beginFrame(frame1)
+        original = controller._provisionalRoundPrediction
+        controller._provisionalRoundPrediction = lambda planned, evaluation: replace(
+            original(planned, evaluation),
+            horizontalSizeRad=4.0,
+            verticalSizeRad=4.0,
+        )
+
+        step = controller.consume(
+            firstPlan,
+            (_boxedCandidate(firstPlan.views[0].viewId, 20.0, 0.1),),
+        )
+
+        self.assertIsInstance(step, MoreViewsRequired)
+        assert isinstance(step, MoreViewsRequired)
+        assert controller._planned is not None
+        self.assertEqual(
+            controller._planned.predictedBfov.horizontalFovRad,
+            self.config.geometry.maxFovRad,
+        )
+        self.assertEqual(
+            controller._planned.predictedBfov.verticalFovRad,
+            self.config.geometry.maxFovRad,
+        )
+
+    def testFallbackAdvancesProtocolAndAllowsNextFrame(self) -> None:
+        frame0 = FramePacket(
+            SequenceId("controller-fallback"),
+            FrameIndex(0),
+            0,
+            np.zeros((180, 360, 3), dtype=np.uint8),
+        )
+        controller = TrackControllerImpl(self.geometry, self.config)
+        controller.commitInitialization(
+            controller.buildInitialization(frame0, BBoxXYWH(150.0, 70.0, 40.0, 50.0))
+        )
+        frame1 = FramePacket(
+            SequenceId("controller-fallback"),
+            FrameIndex(1),
+            1_000_000_000,
+            frame0.rgb,
+        )
+        controller.beginFrame(frame1)
+        fallback = controller.commitFallback(
+            frame1,
+            backendRevision=1,
+            reason="GeometryError",
+        )
+
+        self.assertFalse(fallback.valid)
+        self.assertEqual(fallback.frameIndex, FrameIndex(1))
+        self.assertEqual(controller.lastPipelineProfile["reason"], "GeometryError")
+
+        frame2 = FramePacket(
+            SequenceId("controller-fallback"),
+            FrameIndex(2),
+            2_000_000_000,
+            frame0.rgb,
+        )
+        nextPlan = controller.beginFrame(frame2)
+        self.assertEqual(nextPlan.frameIndex, FrameIndex(2))
 
     def testSecondRoundFusesCandidatesFromBothRounds(self) -> None:
         frame0 = FramePacket(

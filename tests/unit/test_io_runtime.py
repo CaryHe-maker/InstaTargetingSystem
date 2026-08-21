@@ -24,7 +24,10 @@ class IoRuntimeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for index in range(2):
-                writeRgbPng(root / f"frame_{index:04d}.png", np.full((4, 6, 3), index * 32, dtype=np.uint8))
+                writeRgbPng(
+                    root / f"frame_{index:04d}.png",
+                    np.full((4, 6, 3), index * 32, dtype=np.uint8),
+                )
 
             source = VideoFrameSource()
             source.open(str(root))
@@ -38,7 +41,10 @@ class IoRuntimeTest(unittest.TestCase):
             self.assertEqual(int(first.frameIndex), 0)
             self.assertEqual(int(second.frameIndex), 1)
             self.assertEqual(first.rgb.shape, (4, 6, 3))
-            np.testing.assert_array_equal(readRgbImage(root / "frame_0000.png")[0, 0], np.array([0, 0, 0], dtype=np.uint8))
+            np.testing.assert_array_equal(
+                readRgbImage(root / "frame_0000.png")[0, 0],
+                np.array([0, 0, 0], dtype=np.uint8),
+            )
 
     def testResultSinkWritesAtomicTextFile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
