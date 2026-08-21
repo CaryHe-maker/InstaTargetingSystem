@@ -25,6 +25,7 @@ from instatarget.geometry import (
     unitVectorsToErpPixels,
     wrapYaw,
 )
+from instatarget.geometry.spherical_geometry import _fitBfovFromVectors
 
 
 class GeometryTest(unittest.TestCase):
@@ -220,6 +221,21 @@ class GeometryTest(unittest.TestCase):
                     outputHeightPx=256,
                 ),
             )
+
+    def testWideCircularSpanSaturatesInsteadOfAborting(self) -> None:
+        # This reproduces the production failure mode (a span around 6.1356 rad)
+        # when a projected boundary covers almost the complete yaw circle.
+        angles = np.linspace(0.0, 2.0 * math.pi - 0.1475, 129, dtype=np.float64)
+        vectors = np.column_stack(
+            (np.sin(angles), np.zeros_like(angles), np.cos(angles))
+        )
+
+        bfov = _fitBfovFromVectors(vectors)
+
+        self.assertGreater(bfov.horizontalFovRad, 0.0)
+        self.assertLess(bfov.horizontalFovRad, math.pi)
+        self.assertGreater(bfov.verticalFovRad, 0.0)
+        self.assertLess(bfov.verticalFovRad, math.pi)
 
 
 def _sampleBoxBoundary(bbox: BBoxXYWH, samplesPerEdge: int) -> tuple[np.ndarray, np.ndarray]:

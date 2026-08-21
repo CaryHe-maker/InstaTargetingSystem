@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
-from instatarget.core.errors import DecodeError, OutputError, ProtocolError
+from instatarget.core.errors import DecodeError, OutputError
 from instatarget.core.types import BBoxXYWH, TrackResult
 from instatarget.geometry.seam import splitSeamBox, wrapPixelX
 

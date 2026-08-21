@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from math import acos, cos, pi
 from collections.abc import Sequence
+from dataclasses import dataclass, field
+from math import acos, pi
 
 import numpy as np
 
@@ -23,7 +23,12 @@ def centerAngularErrorRad(first: BFoV, second: BFoV) -> float:
     return float(acos(dot))
 
 
-def bfovSphericalIoU(first: BFoV, second: BFoV, samplesYaw: int = 256, samplesPitch: int = 128) -> float:
+def bfovSphericalIoU(
+    first: BFoV,
+    second: BFoV,
+    samplesYaw: int = 256,
+    samplesPitch: int = 128,
+) -> float:
     if samplesYaw <= 0 or samplesPitch <= 0:
         raise ValueError("sample counts must be positive")
     yaws = np.linspace(-pi, pi, samplesYaw, endpoint=False, dtype=np.float64) + pi / samplesYaw

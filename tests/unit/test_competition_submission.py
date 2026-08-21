@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from instatarget.app.competition import (
     BfovResultSink,
@@ -8,6 +9,8 @@ from instatarget.app.competition import (
     formatCompetitionResult,
     listSequences,
     loadInitialBfov,
+    runCompetition,
+    writeEmergencyFallback,
 )
 from instatarget.core.types import (
     BBoxXYWH,
@@ -83,6 +86,86 @@ class CompetitionSubmissionTest(unittest.TestCase):
     def testFormatterUsesOfficialFourAngleOrder(self) -> None:
         result = _result(0, _bfov(yaw=0.0, pitch=-0.5, horizontal=1.0, vertical=0.25), valid=True)
         self.assertEqual(formatCompetitionResult(result), "0.000,-28.648,57.296,14.324")
+
+    def testFormatterClampsInternalFovToThreeDecimalSubmissionRange(self) -> None:
+        wide = _result(
+            0,
+            _bfov(yaw=0.0, pitch=0.0, horizontal=2.0 * 3.14159, vertical=1e-8),
+            valid=True,
+        )
+        self.assertEqual(formatCompetitionResult(wide), "0.000,0.000,179.999,0.001")
+
+    def testCompetitionContinuesAfterSequenceFailure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "dataset"
+            output = Path(directory) / "result"
+            root.mkdir()
+            output.mkdir()
+            with (
+                patch(
+                    "instatarget.app.competition.listSequences",
+                    return_value=["seq_0001", "seq_0002", "seq_0003"],
+                ),
+                patch(
+                    "instatarget.app.competition.trackOneSequence",
+                    side_effect=[RuntimeError("geometry failure"), 7, 8],
+                ) as track,
+                patch(
+                    "instatarget.app.competition.writeSequenceFallback",
+                    return_value=6,
+                ) as fallback,
+            ):
+                self.assertEqual(
+                    runCompetition(datasetDir=root, resultDir=output),
+                    0,
+                )
+
+            self.assertEqual(track.call_count, 3)
+            fallback.assert_called_once()
+
+    def testCompetitionContinuesWhenSequenceFallbackAlsoFails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "dataset"
+            output = Path(directory) / "result"
+            root.mkdir()
+            output.mkdir()
+            with (
+                patch(
+                    "instatarget.app.competition.listSequences",
+                    return_value=["broken", "healthy"],
+                ),
+                patch(
+                    "instatarget.app.competition.trackOneSequence",
+                    side_effect=[RuntimeError("runtime failure"), 4],
+                ),
+                patch(
+                    "instatarget.app.competition.writeSequenceFallback",
+                    side_effect=RuntimeError("cannot decode fallback"),
+                ),
+            ):
+                self.assertEqual(
+                    runCompetition(datasetDir=root, resultDir=output),
+                    0,
+                )
+
+            self.assertEqual(
+                (output / "broken.txt").read_text(encoding="utf-8"),
+                "0.000,0.000,60.000,40.000\n",
+            )
+
+    def testEmergencyFallbackPreservesKnownFrameCount(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "sequence.txt"
+            self.assertEqual(writeEmergencyFallback(destination, 4), 4)
+            self.assertEqual(
+                destination.read_text(encoding="utf-8").splitlines(),
+                [
+                    "0.000,0.000,60.000,40.000",
+                    "0.000,0.000,0.000,0.000",
+                    "0.000,0.000,0.000,0.000",
+                    "0.000,0.000,0.000,0.000",
+                ],
+            )
 
 
 def _bfov(*, yaw: float, pitch: float, horizontal: float, vertical: float) -> BFoV:

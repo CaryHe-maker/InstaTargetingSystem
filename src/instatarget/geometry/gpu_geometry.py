@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from math import pi
-import os
 from time import perf_counter_ns
 from typing import Any
 
@@ -41,6 +41,7 @@ class GpuGeometryImpl(SphericalGeometryImpl):
             [0.229, 0.224, 0.225], device=self._device, dtype=torch.float32
         ).view(1, 3, 1, 1)
         self._lastProfile: dict[str, int | float | bool | str] = {}
+        self._closed = False
 
     @property
     def lastProfile(self) -> dict[str, int | float | bool | str]:
@@ -51,6 +52,22 @@ class GpuGeometryImpl(SphericalGeometryImpl):
         self._frameTensor = None
         self._hostTensor = None
         self._frameIndex = None
+
+    def close(self) -> None:
+        """Synchronize and release persistent CUDA tensors before context teardown."""
+        if self._closed:
+            return
+        try:
+            self._torch.cuda.synchronize(self._device)
+        except RuntimeError:
+            # Preserve an earlier asynchronous CUDA error while still dropping
+            # references that would otherwise survive until interpreter shutdown.
+            pass
+        self.releaseFrame()
+        self._localGridCache.clear()
+        self._mean = None
+        self._std = None
+        self._closed = True
 
     def cropViews(self, frame: FramePacket, specs: Sequence[ViewSpec]) -> list[LocalView]:
         started = perf_counter_ns()

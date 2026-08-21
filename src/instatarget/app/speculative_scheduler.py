@@ -15,7 +15,6 @@ from instatarget.core.types import (
     TaskKey,
 )
 
-
 _NORMAL_ROUND_VIEW_COUNT = 4
 
 

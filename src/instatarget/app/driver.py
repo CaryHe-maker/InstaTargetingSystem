@@ -100,7 +100,9 @@ class _PrefetchReader:
             "pipelinePrefetchEnabled": True,
             "pipelineDecodeNs": int(self._decodeNs.pop(frameIndex, 0)),
             "pipelineQueueWaitNs": int(waitNs),
-            "pipelineReadyLeadNs": int(max(0, perf_counter_ns() - self._readyNs.pop(frameIndex, 0))),
+            "pipelineReadyLeadNs": int(
+                max(0, perf_counter_ns() - self._readyNs.pop(frameIndex, 0))
+            ),
             "pipelineFrameIndex": frameIndex,
         }
         return item
@@ -235,14 +237,38 @@ def runTracking(
                 )
                 _startProcessing(processingTimer)
                 frame = None
+                result = None
                 try:
                     decodeStartedNs = _profileNow(profiler)
                     frame = pipelineReader.read()
                     if frame is not None:
                         _startProfileFrame(profiler, int(frame.frameIndex), decodeStartedNs)
                         _recordPipelineProfile(profiler, pipelineReader, controller)
-                        with _profile(profiler, "controller"):
-                            plan = controller.beginFrame(frame)
+                        try:
+                            with _profile(profiler, "controller"):
+                                plan = controller.beginFrame(frame)
+                        except Exception as error:
+                            result = _fallbackFrameResult(
+                                controller,
+                                frame,
+                                error,
+                                backendRevision=getattr(backend, "templateRevision", None),
+                            )
+                            _finishProfileFrame(
+                                profiler,
+                                iterationStartedNs,
+                                batchSizes=[],
+                                forwardCount=0,
+                                frameFallback=True,
+                            )
+                            sink.write(result)
+                            if resultRecorder is not None:
+                                resultRecorder.record(frame, result, stateScore=None, roundCount=0)
+                            releaseFrame = getattr(geometry, "releaseFrame", None)
+                            if callable(releaseFrame):
+                                releaseFrame()
+                            resultCount += 1
+                            continue
                         batchSizes: list[int] = []
                         visualizationBatches: list[
                             tuple[
@@ -252,14 +278,15 @@ def runTracking(
                             ]
                         ] = []
                         while True:
-                            with _profile(profiler, "crop"):
-                                views = tuple(geometry.cropViews(frame, plan.views))
-                            _recordGeometryProfile(profiler, geometry)
-                            batchSizes.append(len(views))
-                            with _profile(profiler, "backend"):
-                                rawObservations = tuple(
-                                    backend.infer(views, plan.templateCommand)
-                                )
+                            try:
+                                with _profile(profiler, "crop"):
+                                    views = tuple(geometry.cropViews(frame, plan.views))
+                                _recordGeometryProfile(profiler, geometry)
+                                batchSizes.append(len(views))
+                                with _profile(profiler, "backend"):
+                                    rawObservations = tuple(
+                                        backend.infer(views, plan.templateCommand)
+                                    )
                                 if recorder is not None and hasattr(
                                     recorder, "setActiveTemplateFrame"
                                 ):
@@ -267,24 +294,34 @@ def runTracking(
                                         int(frame.frameIndex),
                                         getattr(backend, "activeTemplateFrameIndex", 0),
                                     )
-                            _recordBackendProfile(profiler, backend)
-                            with _profile(profiler, "calibration"):
-                                observations = calibrateLocalAppearanceProbabilities(
-                                    rawObservations,
-                                    scoreCalibration,
+                                _recordBackendProfile(profiler, backend)
+                                with _profile(profiler, "calibration"):
+                                    observations = calibrateLocalAppearanceProbabilities(
+                                        rawObservations,
+                                        scoreCalibration,
+                                    )
+                                with _profile(profiler, "projection"):
+                                    projected = _projectValidObservations(
+                                        frame=frame,
+                                        views=views,
+                                        observations=observations,
+                                        predictedMotion=plan.predictedMotion,
+                                        geometry=geometry,
+                                        scoreCalibration=scoreCalibration,
+                                    )
+                                visualizationBatches.append((views, observations, projected))
+                                with _profile(profiler, "controller"):
+                                    step = controller.consume(plan, projected)
+                            except Exception as error:
+                                result = _fallbackFrameResult(
+                                    controller,
+                                    frame,
+                                    error,
+                                    backendRevision=getattr(
+                                        backend, "templateRevision", None
+                                    ),
                                 )
-                            with _profile(profiler, "projection"):
-                                projected = _projectValidObservations(
-                                    frame=frame,
-                                    views=views,
-                                    observations=observations,
-                                    predictedMotion=plan.predictedMotion,
-                                    geometry=geometry,
-                                    scoreCalibration=scoreCalibration,
-                                )
-                            visualizationBatches.append((views, observations, projected))
-                            with _profile(profiler, "controller"):
-                                step = controller.consume(plan, projected)
+                                break
                             if isinstance(step, MoreViewsRequired):
                                 _recordPipelineProfile(profiler, pipelineReader, controller)
                                 plan = step.plan
@@ -296,6 +333,8 @@ def runTracking(
                     _stopProcessing(processingTimer)
                 if frame is None:
                     break
+                if result is None:
+                    raise RuntimeError("tracking frame produced no result")
                 _finishProfileFrame(
                     profiler,
                     iterationStartedNs,
@@ -332,6 +371,7 @@ def runTracking(
                 if callable(releaseFrame):
                     releaseFrame()
                 resultCount += 1
+                del result
         finally:
             pipelineReader.close()
             releaseFrame = getattr(geometry, "releaseFrame", None)
@@ -357,6 +397,36 @@ def openSink(sink: ResultSinkProtocol, destination: str) -> None:
 
 def closeBackend(backend: TrackerBackend) -> None:
     backend.close()
+
+
+def _fallbackFrameResult(
+    controller: TrackControllerImpl,
+    frame: FramePacket,
+    error: BaseException,
+    *,
+    backendRevision: int | None = None,
+):
+    """Convert any expected runtime failure into one invalid frame result."""
+    print(
+        "[runtime] frame failed; emitted zero-confidence fallback: "
+        f"sequence={frame.sequenceId}, frame={int(frame.frameIndex)}, reason={error}",
+        file=sys.stderr,
+    )
+    return controller.commitFallback(
+        frame,
+        backendRevision=backendRevision,
+        reason=type(error).__name__,
+    )
+
+
+def closeRuntime(runtime: RuntimeBundle) -> None:
+    """Release Geometry CUDA state before the backend empties the CUDA cache."""
+    try:
+        closeGeometry = getattr(runtime.geometry, "close", None)
+        if callable(closeGeometry):
+            closeGeometry()
+    finally:
+        closeBackend(runtime.backend)
 
 
 def _projectObservation(
@@ -581,6 +651,7 @@ def _recordPipelineProfile(
 __all__ = [
     "RuntimeBundle",
     "buildRuntime",
+    "closeRuntime",
     "closeBackend",
     "finalizeSink",
     "openSink",

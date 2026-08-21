@@ -343,6 +343,17 @@ class PyTorchHiTSession:
     def close(self) -> None:
         if self._closed:
             return
+        try:
+            # GPU Geometry and HiT inference enqueue asynchronous work.  Synchronize
+            # before dropping the model and reusable buffers so the CUDA caching
+            # allocator does not need to record events while the interpreter is
+            # tearing down the context.  On Windows this otherwise makes a
+            # subsequent evaluation process intermittently abort in CUDAEvent::record.
+            self._torch.cuda.synchronize(self._device)
+        except RuntimeError:
+            # Preserve the original inference failure when a prior asynchronous
+            # CUDA error has already poisoned the context.
+            pass
         self._model = None
         self._cpuBuffers.clear()
         self._pinnedBuffers.clear()

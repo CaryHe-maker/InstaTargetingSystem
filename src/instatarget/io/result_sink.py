@@ -8,7 +8,7 @@ from pathlib import Path
 
 from instatarget.core.errors import OutputError, ProtocolError
 from instatarget.core.protocols import ResultSink as ResultSinkProtocol
-from instatarget.core.types import FrameIndex, TrackResult
+from instatarget.core.types import TrackResult
 from instatarget.io.result_writer import TextResultWriter
 
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import which
@@ -165,7 +164,13 @@ class VideoFrameSource(FrameSourceProtocol):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-        except (OSError, subprocess.CalledProcessError, KeyError, IndexError, json.JSONDecodeError) as error:
+        except (
+            OSError,
+            subprocess.CalledProcessError,
+            KeyError,
+            IndexError,
+            json.JSONDecodeError,
+        ) as error:
             raise DecodeError(f"cannot open video source {path}: {error}") from error
 
     def _readDirectoryFrame(self) -> FramePacket | None:

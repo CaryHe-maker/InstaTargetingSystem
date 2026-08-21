@@ -202,10 +202,13 @@ def _fitBfovFromVectors(vectors: NDArray[np.float64]) -> BFoV:
         verticalAngles = np.arctan2(vectors @ up, forwardDots)
         _, horizontalFovRad = _minimalCircularAngleInterval(horizontalAngles)
         _, verticalFovRad = _linearAngleInterval(verticalAngles)
-    if not 0.0 < horizontalFovRad < np.pi:
-        raise GeometryError(f"horizontal BFoV span is invalid: {horizontalFovRad}")
-    if not 0.0 < verticalFovRad < np.pi:
-        raise GeometryError(f"vertical BFoV span is invalid: {verticalFovRad}")
+    # A perspective boundary can straddle the camera's rear hemisphere.  Its minimal
+    # circular angular interval may then approach 2*pi (for example 6.1356 rad),
+    # which cannot be represented by the production BFoV contract.  This is not bad
+    # input: it is a degenerate candidate envelope.  Saturate it to the widest valid
+    # perspective BFoV instead of aborting the entire sequence.
+    horizontalFovRad = _safePerspectiveFov(horizontalFovRad)
+    verticalFovRad = _safePerspectiveFov(verticalFovRad)
     return BFoV(
         center=center,
         horizontalFovRad=horizontalFovRad,
@@ -231,6 +234,14 @@ def _minimalCircularAngleInterval(
     span = max(0.0, float(2.0 * pi - allGaps[largestGapIndex]))
     midpoint = _wrapAngle(start + span / 2.0)
     return midpoint, span
+
+
+def _safePerspectiveFov(value: float) -> float:
+    if not np.isfinite(value):
+        raise GeometryError(f"BFoV span must be finite: {value}")
+    minimum = float(np.finfo(np.float64).eps)
+    maximum = float(np.nextafter(np.pi, 0.0))
+    return min(maximum, max(minimum, float(value)))
 
 
 def _linearAngleInterval(angles: NDArray[np.float64]) -> tuple[float, float]:

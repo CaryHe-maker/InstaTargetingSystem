@@ -285,7 +285,8 @@ class LocalView:
             if tuple(shape) != (3, self.spec.outputHeightPx, self.spec.outputWidthPx):
                 raise ProtocolError(
                     "local deviceRgb shape must be "
-                    f"{(3, self.spec.outputHeightPx, self.spec.outputWidthPx)}, actual={tuple(shape)}"
+                    f"{(3, self.spec.outputHeightPx, self.spec.outputWidthPx)}, "
+                    f"actual={tuple(shape)}"
                 )
 
 

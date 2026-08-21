@@ -1,6 +1,7 @@
 """Geometry package public surface."""
 
 from instatarget.geometry.bfov_projector import BfovProjector
+from instatarget.geometry.gpu_geometry import GpuGeometryImpl
 from instatarget.geometry.projection_math import (
     angleToPixelOffsetPx,
     cameraBasis,
@@ -23,7 +24,6 @@ from instatarget.geometry.seam import (
     wrapPixelX,
 )
 from instatarget.geometry.spherical_geometry import SphericalGeometryImpl
-from instatarget.geometry.gpu_geometry import GpuGeometryImpl
 
 __all__ = [
     "BfovProjector",
