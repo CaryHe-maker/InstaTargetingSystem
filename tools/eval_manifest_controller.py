@@ -208,6 +208,12 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use raw Stage 3 presence*quality for pre-calibration E01 only.",
     )
+    parser.add_argument(
+        "--fusion-strategy",
+        choices=("legacy", "presence_quality", "geometric_consensus", "weighted_box"),
+        default=None,
+        help="Override evaluator.fusionStrategy for this run.",
+    )
     return parser
 
 
@@ -254,6 +260,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
         visualization=replace(appConfig.visualization, enabled=False),
     )
+    if args.fusion_strategy is not None:
+        appConfig = replace(
+            appConfig,
+            evaluator=replace(appConfig.evaluator, fusionStrategy=args.fusion_strategy),
+        )
     selected = records[: args.max_frames] if args.max_frames is not None else records
     truth = {record.frameIndex: record for record in selected}
     source = ManifestVideoSource(records, args.max_frames)

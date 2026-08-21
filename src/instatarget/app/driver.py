@@ -473,6 +473,8 @@ def _projectObservation(
         motionProbability=motion.probability,
         motionReliability=motion.reliability,
         singleScore=singleScore,
+        presenceProbability=observation.presenceProbability,
+        qualityProbability=observation.qualityProbability,
         erpBoundary=projection.erpBoundary,
         envelopeInflation=projection.envelopeInflation,
         normalizedRadius=normalizedRadius,
