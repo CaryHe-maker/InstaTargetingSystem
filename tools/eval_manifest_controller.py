@@ -14,7 +14,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from instatarget.app.driver import buildRuntime, closeBackend, runTracking
+from instatarget.app.driver import buildRuntime, closeRuntime, runTracking
 from instatarget.core.config import loadConfig
 from instatarget.core.types import FrameIndex, FramePacket, SequenceId, TrackResult
 from instatarget.eval.otb_metrics import auc, circularBBoxIoU, trackingLossRate
@@ -279,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         sink.finalize(count)
     finally:
-        closeBackend(runtime.backend)
+        closeRuntime(runtime)
         source.close()
 
     report = _summarize(args, selected, sink.results, timer, recorder)
