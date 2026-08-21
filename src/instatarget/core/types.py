@@ -253,12 +253,17 @@ class ViewSpec:
     bfov: BFoV
     outputWidthPx: int
     outputHeightPx: int
+    erpCrop: BBoxXYWH | None = None
 
     def __post_init__(self) -> None:
         if self.viewId < 0:
             raise ProtocolError("viewId must be non-negative")
         if self.outputWidthPx <= 0 or self.outputHeightPx <= 0:
             raise ProtocolError("view output dimensions must be positive")
+        if self.erpCrop is not None and (
+            self.erpCrop.xPx < 0.0 or self.erpCrop.yPx < 0.0
+        ):
+            raise ProtocolError("direct ERP crop must start inside the frame")
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +272,7 @@ class LocalView:
 
     spec: ViewSpec
     rgb: NDArray[np.uint8]
+    deviceRgb: object | None = None
 
     def __post_init__(self) -> None:
         expectedShape = (self.spec.outputHeightPx, self.spec.outputWidthPx)
@@ -276,6 +282,16 @@ class LocalView:
             raise ProtocolError(
                 f"local rgb shape must be {(*expectedShape, 3)}, actual={self.rgb.shape}"
             )
+        if self.deviceRgb is not None:
+            shape = getattr(self.deviceRgb, "shape", None)
+            ndim = getattr(self.deviceRgb, "ndim", None)
+            if shape is None or ndim != 3:
+                raise ProtocolError("local deviceRgb must be a [C, H, W] tensor-like object")
+            if tuple(shape) != (3, self.spec.outputHeightPx, self.spec.outputWidthPx):
+                raise ProtocolError(
+                    "local deviceRgb shape must be "
+                    f"{(3, self.spec.outputHeightPx, self.spec.outputWidthPx)}, actual={tuple(shape)}"
+                )
 
 
 class InferenceRole(StrEnum):

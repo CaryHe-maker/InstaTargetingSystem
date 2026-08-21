@@ -276,6 +276,8 @@ class FrameTransaction:
     attempts: list[AttemptRecord] = field(default_factory=list)
     recoveryMemory: RecoveryMemory | None = None
     refinementCenters: tuple[SphericalPoint, ...] = ()
+    provisionalPrediction: MotionPrediction | None = None
+    provisionalPredictionRevision: int = 0
 
 
 @dataclass(slots=True)

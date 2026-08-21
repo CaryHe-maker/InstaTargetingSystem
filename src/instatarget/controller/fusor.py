@@ -28,6 +28,8 @@ class FusionBoxMode(StrEnum):
     MIN_UNION = "min_union"
     REFERENCE_ADAPTIVE = "reference_adaptive"
     BEST_SOURCE = "best_source"
+    WEIGHTED_BOX = "weighted_box"
+    ROBUST_SPHERICAL_CONSENSUS = "robust_spherical_consensus"
 
 
 class Fusor:
@@ -53,7 +55,8 @@ class Fusor:
         except ValueError as error:
             raise ValueError(
                 "fusion boxMode must be 'max_intersection', 'min_union', "
-                "'reference_adaptive', or 'best_source'"
+                "'reference_adaptive', 'best_source', 'weighted_box', or "
+                "'robust_spherical_consensus'"
             ) from error
 
     def fuse(
@@ -98,6 +101,13 @@ class Fusor:
                 if candidate is not None:
                     candidates.append(candidate)
         best = max(candidates, key=_candidateRank)
+        observationsById = {item.viewId: item for item in observations}
+        if self._boxMode is FusionBoxMode.WEIGHTED_BOX and best.fused:
+            best = self._weightedGeometry(best, observationsById, frameWidthPx, frameHeightPx)
+        if self._boxMode is FusionBoxMode.ROBUST_SPHERICAL_CONSENSUS and best.fused:
+            best = self._robustGeometry(best, observations, frameWidthPx, frameHeightPx)
+        if self._boxMode in {FusionBoxMode.WEIGHTED_BOX, FusionBoxMode.ROBUST_SPHERICAL_CONSENSUS}:
+            return best
         if self._boxMode is not FusionBoxMode.REFERENCE_ADAPTIVE or not best.fused:
             return best
         observationsById = {item.viewId: item for item in observations}
@@ -116,6 +126,72 @@ class Fusor:
             bbox=bbox,
             bfov=_intersectionBfov(bbox, self._geometry, frameWidthPx, frameHeightPx),
         )
+
+    def _weightedGeometry(
+        self,
+        candidate: EvaluatedCandidate,
+        observationsById: dict[int, ProjectedObservation],
+        frameWidthPx: int,
+        frameHeightPx: int,
+    ) -> EvaluatedCandidate:
+        first, second = (observationsById[item] for item in candidate.sourceViewIds)
+        weights = np.asarray([_singleScore(first), _singleScore(second)], dtype=np.float64)
+        if not np.isfinite(weights).all() or float(weights.sum()) <= 1e-9:
+            return candidate
+        weights /= float(weights.sum())
+        reference = first.bbox.xPx + first.bbox.widthPx / 2.0
+        centers = np.asarray([
+            _unwrapCenter(item.bbox.xPx + item.bbox.widthPx / 2.0, reference, frameWidthPx)
+            for item in (first, second)
+        ], dtype=np.float64)
+        y = float(np.dot(weights, [item.bbox.yPx + item.bbox.heightPx / 2.0 for item in (first, second)]))
+        width = float(np.exp(np.dot(weights, [np.log(item.bbox.widthPx) for item in (first, second)])))
+        height = float(np.exp(np.dot(weights, [np.log(item.bbox.heightPx) for item in (first, second)])))
+        x = float(np.dot(weights, centers) - width / 2.0) % frameWidthPx
+        y = float(np.clip(y - height / 2.0, 0.0, max(0.0, frameHeightPx - height)))
+        bbox = BBoxXYWH(xPx=x, yPx=y, widthPx=min(width, float(frameWidthPx)), heightPx=min(height, float(frameHeightPx)))
+        try:
+            bfov = self._geometry.bboxToBfov(bbox, frameWidthPx, frameHeightPx)
+        except Exception:
+            return candidate
+        return replace(candidate, bbox=bbox, bfov=bfov)
+
+    def _robustGeometry(
+        self,
+        candidate: EvaluatedCandidate,
+        observations: Sequence[ProjectedObservation],
+        frameWidthPx: int,
+        frameHeightPx: int,
+    ) -> EvaluatedCandidate:
+        seeds = [item for item in observations if item.viewId in candidate.sourceViewIds]
+        if len(seeds) < 2:
+            return candidate
+        support = [item for item in observations if _singleScore(item) >= self._sourceMinConfidence and any(_overlapRate(item.bbox, seed.bbox, frameWidthPx) >= self._overlapRate for seed in seeds)]
+        if len(support) < 2:
+            return candidate
+        # A bounded Huber-like center consensus; dimensions use weighted medians.
+        reference = seeds[0].bbox.xPx + seeds[0].bbox.widthPx / 2.0
+        centers = np.asarray([_unwrapCenter(item.bbox.xPx + item.bbox.widthPx / 2.0, reference, frameWidthPx) for item in support], dtype=np.float64)
+        weights = np.asarray([_singleScore(item) for item in support], dtype=np.float64)
+        if not np.isfinite(centers).all() or not np.isfinite(weights).all() or float(weights.sum()) <= 1e-9:
+            return candidate
+        weights /= float(weights.sum())
+        center = float(np.dot(weights, centers))
+        for _ in range(3):
+            residual = np.abs(centers - center)
+            delta = np.clip(0.25 * max(seeds[0].bfov.horizontalFovRad, seeds[0].bfov.verticalFovRad), np.deg2rad(1.0), np.deg2rad(15.0)) * frameWidthPx / (2.0 * np.pi)
+            robust = np.minimum(1.0, delta / np.maximum(residual, 1e-9))
+            effective = weights * robust
+            center = float(np.dot(effective, centers) / max(float(effective.sum()), 1e-9))
+        width = _weightedMedian([item.bbox.widthPx for item in support], weights)
+        height = _weightedMedian([item.bbox.heightPx for item in support], weights)
+        y = float(np.dot(weights, [item.bbox.yPx + item.bbox.heightPx / 2.0 for item in support]) - height / 2.0)
+        bbox = BBoxXYWH(xPx=float(center - width / 2.0) % frameWidthPx, yPx=float(np.clip(y, 0.0, max(0.0, frameHeightPx - height))), widthPx=min(width, float(frameWidthPx)), heightPx=min(height, float(frameHeightPx)))
+        try:
+            bfov = self._geometry.bboxToBfov(bbox, frameWidthPx, frameHeightPx)
+        except Exception:
+            return candidate
+        return replace(candidate, bbox=bbox, bfov=bfov)
 
     def _fusedCandidate(
         self,
@@ -223,6 +299,23 @@ def _singleCandidate(observation: ProjectedObservation) -> EvaluatedCandidate:
 
 def _candidateRank(candidate: EvaluatedCandidate) -> tuple[float, bool, int]:
     return candidate.confidence, candidate.fused, -candidate.representativeViewId
+
+
+def _unwrapCenter(value: float, reference: float, width: int) -> float:
+    while value - reference > width / 2.0:
+        value -= width
+    while value - reference < -width / 2.0:
+        value += width
+    return value
+
+
+def _weightedMedian(values: Sequence[float], weights: np.ndarray) -> float:
+    order = np.argsort(np.asarray(values, dtype=np.float64))
+    orderedValues = np.asarray(values, dtype=np.float64)[order]
+    orderedWeights = np.asarray(weights, dtype=np.float64)[order]
+    cumulative = np.cumsum(orderedWeights)
+    index = int(np.searchsorted(cumulative, 0.5, side="left"))
+    return float(orderedValues[min(index, len(orderedValues) - 1)])
 
 
 def _xSegments(box: BBoxXYWH, frameWidthPx: int) -> tuple[tuple[float, float], ...]:

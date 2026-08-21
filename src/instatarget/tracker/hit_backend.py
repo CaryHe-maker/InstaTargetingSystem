@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -97,6 +97,20 @@ class HiTBackend:
         except Exception as error:
             raise ModelError(f"HiT template encoding failed: {error}") from error
 
+    def encodeTemplateView(self, view: Any, bbox: BBoxXYWH) -> object:
+        self._requireOpen()
+        deviceRgb = getattr(view, "deviceRgb", None)
+        if deviceRgb is not None:
+            method = getattr(self._session, "encodeTemplateDevice", None)
+            if callable(method):
+                try:
+                    return method(deviceRgb, bbox)
+                except (ModelError, ProtocolError):
+                    raise
+                except Exception as error:
+                    raise ModelError(f"HiT device template encoding failed: {error}") from error
+        return self.encodeTemplate(view.rgb, bbox)
+
     def infer(self, rgb: NDArray[np.uint8], templateFeatures: Sequence[object]) -> HiTPrediction:
         return self.inferBatch((rgb,), templateFeatures)[0]
 
@@ -128,6 +142,35 @@ class HiTBackend:
             raise ModelError(
                 "HiT session returned an invalid batch size: "
                 f"expected={len(images)}, actual={len(predictions)}"
+            )
+        if any(not isinstance(prediction, HiTPrediction) for prediction in predictions):
+            raise ModelError("HiT session returned an invalid prediction object")
+        return predictions
+
+    def inferDeviceBatch(
+        self,
+        deviceRgbs: Sequence[Any],
+        imageSizes: Sequence[tuple[int, int]],
+        templateFeatures: Sequence[object],
+    ) -> tuple[HiTPrediction, ...]:
+        self._requireOpen()
+        if not deviceRgbs:
+            return ()
+        if len(deviceRgbs) != len(imageSizes):
+            raise ProtocolError("device RGBs and image sizes must have equal length")
+        method = getattr(self._session, "inferDeviceBatch", None)
+        if not callable(method):
+            raise ProtocolError("HiT session does not support device tensor inference")
+        try:
+            predictions = tuple(method(deviceRgbs, imageSizes, templateFeatures))
+        except (ModelError, ProtocolError):
+            raise
+        except Exception as error:
+            raise ModelError(f"HiT device batch inference failed: {error}") from error
+        if len(predictions) != len(deviceRgbs):
+            raise ModelError(
+                "HiT session returned an invalid device batch size: "
+                f"expected={len(deviceRgbs)}, actual={len(predictions)}"
             )
         if any(not isinstance(prediction, HiTPrediction) for prediction in predictions):
             raise ModelError("HiT session returned an invalid prediction object")
