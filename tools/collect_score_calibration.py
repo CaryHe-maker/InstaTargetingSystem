@@ -1,4 +1,4 @@
-"""Collect Stage 3 calibration candidates from canonical labeled views."""
+"""Collect ARTrackV2 calibration candidates from canonical labeled views."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from instatarget.core.types import BBoxXYWH, BFoV, ViewSpec
 from instatarget.eval.otb_metrics import bboxIoU, circularBBoxIoU
 from instatarget.geometry.projection_math import makeSphericalPoint
 from instatarget.geometry.spherical_geometry import SphericalGeometryImpl
-from instatarget.tracker.pytorch_hit_session import PyTorchHiTSession
+from instatarget.tracker.artrack_model import PyTorchARTrackV2Session
 from instatarget.training.dataset import (
     ManifestRecord,
     VideoFrameDecoder,
@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     geometry = SphericalGeometryImpl(
         boundarySamplesPerEdge=config.geometry.boundarySamplesPerEdge
     )
-    session = PyTorchHiTSession(modelConfig)
+    session = PyTorchARTrackV2Session(modelConfig)
     decoder = VideoFrameDecoder(cacheSize=2)
     rows: list[dict[str, object]] = []
     try:

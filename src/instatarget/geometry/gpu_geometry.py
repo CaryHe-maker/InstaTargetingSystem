@@ -1,4 +1,4 @@
-"""CUDA perspective geometry for direct HiT device-tensor inference."""
+"""CUDA perspective geometry for direct tracker device-tensor inference."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from instatarget.geometry.spherical_geometry import SphericalGeometryImpl
 
 
 class GpuGeometryImpl(SphericalGeometryImpl):
-    """Keep crop/resize/normalization on CUDA and expose tensors to HiT."""
+    """Keep crop/resize/normalization on CUDA and expose tensors to ARTrackV2."""
 
     def __init__(self, boundarySamplesPerEdge: int = 65) -> None:
         super().__init__(boundarySamplesPerEdge=boundarySamplesPerEdge)
@@ -85,7 +85,7 @@ class GpuGeometryImpl(SphericalGeometryImpl):
                     dtype=np.uint8,
                 )
                 result.append(LocalView(spec=spec, rgb=placeholder, deviceRgb=tensor))
-        # Establish a synchronous ownership boundary before HiT consumes the tensors.
+        # Establish a synchronous ownership boundary before ARTrackV2 consumes the tensors.
         self._stream.synchronize()
         self._synchronizeForProfile()
         gpuCropNs = perf_counter_ns() - cropStarted

@@ -15,10 +15,8 @@ tests
 tools
 third_party
 
-# Only the compact inference checkpoint enters the build context.
+# Only the ARTrackV2-B-256 inference checkpoint enters the build context.
 models/*
-!models/hit_small_stage3_inference.pth
-!models/hit_small_stage3_inference.calibration.json
 
 # Local-only AirSim360 diagnostic entrypoints and development modules.
 src/instatarget/app/commands.py
@@ -27,8 +25,6 @@ src/instatarget/app/track_airsim360.py
 src/instatarget/data/
 src/instatarget/eval/
 src/instatarget/training/*
-!src/instatarget/training/__init__.py
-!src/instatarget/training/model.py
 src/instatarget/adapters/
 src/instatarget/utils/
 src/instatarget/datasets/
@@ -36,5 +32,6 @@ src/instatarget/track.py
 src/instatarget/track_airsim360.py
 
 *.tar
+!models/artrackv2_b_256.pth.tar
 *.tar.gz
 *.zip

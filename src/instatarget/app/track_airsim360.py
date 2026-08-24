@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
                     stages=frozenset(("local_rgb", "backend_box", "geometry_box")),
                 ),
             )
-        runtime = buildRuntime(config)
+        runtime = buildRuntime(config, allowUncalibratedScoring=config.scoring.calibrationArtifact is None)
         source.open(args.dataset_root, args.sequence)
         initialFrame = source.read()
         if initialFrame is None:

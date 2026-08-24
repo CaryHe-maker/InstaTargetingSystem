@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     source = None
     try:
         config = loadConfig(args.config)
-        runtime = buildRuntime(config)
+        runtime = buildRuntime(config, allowUncalibratedScoring=config.scoring.calibrationArtifact is None)
         source = FrameSource(recursive=args.recursive, sequenceId=args.sequence_id)
         source.open(args.input)
         openSink(runtime.sink, args.output)

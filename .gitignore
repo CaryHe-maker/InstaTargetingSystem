@@ -105,12 +105,11 @@ checkpoints/
 *.plan
 *.trt
 
-# The bundled HiT implementation is source code, not a model artifact.
-!src/instatarget/vendor/hit/
-!src/instatarget/vendor/hit/lib/
-!src/instatarget/vendor/hit/lib/**
-src/instatarget/vendor/hit/lib/**/__pycache__/
-src/instatarget/vendor/hit/lib/**/*.pyc
+# The bundled ARTrackV2 implementation is source code, not a model artifact.
+!src/instatarget/vendor/artrackv2/
+!src/instatarget/vendor/artrackv2/**
+src/instatarget/vendor/artrackv2/**/__pycache__/
+src/instatarget/vendor/artrackv2/**/*.pyc
 
 # Vendored reference implementations
 third_party/
@@ -136,10 +135,9 @@ docker/*.tar
 !*.template
 
 # GitHub clones must contain the complete competition Docker build context.
-# Keep only the compact Stage 3 checkpoint (< GitHub's 100 MB file limit), its
-# hash-bound calibration artifact, and documentation; raw training weights stay ignored.
+# Keep the ARTrackV2 checkpoint if it is supplied locally; raw training weights
+# and generated artifacts remain ignored.
 !models/
 models/*
 !models/README.md
-!models/hit_small_stage3_inference.pth
-!models/hit_small_stage3_inference.calibration.json
+!models/artrackv2_b_256.pth.tar

@@ -39,11 +39,11 @@ from instatarget.core.types import (
 )
 from instatarget.geometry import GpuGeometryImpl
 from instatarget.io.result_sink import FileResultSink
-from instatarget.tracker import HiTBackend, PyTorchHiTSession, TrackerBackendImpl
+from instatarget.tracker import ARTrackBackend, ARTrackSession, PyTorchARTrackV2Session, TrackerBackendImpl
 
 if TYPE_CHECKING:
     from instatarget.eval.profiler import RuntimeProfiler
-    from instatarget.tracker.hit_backend import HiTSession
+    from instatarget.tracker.artrack_model import ARTrackSession
     from instatarget.visualization.recorder import VisualizationRecorder
     from instatarget.visualization.result import ResultVisualizationRecorder
     from instatarget.visualization.time_counter import TimeCounter
@@ -144,11 +144,11 @@ class _PrefetchReader:
 def buildRuntime(
     config: AppConfig,
     *,
-    hitSessionFactory: Callable[[ModelConfig], HiTSession] | None = None,
+    artrackSessionFactory: Callable[[ModelConfig], ARTrackSession] | None = None,
     geometryFactory: Callable[[int], SphericalGeometry] | None = None,
     allowUncalibratedScoring: bool = False,
 ) -> RuntimeBundle:
-    sessionFactory = hitSessionFactory or PyTorchHiTSession
+    sessionFactory = artrackSessionFactory or PyTorchARTrackV2Session
     geometry = (
         geometryFactory(config.geometry.boundarySamplesPerEdge)
         if geometryFactory is not None
@@ -157,7 +157,7 @@ def buildRuntime(
         )
     )
     rgbSession = sessionFactory(config.model)
-    backend = TrackerBackendImpl(HiTBackend(rgbSession))
+    backend = TrackerBackendImpl(ARTrackBackend(rgbSession))
     controller = TrackControllerImpl(geometry, config)
     sink = FileResultSink()
     recorder = None

@@ -35,12 +35,9 @@ class CoreConfigTest(unittest.TestCase):
         self.assertEqual(config.speculativePipeline.maxSpeculativeAgeFrames, 1)
         self.assertEqual(
             config.model.weights,
-            REPOSITORY_ROOT / "models" / "hit_small_stage3_inference.pth",
+            REPOSITORY_ROOT / "models" / "artrackv2_b_256.pth.tar",
         )
-        self.assertEqual(
-            config.scoring.calibrationArtifact,
-            REPOSITORY_ROOT / "models" / "hit_small_stage3_inference.calibration.json",
-        )
+        self.assertIsNone(config.scoring.calibrationArtifact)
         self.assertTrue(config.scoring.requireCheckpointHashMatch)
         self.assertFalse(config.visualization.enabled)
         self.assertEqual(
