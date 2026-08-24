@@ -1,6 +1,6 @@
 # 快速使用
 
-1. 下载 `ARTrackV2-B-256` checkpoint，保存为 `models/artrackv2_b_256.pth.tar`。
+1. 安装 Git LFS 并执行 `git lfs pull`，确认 `models/artrackv2_b_256.pth.tar` 为完整实体文件。
 2. 安装 `requirements.txt` 中与 PostTrainV2.4 相同的依赖。
 3. 使用 `configs/RGBonly.yaml` 运行 AirSim360 数据；默认数据根目录可指向
    `E:\NewDownload\train`。

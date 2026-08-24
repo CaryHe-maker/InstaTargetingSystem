@@ -18,5 +18,6 @@
 
 ## RGB-only 线程
 
-比赛与本地运行使用同一个 RGB-only AppConfig schema 和单会话 TrackerBackend。比赛入口不包含模态分支，因此本地与提交环境的推理线路一致。
+比赛与本地运行使用同一个 RGB-only AppConfig schema 和单会话 TrackerBackend。ARbackendV1
+不要求额外校准文件即可启动；比赛入口不包含模态分支，因此本地与提交环境的推理线路一致。
 

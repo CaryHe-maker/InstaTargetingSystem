@@ -9,7 +9,8 @@ InstaTargetingSystem 是面向 ERP 全景视频的 RGB-only 单目标跟踪系�
 
 生产运行使用项目内置的 ARTrackV2 vendor runtime、`models/artrackv2_b_256.pth.tar` 和 CUDA PyTorch 环境。
 
-模型 checkpoint 不随源码提交；下载官方 ARTrackV2-B-256 权重后放入 `models/`。依赖版本沿用 PostTrainV2.4（PyTorch 2.11、torchvision 0.26、timm 0.5.4），具体容器配置见 [Dockerfile](Dockerfile)。
+模型 checkpoint 通过 Git LFS 交付；首次 clone 后运行 `git lfs pull`。依赖版本沿用
+PostTrainV2.4（Python 3.12、PyTorch 2.11、torchvision 0.26、timm 0.5.4），具体容器配置见 [Dockerfile](Dockerfile)。
 
 ## 快速命令
 

@@ -72,7 +72,9 @@ def main(argv: list[str] | None = None) -> int:
                     stages=frozenset(("local_rgb", "backend_box", "geometry_box")),
                 ),
             )
-        runtime = buildRuntime(config, allowUncalibratedScoring=config.scoring.calibrationArtifact is None)
+        runtime = buildRuntime(
+            config, allowUncalibratedScoring=config.scoring.calibrationArtifact is None
+        )
         source.open(args.dataset_root, args.sequence)
         initialFrame = source.read()
         if initialFrame is None:
@@ -137,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _report(error: Exception) -> None:
     print(f"{type(error).__name__}: {error}", file=sys.stderr)
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

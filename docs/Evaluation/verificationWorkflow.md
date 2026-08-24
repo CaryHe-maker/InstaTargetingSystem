@@ -9,7 +9,7 @@
 1. Core/配置测试保证协议和参数合法。
 2. Geometry 测试保证一次边界回投、紧致 BFoV、直接 ERP bbox 和跨缝语义。
 3. Tracker 测试保证 RGB batch 输入输出顺序、返回数量、真实批量 session，以及无 `inferBatch` session 的串行回退。
-4. Controller 测试保证 Stage 3 产物驱动的 50/50 SingleScore、正常线程只在 TRACKING/UNCERTAIN 间转移且均使用 4+4、低于 LT 的 HARD_MISS 保持 UNCERTAIN，以及保留的显式 LOST 组件仍可执行 6+4 单轮；同时覆盖第一轮 Fusor 搜索中心、最终跨轮融合和 `best_source` 几何。
+4. Controller 测试覆盖可选校准、ARTrack 直接分数路径、TRACKING/UNCERTAIN 转移、弱候选保持、恢复搜索、第一轮 Fusor 搜索中心、跨轮融合和 `best_source` 几何。
 5. Driver 集成测试保证计时和生命周期。
 6. AirSim360/Competition 测试保证实际格式和帧数。
 

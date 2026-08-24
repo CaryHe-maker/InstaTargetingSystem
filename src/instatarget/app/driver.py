@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import queue
 import sys
 import threading
@@ -37,9 +38,14 @@ from instatarget.core.types import (
     MotionState3D,
     ProjectedObservation,
 )
-from instatarget.geometry import GpuGeometryImpl
+from instatarget.geometry import GpuGeometryImpl, SphericalGeometryImpl
 from instatarget.io.result_sink import FileResultSink
-from instatarget.tracker import ARTrackBackend, ARTrackSession, PyTorchARTrackV2Session, TrackerBackendImpl
+from instatarget.tracker import (
+    ARTrackBackend,
+    ARTrackSession,
+    PyTorchARTrackV2Session,
+    TrackerBackendImpl,
+)
 
 if TYPE_CHECKING:
     from instatarget.eval.profiler import RuntimeProfiler
@@ -149,11 +155,31 @@ def buildRuntime(
     allowUncalibratedScoring: bool = False,
 ) -> RuntimeBundle:
     sessionFactory = artrackSessionFactory or PyTorchARTrackV2Session
+    if config.model.variant.lower().replace("-", "_") == "artrackv2_b_256":
+        # ARTrack already performs appearance/localization scoring internally.
+        # These defaults remove legacy controller priors and select the
+        # low-cost single-view route for ordinary targets while retaining a
+        # multi-view fallback for very large ERP targets.
+        os.environ.setdefault("INSTARGET_ARTRACK_ACCEPT_ANY", "1")
+        os.environ.setdefault("INSTARGET_ARTRACK_ADAPTIVE", "1")
+        os.environ.setdefault("INSTARGET_ARTRACK_SINGLE_ROUND", "1")
+        os.environ.setdefault("INSTARGET_ARTRACK_DISABLE_MOTION", "1")
+        os.environ.setdefault("INSTARGET_ARTRACK_SINGLE_FOV_DEG", "90")
+        os.environ.setdefault("INSTARGET_ARTRACK_TEMPLATE_FOV_SCALE", "2.5")
+        os.environ.setdefault("INSTARGET_ARTRACK_HOLD_WEAK", "1")
+    # ARTrack's reference preprocessing is OpenCV/uint8 based. Keep that
+    # numerically faithful path as the default for IoU; opt into CUDA geometry
+    # only after a workload-specific A/B check proves no accuracy regression.
+    useGpuGeometry = os.environ.get("INSTARGET_GPU_GEOMETRY", "0") == "1"
     geometry = (
         geometryFactory(config.geometry.boundarySamplesPerEdge)
         if geometryFactory is not None
-        else GpuGeometryImpl(
-            boundarySamplesPerEdge=config.geometry.boundarySamplesPerEdge,
+        else (
+            GpuGeometryImpl(boundarySamplesPerEdge=config.geometry.boundarySamplesPerEdge)
+            if useGpuGeometry
+            else SphericalGeometryImpl(
+                boundarySamplesPerEdge=config.geometry.boundarySamplesPerEdge
+            )
         )
     )
     rgbSession = sessionFactory(config.model)
@@ -174,10 +200,13 @@ def buildRuntime(
             fusionSourceMinConfidence=config.evaluator.fusionSourceMinConfidence,
             requireCheckpointHashMatch=config.scoring.requireCheckpointHashMatch,
         )
-    elif allowUncalibratedScoring:
+    elif (
+        allowUncalibratedScoring
+        or config.model.variant.lower().replace("-", "_") == "artrackv2_b_256"
+    ):
         scoreCalibration = UNCALIBRATED_STAGE3_SCORE_CALIBRATION
     else:
-        raise ValueError("production runtime requires a Stage 3 calibration artifact")
+        raise ValueError("production runtime requires a score calibration artifact")
     return RuntimeBundle(
         geometry=geometry,
         controller=controller,
@@ -331,9 +360,7 @@ def runTracking(
                                     controller,
                                     frame,
                                     error,
-                                    backendRevision=getattr(
-                                        backend, "templateRevision", None
-                                    ),
+                                    backendRevision=getattr(backend, "templateRevision", None),
                                 )
                                 break
                             if isinstance(step, MoreViewsRequired):
@@ -468,11 +495,16 @@ def _projectObservation(
         if observation.appearanceProbability is not None
         else calibrateBackendFusedScore(observation.fusedScore, scoreCalibration)
     )
-    singleScore = composeSingleScore(
-        appearanceProbability,
-        motion.effectiveProbability,
-        scoreCalibration,
-    )
+    if os.environ.get("INSTARGET_ARTRACK_DISABLE_MOTION", "0") == "1":
+        # ARTrack already scores localization against its template/search crop.
+        # The legacy spherical motion prior can reject a correct appearance hit.
+        singleScore = float(np.clip(appearanceProbability, 0.0, 1.0))
+    else:
+        singleScore = composeSingleScore(
+            appearanceProbability,
+            motion.effectiveProbability,
+            scoreCalibration,
+        )
     scaleScore = _scaleScore(observation.bbox, view)
     normalizedRadius, edgeMargin = _projectionQuality(observation.bbox, view)
     return ProjectedObservation(

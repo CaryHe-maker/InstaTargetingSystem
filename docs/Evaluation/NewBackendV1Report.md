@@ -1,17 +1,17 @@
-# NewBackendV1 提交报告
+# ARbackendV1 发布报告
 
 ## 提交范围
 
 - 基线：`main` / `PostTrainV2.4`，提交 `65d7da4`。
 - 目标分支：`NewBackendV1`。
-- 后端：将原 HiT/HiViT 运行链路完整替换为官方 `ARTrackV2-B-256`。
+- 后端：官方 `ARTrackV2-B-256`，作为 ARbackendV1 的唯一推理后端。
 - 依赖：保持 PostTrainV2.4 的 PyTorch、torchvision、timm、NumPy、OpenCV、PyYAML 和 easydict 版本约束。
 - Controller、球面 Geometry、I/O 和结果协议继续复用；新增 ARTrackV2 模板/搜索裁剪、400-bin 坐标解码和局部框反变换。
 
-## 清理内容
+## 发布边界
 
-本分支不保留旧 HiT/HiViT 运行实现、vendor、checkpoint、calibration、训练 wrapper、
-旧后端测试和旧模型专用文档。源码、配置、Docker 配置和工具中的旧模型引用已清除。
+仓库只交付 ARTrackV2 推理 runtime、球面 Geometry、Controller、比赛 I/O 和 Docker
+入口。训练代码、非 ARTrack runtime、非 ARTrack 权重和非 ARTrack 校准产物不属于发布镜像。
 
 ## 数据与基线
 
@@ -27,15 +27,15 @@
 ## 验证结果
 
 - `compileall`：通过。
-- 核心模块导入：通过。
-- 新增 ARTrackV2 backend 协议 smoke test：通过。
-- 全量单元测试：当前工作区绑定 Python 缺少 `PyYAML` 和 `torch`，因此配置/ GPU 相关测试无法执行；这不是代码运行时依赖声明缺失，项目依赖文件仍已声明对应版本。
+- ruff：通过（源码、测试和工具）。
+- 全量 pytest：发布前必须在 Python 3.12 + CUDA 运行时执行；Docker build 会先验证导入图、Geometry 回归和 checkpoint。
 
 ## 权重状态
 
-官方 checkpoint 尚未放入仓库。部署前需下载 `ARTrackV2-B-256` 权重并保存为：
+部署前需通过 Git LFS 获取 `ARTrackV2-B-256` 权重并保存为：
 
 `models/artrackv2_b_256.pth.tar`
 
-放入权重后，必须在上述 validation/holdout 数据上重新拟合 ARTrackV2 专用 score calibration，
-再进行端到端 IoU 对比；本报告不虚构尚未完成的 ARTrackV2 指标。
+发布镜像固定校验该文件的 SHA-256；当前发布权重哈希记录在 `models/README.md`。
+ScoreCalibration 是可选的离线产物，未提供时 ARbackendV1 使用内置 ARTrack 分数和精度优先
+控制策略，不回退到其他模型。`production2` 全量对比不属于本次发布门槛。

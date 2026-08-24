@@ -53,7 +53,27 @@ class SphericalGeometryImpl(SphericalGeometryProtocol):
             self.boundarySamplesPerEdge,
         )
         vectors = _erpSamplesToVectors(sampleX, sampleY, frameWidthPx, frameHeightPx)
-        return _fitBfovFromVectors(vectors)
+        fitted = _fitBfovFromVectors(vectors)
+        seamCrossing = bbox.xPx + bbox.widthPx > frameWidthPx
+        if seamCrossing and (
+            bbox.widthPx >= 0.45 * frameWidthPx
+            or bbox.heightPx >= 0.70 * frameHeightPx
+        ):
+            # Boundary-vector means become unstable when a large seam-crossing
+            # ERP box spans both sides of the camera or approaches both poles.
+            # Its annotated ERP center remains exact and must drive tracking.
+            center = erpPixelToSphericalPoint(
+                (bbox.xPx + 0.5 * bbox.widthPx) % frameWidthPx,
+                min(float(frameHeightPx), max(0.0, bbox.yPx + 0.5 * bbox.heightPx)),
+                frameWidthPx,
+                frameHeightPx,
+            )
+            return BFoV(
+                center=center,
+                horizontalFovRad=fitted.horizontalFovRad,
+                verticalFovRad=fitted.verticalFovRad,
+            )
+        return fitted
 
     def cropViews(self, frame: FramePacket, specs: Sequence[ViewSpec]) -> list[LocalView]:
         return self._projector.cropViews(frame, specs)

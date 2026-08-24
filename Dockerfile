@@ -58,9 +58,11 @@ COPY configs/RGBonly.yaml ./configs/RGBonly.yaml
 COPY models/artrackv2_b_256.pth.tar ./models/artrackv2_b_256.pth.tar
 COPY track.py ./track.py
 
-# Fail the build if context filtering breaks the production import graph, the
-# PostTrainingV1.3 wrapped-BFoV Geometry regression, or the strict checkpoint.
-RUN PYTHONPATH=/app/src python -c "import sys; from instatarget.app.competition import runCompetition; from instatarget.core.types import BBoxXYWH; from instatarget.geometry import SphericalGeometryImpl; from instatarget.tracker.artrack_model import PyTorchARTrackV2Session; geometry = SphericalGeometryImpl(boundarySamplesPerEdge=33); wrapped_bfov = geometry.bboxToBfov(BBoxXYWH(xPx=0.0, yPx=6.0, widthPx=174.0, heightPx=126.0), 360, 180); assert 0.0 < wrapped_bfov.horizontalFovRad < 3.141592653589793; assert 0.0 < wrapped_bfov.verticalFovRad < 3.141592653589793; assert 'instatarget.data' not in sys.modules; print('ARTrackV2 runtime imports and wrapped BFoV Geometry verified')"
+# Fail early when a Git LFS pointer, truncated artifact, or wrong runtime gets
+# into the remote build context.
+RUN test "$(wc -c < /app/models/artrackv2_b_256.pth.tar)" -gt 1000000000 \
+    && test "$(sha256sum /app/models/artrackv2_b_256.pth.tar | cut -d ' ' -f 1)" = "a99b7f8086e4827ecfe32ec8a9d32ad41c1ca9ff3cac551b62ec95576ca01d05" \
+    && PYTHONPATH=/app/src python -c "import sys; import torch, torchvision, timm; from instatarget.app.competition import runCompetition; from instatarget.core.types import BBoxXYWH; from instatarget.geometry import SphericalGeometryImpl; geometry = SphericalGeometryImpl(boundarySamplesPerEdge=33); wrapped_bfov = geometry.bboxToBfov(BBoxXYWH(xPx=0.0, yPx=6.0, widthPx=174.0, heightPx=126.0), 360, 180); assert 0.0 < wrapped_bfov.horizontalFovRad < 3.141592653589793; assert 0.0 < wrapped_bfov.verticalFovRad < 3.141592653589793; assert torch.__version__.startswith('2.11.0'); assert torchvision.__version__.startswith('0.26.0'); assert timm.__version__ == '0.5.4'; assert 'instatarget.data' not in sys.modules; print('ARbackendV1 runtime, dependency versions, Geometry, and checkpoint verified')"
 
 COPY docker/partition_image.py /partition_image.py
 RUN python /partition_image.py --output /layer-parts --layers 7 \

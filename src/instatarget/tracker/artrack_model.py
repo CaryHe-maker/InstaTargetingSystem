@@ -40,13 +40,18 @@ class ARTrackPrediction:
     predictedIoU: float | None = None
 
     def __post_init__(self) -> None:
-        for name, value in (("modelScore", self.modelScore), ("appearanceScore", self.appearanceScore)):
+        for name, value in (
+            ("modelScore", self.modelScore),
+            ("appearanceScore", self.appearanceScore),
+        ):
             if not np.isfinite(value) or not 0.0 <= value <= 1.0:
                 raise ModelError(f"{name} must be finite and in [0, 1], actual={value}")
         if self.predictedIoU is not None and (
             not np.isfinite(self.predictedIoU) or not 0.0 <= self.predictedIoU <= 1.0
         ):
-            raise ModelError(f"predictedIoU must be finite and in [0, 1], actual={self.predictedIoU}")
+            raise ModelError(
+                f"predictedIoU must be finite and in [0, 1], actual={self.predictedIoU}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +66,9 @@ class ARTrackSession(Protocol):
 
     def encodeTemplate(self, rgb: NDArray[np.uint8], bbox: BBoxXYWH) -> ARTrackTemplate: ...
 
-    def infer(self, rgb: NDArray[np.uint8], templateFeatures: Sequence[object]) -> ARTrackPrediction: ...
+    def infer(
+        self, rgb: NDArray[np.uint8], templateFeatures: Sequence[object]
+    ) -> ARTrackPrediction: ...
 
     def close(self) -> None: ...
 
@@ -94,9 +101,31 @@ class ARTrackBackend:
             raise ModelError(f"ARTrackV2 template encoding failed: {error}") from error
 
     def encodeTemplateView(self, view: Any, bbox: BBoxXYWH) -> ARTrackTemplate:
-        return self.encodeTemplate(view.rgb, bbox)
+        # GPU geometry intentionally leaves ``rgb`` as a compatibility
+        # placeholder.  Prefer the normalized device crop when available;
+        # feeding that placeholder to the template encoder would initialize
+        # ARTrack with an all-black target and destroy tracking IoU.
+        deviceRgb = getattr(view, "deviceRgb", None)
+        if deviceRgb is not None and callable(getattr(self._session, "encodeTemplateDevice", None)):
+            try:
+                return self._session.encodeTemplateDevice(
+                    deviceRgb,
+                    bbox,
+                    (view.spec.outputWidthPx, view.spec.outputHeightPx),
+                )
+            except (ModelError, ProtocolError):
+                raise
+            except Exception as error:
+                raise ModelError(f"ARTrackV2 device template encoding failed: {error}") from error
+        return (
+            self.encodeTemplate(_deviceRgbToNumpy(deviceRgb), bbox)
+            if deviceRgb is not None
+            else self.encodeTemplate(view.rgb, bbox)
+        )
 
-    def infer(self, rgb: NDArray[np.uint8], templateFeatures: Sequence[object]) -> ARTrackPrediction:
+    def infer(
+        self, rgb: NDArray[np.uint8], templateFeatures: Sequence[object]
+    ) -> ARTrackPrediction:
         return self.inferBatch((rgb,), templateFeatures)[0]
 
     def inferBatch(
@@ -113,9 +142,11 @@ class ARTrackBackend:
         if not templateFeatures:
             raise ProtocolError("ARTrackV2 inference requires at least one template feature")
         try:
-            predictions = tuple(self._session.inferBatch(images, templateFeatures)) if callable(
-                getattr(self._session, "inferBatch", None)
-            ) else tuple(self._session.infer(rgb, templateFeatures) for rgb in images)
+            predictions = (
+                tuple(self._session.inferBatch(images, templateFeatures))
+                if callable(getattr(self._session, "inferBatch", None))
+                else tuple(self._session.infer(rgb, templateFeatures) for rgb in images)
+            )
         except (ModelError, ProtocolError):
             raise
         except Exception as error:
@@ -134,7 +165,12 @@ class ARTrackBackend:
     ) -> tuple[ARTrackPrediction, ...]:
         if len(deviceRgbs) != len(imageSizes):
             raise ProtocolError("device RGBs and image sizes must have equal length")
-        return self.inferBatch(tuple(_deviceRgbToNumpy(value) for value in deviceRgbs), templateFeatures)
+        inferDeviceBatch = getattr(self._session, "inferDeviceBatch", None)
+        if callable(inferDeviceBatch):
+            return tuple(inferDeviceBatch(deviceRgbs, imageSizes, templateFeatures))
+        return self.inferBatch(
+            tuple(_deviceRgbToNumpy(value) for value in deviceRgbs), templateFeatures
+        )
 
     def close(self) -> None:
         if self._closed:
@@ -160,7 +196,9 @@ class PyTorchARTrackV2Session:
         if config.backend != "pytorch":
             raise ModelError(f"PyTorch ARTrackV2 session cannot use backend={config.backend}")
         if config.variant.lower().replace("-", "_") not in {_VARIANT, "artrackv2_b_256"}:
-            raise ModelError(f"unsupported ARTrackV2 variant: {config.variant}; expected={_VARIANT}")
+            raise ModelError(
+                f"unsupported ARTrackV2 variant: {config.variant}; expected={_VARIANT}"
+            )
         self._torch = _importTorch()
         self._device = self._torch.device("cuda" if self._torch.cuda.is_available() else "cpu")
         self._precision = config.precision
@@ -183,7 +221,28 @@ class PyTorchARTrackV2Session:
         tensor = self._preprocess(crop)
         return ARTrackTemplate(tensor=tensor, bbox=bbox)
 
-    def infer(self, rgb: NDArray[np.uint8], templateFeatures: Sequence[object]) -> ARTrackPrediction:
+    def encodeTemplateDevice(
+        self,
+        deviceRgb: Any,
+        bbox: BBoxXYWH,
+        imageSize: tuple[int, int],
+    ) -> ARTrackTemplate:
+        """Encode a normalized GPU Geometry crop without using its host placeholder."""
+        self._requireOpen()
+        width, height = imageSize
+        _requireDeviceRgb(deviceRgb, width, height)
+        tensor, _, _ = _sampleNormalizedTarget(
+            deviceRgb,
+            bbox,
+            _TEMPLATE_FACTOR,
+            _TEMPLATE_SIZE,
+            self._torch,
+        )
+        return ARTrackTemplate(tensor=tensor, bbox=bbox)
+
+    def infer(
+        self, rgb: NDArray[np.uint8], templateFeatures: Sequence[object]
+    ) -> ARTrackPrediction:
         return self.inferBatch((rgb,), templateFeatures)[0]
 
     def inferBatch(
@@ -199,20 +258,29 @@ class PyTorchARTrackV2Session:
         states: list[BBoxXYWH] = []
         crops: list[NDArray[np.uint8]] = []
         resizeFactors: list[float] = []
+        useFullView = os.environ.get("INSTARGET_ARTRACK_FULL_VIEW", "0") == "1"
         for index, image in enumerate(images):
             _requireRgb(image)
             # Each perspective view is an independent coordinate system. The
             # spherical controller centers its views on the current estimate, so
             # carrying a previous local box across viewIds would introduce drift.
             state = _centeredPrior(templates[0].bbox, image.shape[1], image.shape[0])
-            crop, resizeFactor, _ = _sampleTarget(image, state, _SEARCH_FACTOR, _SEARCH_SIZE)
+            if useFullView:
+                crop = np.ascontiguousarray(image)
+                resizeFactor = _SEARCH_SIZE / float(image.shape[1])
+                if image.shape[:2] != (_SEARCH_SIZE, _SEARCH_SIZE):
+                    import cv2
+
+                    crop = np.ascontiguousarray(cv2.resize(image, (_SEARCH_SIZE, _SEARCH_SIZE)))
+            else:
+                crop, resizeFactor, _ = _sampleTarget(image, state, _SEARCH_FACTOR, _SEARCH_SIZE)
             states.append(state)
             crops.append(crop)
             resizeFactors.append(resizeFactor)
         search = self._preprocessBatch(crops)
         template0 = templates[0].tensor
         template1 = templates[-1].tensor if len(templates) > 1 else template0
-        template = self._torch.cat((template0, template1), dim=0)
+        template = self._torch.stack((template0, template1), dim=0)
         # Official ARTrackV2 expects [2, B, C, H, W] template batches.
         template = template[:, None].expand(2, len(images), -1, -1, -1)
         started = perf_counter_ns()
@@ -242,8 +310,64 @@ class PyTorchARTrackV2Session:
             mapped = _clipBox(mapped, images[index].shape[1], images[index].shape[0])
             score = float(self._torch.sigmoid(scores[index].reshape(-1)[0]).item())
             predictions.append(ARTrackPrediction(mapped, score, score, score))
-        self._lastProfile = {"cudaForward": int(elapsed), "batchSize": len(images), "device": str(self._device)}
+        self._lastProfile = {
+            "cudaForward": int(elapsed),
+            "batchSize": len(images),
+            "device": str(self._device),
+        }
         return tuple(predictions)
+
+    def inferDeviceBatch(
+        self,
+        deviceRgbs: Sequence[Any],
+        imageSizes: Sequence[tuple[int, int]],
+        templateFeatures: Sequence[object],
+    ) -> tuple[ARTrackPrediction, ...]:
+        """Run the same official crop/decode path directly on normalized CUDA views."""
+        self._requireOpen()
+        templates = tuple(item for item in templateFeatures if isinstance(item, ARTrackTemplate))
+        if not templates:
+            raise ProtocolError("ARTrackV2 template features are invalid")
+        if len(deviceRgbs) != len(imageSizes):
+            raise ProtocolError("device RGBs and image sizes must have equal length")
+        states: list[BBoxXYWH] = []
+        crops: list[Any] = []
+        resizeFactors: list[float] = []
+        useFullView = os.environ.get("INSTARGET_ARTRACK_FULL_VIEW", "0") == "1"
+        for deviceRgb, (width, height) in zip(deviceRgbs, imageSizes, strict=True):
+            _requireDeviceRgb(deviceRgb, width, height)
+            state = _centeredPrior(templates[0].bbox, width, height)
+            if useFullView:
+                crop = deviceRgb
+                resizeFactor = _SEARCH_SIZE / float(width)
+                if (height, width) != (_SEARCH_SIZE, _SEARCH_SIZE):
+                    crop = self._torch.nn.functional.interpolate(
+                        crop.unsqueeze(0),
+                        size=(_SEARCH_SIZE, _SEARCH_SIZE),
+                        mode="bilinear",
+                        align_corners=False,
+                    ).squeeze(0)
+            else:
+                crop, resizeFactor, _ = _sampleNormalizedTarget(
+                    deviceRgb,
+                    state,
+                    _SEARCH_FACTOR,
+                    _SEARCH_SIZE,
+                    self._torch,
+                )
+            states.append(state)
+            crops.append(crop)
+            resizeFactors.append(resizeFactor)
+        search = self._torch.stack(crops, dim=0)
+        template0 = templates[0].tensor
+        template1 = templates[-1].tensor if len(templates) > 1 else template0
+        template = self._torch.stack((template0, template1), dim=0)
+        template = template[:, None].expand(2, len(deviceRgbs), -1, -1, -1)
+        started = perf_counter_ns()
+        with self._torch.inference_mode():
+            output = self._model(template=template, search=search)
+        elapsed = (perf_counter_ns() - started) // max(1, len(deviceRgbs))
+        return self._decodeOutput(output, states, resizeFactors, imageSizes, elapsed)
 
     def close(self) -> None:
         if self._closed:
@@ -261,16 +385,45 @@ class PyTorchARTrackV2Session:
 
             update_config_from_file(str(self._root / "artrackv2_256_full.yaml"))
             model = build_artrackv2(cfg, training=False).to(self._device).eval()
-            checkpoint = self._torch.load(self._weights, map_location="cpu", weights_only=True)
-            state = checkpoint.get("net", checkpoint.get("model", checkpoint)) if isinstance(checkpoint, dict) else checkpoint
+            try:
+                checkpoint = self._torch.load(
+                    self._weights,
+                    map_location="cpu",
+                    weights_only=True,
+                )
+            except Exception as safeError:
+                # Official ARTrack archives include legacy training meters in
+                # addition to ``net``.  PyTorch 2.6 rejects those objects under
+                # weights_only=True; the checkpoint path is explicit and local,
+                # so use the compatible loader after the safe attempt fails.
+                try:
+                    checkpoint = self._torch.load(
+                        self._weights,
+                        map_location="cpu",
+                        weights_only=False,
+                    )
+                except Exception:
+                    raise safeError
+            state = (
+                checkpoint.get("net", checkpoint.get("model", checkpoint))
+                if isinstance(checkpoint, dict)
+                else checkpoint
+            )
             if not isinstance(state, dict):
                 raise ModelError("ARTrackV2 checkpoint has no state dictionary")
-            model.load_state_dict(state, strict=True)
+            incompatible = model.load_state_dict(state, strict=False)
+            if incompatible.missing_keys:
+                raise ModelError(
+                    "ARTrackV2 checkpoint is missing model parameters: "
+                    + ", ".join(incompatible.missing_keys[:8])
+                )
             return model
         except ModelError:
             raise
         except Exception as error:
-            raise ModelError(f"cannot construct ARTrackV2-B-256 from {self._weights}: {error}") from error
+            raise ModelError(
+                f"cannot construct ARTrackV2-B-256 from {self._weights}: {error}"
+            ) from error
 
     def _preprocess(self, image: NDArray[np.uint8]) -> Any:
         return self._preprocessBatch((image,))[0]
@@ -282,12 +435,53 @@ class PyTorchARTrackV2Session:
         std = self._torch.tensor([0.229, 0.224, 0.225], device=self._device).view(1, 3, 1, 1)
         return (tensor - mean) / std
 
+    def _decodeOutput(
+        self,
+        output: Any,
+        states: Sequence[BBoxXYWH],
+        resizeFactors: Sequence[float],
+        imageSizes: Sequence[tuple[int, int]],
+        elapsed: int,
+    ) -> tuple[ARTrackPrediction, ...]:
+        seqs = output.get("seqs")
+        scores = output.get("score")
+        if seqs is None or scores is None or seqs.shape[0] != len(states):
+            raise ModelError("ARTrackV2 returned malformed prediction tensors")
+        normalized = seqs[:, :4].float() / float(_BINS - 1) - 0.5
+        predictions: list[ARTrackPrediction] = []
+        for index, row in enumerate(normalized):
+            x0, y0, x1, y1 = (float(value) for value in row.tolist())
+            cx = (x0 + x1) * 0.5 * _SEARCH_SIZE / resizeFactors[index]
+            cy = (y0 + y1) * 0.5 * _SEARCH_SIZE / resizeFactors[index]
+            width = max(1.0, (x1 - x0) * _SEARCH_SIZE / resizeFactors[index])
+            height = max(1.0, (y1 - y0) * _SEARCH_SIZE / resizeFactors[index])
+            prior = states[index]
+            half = 0.5 * _SEARCH_SIZE / resizeFactors[index]
+            mapped = BBoxXYWH(
+                xPx=cx + prior.xPx + 0.5 * prior.widthPx - half - 0.5 * width,
+                yPx=cy + prior.yPx + 0.5 * prior.heightPx - half - 0.5 * height,
+                widthPx=width,
+                heightPx=height,
+            )
+            mapped = _clipBox(mapped, imageSizes[index][0], imageSizes[index][1])
+            score = float(self._torch.sigmoid(scores[index].reshape(-1)[0]).item())
+            predictions.append(ARTrackPrediction(mapped, score, score, score))
+        self._lastProfile = {
+            "cudaForward": int(elapsed),
+            "batchSize": len(states),
+            "device": str(self._device),
+            "deviceInput": True,
+        }
+        return tuple(predictions)
+
     def _requireOpen(self) -> None:
         if self._closed:
             raise ProtocolError("ARTrackV2 session is closed")
 
 
-def _sampleTarget(rgb: NDArray[np.uint8], bbox: BBoxXYWH, factor: float, outputSize: int) -> tuple[NDArray[np.uint8], float, NDArray[np.bool_]]:
+def _sampleTarget(
+    rgb: NDArray[np.uint8], bbox: BBoxXYWH, factor: float, outputSize: int
+) -> tuple[NDArray[np.uint8], float, NDArray[np.bool_]]:
     import cv2
 
     cropSize = max(1, math.ceil(math.sqrt(bbox.widthPx * bbox.heightPx) * factor))
@@ -296,12 +490,63 @@ def _sampleTarget(rgb: NDArray[np.uint8], bbox: BBoxXYWH, factor: float, outputS
     x2, y2 = x1 + cropSize, y1 + cropSize
     left, right = max(0, -x1), max(x2 - rgb.shape[1] + 1, 0)
     top, bottom = max(0, -y1), max(y2 - rgb.shape[0] + 1, 0)
-    crop = rgb[y1 + top:y2 - bottom, x1 + left:x2 - right]
+    crop = rgb[y1 + top : y2 - bottom, x1 + left : x2 - right]
     padded = cv2.copyMakeBorder(crop, top, bottom, left, right, cv2.BORDER_CONSTANT)
     mask = np.ones(padded.shape[:2], dtype=np.bool_)
     if top or bottom or left or right:
-        mask[top:padded.shape[0] - bottom if bottom else None, left:padded.shape[1] - right if right else None] = False
-    return np.ascontiguousarray(cv2.resize(padded, (outputSize, outputSize))), outputSize / cropSize, mask
+        mask[
+            top : padded.shape[0] - bottom if bottom else None,
+            left : padded.shape[1] - right if right else None,
+        ] = False
+    return (
+        np.ascontiguousarray(cv2.resize(padded, (outputSize, outputSize))),
+        outputSize / cropSize,
+        mask,
+    )
+
+
+def _sampleNormalizedTarget(
+    normalizedRgb: Any,
+    bbox: BBoxXYWH,
+    factor: float,
+    outputSize: int,
+    torch: Any,
+) -> tuple[Any, float, Any]:
+    """Crop a normalized [C,H,W] tensor with the official square crop geometry."""
+    height, width = int(normalizedRgb.shape[1]), int(normalizedRgb.shape[2])
+    cropSize = max(1, math.ceil(math.sqrt(bbox.widthPx * bbox.heightPx) * factor))
+    x1 = round(bbox.xPx + 0.5 * bbox.widthPx - 0.5 * cropSize)
+    y1 = round(bbox.yPx + 0.5 * bbox.heightPx - 0.5 * cropSize)
+    # grid_sample uses border padding, while the official path uses constant
+    # zero pixels before normalization. Build the exact zero-padded square.
+    left, right = max(0, -x1), max(x1 + cropSize - width, 0)
+    top, bottom = max(0, -y1), max(y1 + cropSize - height, 0)
+    fill = torch.tensor(
+        [-0.485 / 0.229, -0.456 / 0.224, -0.406 / 0.225],
+        device=normalizedRgb.device,
+        dtype=normalizedRgb.dtype,
+    ).view(3, 1, 1)
+    padded = fill.expand(3, cropSize + top + bottom, cropSize + left + right).clone()
+    src = normalizedRgb[
+        :,
+        y1 + top : y1 + top + cropSize - top - bottom,
+        x1 + left : x1 + left + cropSize - left - right,
+    ]
+    padded[:, top : top + src.shape[1], left : left + src.shape[2]] = src
+    if cropSize == outputSize:
+        return (
+            padded,
+            1.0,
+            torch.ones((cropSize, cropSize), device=normalizedRgb.device, dtype=torch.bool),
+        )
+    resized = torch.nn.functional.interpolate(
+        padded.unsqueeze(0), size=(outputSize, outputSize), mode="bilinear", align_corners=False
+    ).squeeze(0)
+    mask = torch.ones((cropSize, cropSize), device=normalizedRgb.device, dtype=torch.bool)
+    mask = torch.nn.functional.interpolate(
+        mask[None, None].float(), size=(outputSize, outputSize), mode="nearest"
+    ).bool()[0, 0]
+    return resized, outputSize / cropSize, mask
 
 
 def _centeredPrior(templateBox: BBoxXYWH, width: int, height: int) -> BBoxXYWH:
@@ -316,22 +561,46 @@ def _centeredPrior(templateBox: BBoxXYWH, width: int, height: int) -> BBoxXYWH:
 def _clipBox(box: BBoxXYWH, width: int, height: int) -> BBoxXYWH:
     x = min(max(0.0, box.xPx), max(0.0, width - 1.0))
     y = min(max(0.0, box.yPx), max(0.0, height - 1.0))
-    return BBoxXYWH(xPx=x, yPx=y, widthPx=max(1.0, min(box.widthPx, width - x)), heightPx=max(1.0, min(box.heightPx, height - y)))
+    return BBoxXYWH(
+        xPx=x,
+        yPx=y,
+        widthPx=max(1.0, min(box.widthPx, width - x)),
+        heightPx=max(1.0, min(box.heightPx, height - y)),
+    )
 
 
 def _deviceRgbToNumpy(value: Any) -> NDArray[np.uint8]:
-    if not hasattr(value, "detach"):
-        raise ProtocolError("ARTrackV2 device input must be a torch tensor")
+    _requireDeviceRgb(value)
     array = value.detach().float().cpu().numpy()
-    if array.ndim != 3 or array.shape[0] != 3:
-        raise ProtocolError(f"ARTrackV2 device input must have shape [3,H,W], actual={array.shape}")
     mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)[:, None, None]
     std = np.array([0.229, 0.224, 0.225], dtype=np.float32)[:, None, None]
-    return np.ascontiguousarray(np.clip((array * std + mean) * 255.0, 0.0, 255.0).transpose(1, 2, 0).round().astype(np.uint8))
+    return np.ascontiguousarray(
+        np.clip((array * std + mean) * 255.0, 0.0, 255.0)
+        .transpose(1, 2, 0)
+        .round()
+        .astype(np.uint8)
+    )
+
+
+def _requireDeviceRgb(value: Any, width: int | None = None, height: int | None = None) -> None:
+    if not hasattr(value, "detach"):
+        raise ProtocolError("ARTrackV2 device input must be a torch tensor")
+    shape = tuple(getattr(value, "shape", ()))
+    if len(shape) != 3 or shape[0] != 3:
+        raise ProtocolError(f"ARTrackV2 device input must have shape [3,H,W], actual={shape}")
+    if width is not None and height is not None and shape != (3, height, width):
+        raise ProtocolError(
+            "ARTrackV2 device input size does not match its view: "
+            f"tensor={shape}, view={(3, height, width)}"
+        )
 
 
 def _resolveArTrackRoot(value: str | Path | None) -> Path:
-    root = Path(value).expanduser().resolve() if value is not None else Path(__file__).resolve().parents[1] / "vendor" / "artrackv2"
+    root = (
+        Path(value).expanduser().resolve()
+        if value is not None
+        else Path(__file__).resolve().parents[1] / "vendor" / "artrackv2"
+    )
     if not (root / "lib" / "models" / "artrackv2").is_dir():
         raise ModelError(f"ARTrackV2 vendor tree was not found: {root}")
     return root
@@ -352,8 +621,23 @@ def _importTorch() -> ModuleType:
 
 
 def _requireRgb(rgb: NDArray[np.uint8]) -> None:
-    if not isinstance(rgb, np.ndarray) or rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3 or 0 in rgb.shape[:2]:
-        raise ProtocolError(f"ARTrackV2 input rgb must have shape [H, W, 3] uint8, actual={getattr(rgb, 'shape', None)}")
+    if (
+        not isinstance(rgb, np.ndarray)
+        or rgb.dtype != np.uint8
+        or rgb.ndim != 3
+        or rgb.shape[2] != 3
+        or 0 in rgb.shape[:2]
+    ):
+        raise ProtocolError(
+            "ARTrackV2 input rgb must have shape [H, W, 3] uint8, "
+            f"actual={getattr(rgb, 'shape', None)}"
+        )
 
 
-__all__ = ["ARTrackBackend", "ARTrackPrediction", "ARTrackSession", "ARTrackTemplate", "PyTorchARTrackV2Session"]
+__all__ = [
+    "ARTrackBackend",
+    "ARTrackPrediction",
+    "ARTrackSession",
+    "ARTrackTemplate",
+    "PyTorchARTrackV2Session",
+]

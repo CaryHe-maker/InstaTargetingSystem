@@ -51,9 +51,7 @@ class TrackerBackendImpl(TrackerBackendProtocol):
             raise ProtocolError("tracker backend is already initialized")
         self._templates.initialize(self._artrackBackend, template, templateBox)
         self._initialized = True
-        self._previousViews = {
-            template.spec.viewId: _copyView(template)
-        }
+        self._previousViews = {template.spec.viewId: _copyView(template)}
         self._previousViewsFrameIndex = 0
 
     def infer(
@@ -118,7 +116,10 @@ class TrackerBackendImpl(TrackerBackendProtocol):
             raise ProtocolError("tracker backend has not been initialized")
         self._templates.apply(self._artrackBackend, command, self._previousViews)
         snapshot = self._templates.snapshot()
-        templateFeatures = (snapshot.anchor.features,)
+        # Preserve the cache ordering so ARTrackV2 can use the anchor together
+        # with recent/stable online templates.  Passing only the anchor makes
+        # every UPDATE_RECENT/UPDATE_STABLE command a no-op for the model.
+        templateFeatures = snapshot.features
         self._activeTemplateFrameIndex = (
             int(snapshot.stable.frameIndex)
             if snapshot.stable is not None
@@ -135,7 +136,9 @@ class TrackerBackendImpl(TrackerBackendProtocol):
                 templateFeatures,
             )
         else:
-            predictions = self._artrackBackend.inferBatch(tuple(view.rgb for view in views), templateFeatures)
+            predictions = self._artrackBackend.inferBatch(
+                tuple(view.rgb for view in views), templateFeatures
+            )
         sharedInferenceNs = (perf_counter_ns() - inferenceStartedNs) // len(views) if views else 0
         return tuple(
             buildRgbObservation(view, prediction, sharedInferenceNs)
@@ -145,10 +148,7 @@ class TrackerBackendImpl(TrackerBackendProtocol):
     def _rememberViews(self, views: Sequence[LocalView], frameIndex: int) -> None:
         if not views:
             return
-        currentViews = {
-            view.spec.viewId: _copyView(view)
-            for view in views
-        }
+        currentViews = {view.spec.viewId: _copyView(view) for view in views}
         if self._previousViewsFrameIndex == frameIndex:
             self._previousViews.update(currentViews)
         else:
@@ -177,7 +177,10 @@ def _copyView(view: LocalView) -> LocalView:
     return LocalView(
         spec=view.spec,
         rgb=rgb,
-        deviceRgb=None,
+        # Keep the normalized crop alive for a possible online-template
+        # command.  GPU Geometry's host RGB is only a placeholder, so dropping
+        # this tensor would make a later update encode black pixels.
+        deviceRgb=view.deviceRgb,
     )
 
 

@@ -37,10 +37,18 @@ class TemplateSnapshot:
 
     @property
     def features(self) -> tuple[object, ...]:
-        return tuple(
-            sample.features
-            for sample in (self.anchor, self.recent, self.stable)
-            if sample is not None
+        # ARTrackV2 has exactly two template streams.  Keep the immutable
+        # anchor and select the newest stable sample when available, otherwise
+        # the newest recent sample.  Passing all three cache slots would create
+        # an invalid template batch and silently discard the intended update.
+        secondary = self.stable if self.stable is not None else self.recent
+        return (
+            (self.anchor.features,)
+            if secondary is None
+            else (
+                self.anchor.features,
+                secondary.features,
+            )
         )
 
 
@@ -70,7 +78,9 @@ class TemplateCache:
             return int(snapshot.recent.frameIndex)
         return int(snapshot.anchor.frameIndex)
 
-    def initialize(self, backend: ARTrackBackend, template: LocalView, templateBox: BBoxXYWH) -> None:
+    def initialize(
+        self, backend: ARTrackBackend, template: LocalView, templateBox: BBoxXYWH
+    ) -> None:
         if self.initialized:
             raise ProtocolError("template cache is already initialized")
         _validateBox(templateBox, template)

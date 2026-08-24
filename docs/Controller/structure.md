@@ -12,7 +12,7 @@ Controller 负责“看哪里、相信哪个候选、是否继续查询、下一
 | `classifier.py` | 保留的 30° 球面聚类工具；当前生产路径不调用 |
 | `recovery_planner.py` | 四角视图与 cubemap 规划 |
 | `motion_estimator.py` | 球面多帧运动预测 |
-| `score_calibration.py` | 严格加载 checkpoint 绑定的 Stage 3 校准产物 |
+| `score_calibration.py` | 可选加载 checkpoint 绑定的分数校准产物 |
 | `fused_score.py` | 产物驱动的外观校准、运动先验与 50/50 SingleScore 合成 |
 | `template_policy.py` | 固定第 0 帧 anchor 的 KEEP 策略 |
 

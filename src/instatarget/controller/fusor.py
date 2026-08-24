@@ -40,6 +40,7 @@ class Fusor:
         overlapRate: float = FUSION_OVERLAP_RATE,
         sourceMinConfidence: float = 0.80,
         boxMode: FusionBoxMode | str = FusionBoxMode.MAX_INTERSECTION,
+        allowFusion: bool = True,
     ) -> None:
         if not 0.0 <= overlapRate <= 1.0:
             raise ValueError("fusion overlapRate must be in [0, 1]")
@@ -48,6 +49,7 @@ class Fusor:
         self._geometry = geometry
         self._overlapRate = float(overlapRate)
         self._sourceMinConfidence = float(sourceMinConfidence)
+        self._allowFusion = bool(allowFusion)
         try:
             self._boxMode = FusionBoxMode(boxMode)
         except ValueError as error:
@@ -78,6 +80,8 @@ class Fusor:
             raise ProtocolError("reference-adaptive fusion requires a positive reference area")
 
         candidates = [_singleCandidate(item) for item in observations]
+        if not self._allowFusion:
+            return max(candidates, key=_candidateRank)
         for firstIndex, first in enumerate(observations):
             for second in observations[firstIndex + 1 :]:
                 firstScore = _singleScore(first)

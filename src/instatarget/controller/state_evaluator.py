@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 
 from instatarget.controller.fusor import FUSION_OVERLAP_RATE, FusionBoxMode, Fusor
@@ -36,6 +37,10 @@ class StateEvaluator:
         del gateConfig
         self._tracking = trackingConfig
         self._config = evaluatorConfig or EvaluatorConfig()
+        self._artrackDirect = os.environ.get("INSTARGET_ARTRACK_DIRECT", "0") == "1"
+        self._artrackSingleRound = os.environ.get("INSTARGET_ARTRACK_SINGLE_ROUND", "0") == "1"
+        self._artrackAcceptAny = os.environ.get("INSTARGET_ARTRACK_ACCEPT_ANY", "0") == "1"
+        self._artrackAdaptive = os.environ.get("INSTARGET_ARTRACK_ADAPTIVE", "0") == "1"
 
     def evaluate(
         self,
@@ -55,11 +60,18 @@ class StateEvaluator:
         if priorObservations and plan.attemptIndex == 0:
             raise ProtocolError("first attempt cannot contain prior observations")
         candidatePool = _combineObservations(priorObservations, observations)
+        boxMode = os.environ.get(
+            "INSTARGET_ARTRACK_FUSION_BOX_MODE",
+            self._config.fusionBoxMode,
+        )
         best = Fusor(
             geometry,
             overlapRate=FUSION_OVERLAP_RATE,
-            sourceMinConfidence=self._config.fusionSourceMinConfidence,
-            boxMode=FusionBoxMode(self._config.fusionBoxMode),
+            sourceMinConfidence=(
+                0.0 if self._artrackAcceptAny else self._config.fusionSourceMinConfidence
+            ),
+            boxMode=FusionBoxMode(boxMode),
+            allowFusion=not self._artrackDirect,
         ).fuse(
             candidatePool,
             frameWidthPx=frameWidthPx,
@@ -67,10 +79,16 @@ class StateEvaluator:
             referenceBoxAreaPx=referenceBoxAreaPx,
         )
         isFinalAttempt = not (
-            state.mode in {TrackMode.TRACKING, TrackMode.UNCERTAIN}
-            and plan.attemptIndex == 0
+            state.mode in {TrackMode.TRACKING, TrackMode.UNCERTAIN} and plan.attemptIndex == 0
         )
-        accepted = _measurementAccepted(best, self._tracking.candidateMinScore)
+        directFrame = self._artrackDirect or self._artrackAcceptAny
+        if self._artrackAdaptive:
+            directFrame = directFrame and len(plan.views) == 1
+        minimumScore = 0.0 if directFrame else self._tracking.candidateMinScore
+        # ARTrack's score is a localization-quality signal, not a calibrated
+        # probability. In direct mode the highest returned box is
+        # the measurement even when its raw score is below the legacy threshold.
+        accepted = best is not None if directFrame else _measurementAccepted(best, minimumScore)
         evidence = _evidence(best, accepted)
         outputBfov = best.bfov if best is not None else predictedBfov
         outputBbox = (
@@ -141,9 +159,7 @@ class StateEvaluator:
             scaleScore=representative.scaleScore if representative is not None else 0.0,
             supportScore=min(1.0, len(best.sourceViewIds) / 2.0) if best is not None else 0.0,
             agreementScore=(
-                best.overlapRate
-                if best is not None and best.overlapRate is not None
-                else 0.0
+                best.overlapRate if best is not None and best.overlapRate is not None else 0.0
             ),
             stateScore=stateScore,
             evidence=evidence,
@@ -152,6 +168,9 @@ class StateEvaluator:
             escalationRecommended=(
                 state.mode in {TrackMode.TRACKING, TrackMode.UNCERTAIN}
                 and plan.attemptIndex == 0
+                and not self._artrackSingleRound
+                and not self._artrackDirect
+                and not self._artrackAcceptAny
             ),
             reacquired=state.mode is TrackMode.LOST and accepted,
             rejectionReasons=tuple(reasons),
