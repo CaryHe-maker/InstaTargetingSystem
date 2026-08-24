@@ -1,11 +1,11 @@
 schemaVersion: 1
 model:
   backend: pytorch
-  variant: hit_small
-  weights: ../models/hit_small_stage3_inference.pth
+  variant: artrackv2_b_256
+  weights: ../models/artrackv2_b_256.pth.tar
   precision: fp32
 scoring:
-  calibrationArtifact: ../models/hit_small_stage3_inference.calibration.json
+  calibrationArtifact: null
   requireCheckpointHashMatch: true
 geometry:
   viewWidthPx: 256

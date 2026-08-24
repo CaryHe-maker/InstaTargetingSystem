@@ -6,15 +6,15 @@ from time import perf_counter_ns
 
 from instatarget.core.errors import ModelError
 from instatarget.core.types import BBoxXYWH, LocalObservation, LocalView
-from instatarget.tracker.hit_backend import HiTPrediction
+from instatarget.tracker.artrack_model import ARTrackPrediction
 
 
 def buildRgbObservation(
     view: LocalView,
-    prediction: HiTPrediction,
+    prediction: ARTrackPrediction,
     latencyNs: int,
 ) -> LocalObservation:
-    """Convert a HiT prediction into the stable RGB-only output contract."""
+    """Convert an ARTrackV2 prediction into the stable RGB-only output contract."""
     if latencyNs < 0:
         raise ModelError(f"latencyNs must be non-negative, actual={latencyNs}")
     bbox = clipLocalBox(prediction.bbox, view.spec.outputWidthPx, view.spec.outputHeightPx)
@@ -25,12 +25,12 @@ def buildRgbObservation(
         appearanceScore=prediction.appearanceScore,
         fusedScore=prediction.appearanceScore,
         latencyNs=latencyNs,
-        presenceLogit=prediction.presenceLogit,
-        qualityLogit=prediction.qualityLogit,
-        presenceProbability=prediction.presenceProbability,
-        qualityProbability=prediction.qualityProbability,
+        presenceLogit=None,
+        qualityLogit=None,
+        presenceProbability=None,
+        qualityProbability=None,
         predictedIoU=prediction.predictedIoU,
-        cornerScore=prediction.cornerScore,
+        cornerScore=None,
     )
 
 
@@ -41,7 +41,7 @@ def clipLocalBox(bbox: BBoxXYWH, widthPx: int, heightPx: int) -> BBoxXYWH:
     x1 = max(0.0, min(float(widthPx), bbox.xPx + bbox.widthPx))
     y1 = max(0.0, min(float(heightPx), bbox.yPx + bbox.heightPx))
     if x1 <= x0 or y1 <= y0:
-        raise ModelError(f"HiT returned a box outside the local view: {bbox}")
+        raise ModelError(f"ARTrackV2 returned a box outside the local view: {bbox}")
     return BBoxXYWH(xPx=x0, yPx=y0, widthPx=x1 - x0, heightPx=y1 - y0)
 
 

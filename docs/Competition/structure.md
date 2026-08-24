@@ -9,5 +9,5 @@ Competition 把统一跟踪管线适配为 InstaTest 的目录发现、逐序列
 | `adapters/competition_adapter.py` | 通用结果格式适配 |
 | `Dockerfile` | CUDA 提交镜像 |
 
-深入阅读：[submissionPipeline.md](submissionPipeline.md)、[resultFormat.md](resultFormat.md)、[containerRuntime.md](containerRuntime.md)。
+深入阅读：[submissionPipeline.md](submissionPipeline.md)、[resultFormat.md](resultFormat.md)。Docker 构建要求 Git LFS 已拉取模型实体。
 

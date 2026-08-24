@@ -4,7 +4,7 @@
 
 ## 样本收集
 
-在冻结模型权重后运行 `tools/collect_score_calibration.py`。工具用生产 Geometry 与 Stage 3 backend 收集稳定 oracle views，保存 presence、quality、二者乘积、运动分、局部/球面真值误差及投影诊断。标签依据局部预测回投后的真实命中生成，而不是依据最终 Controller 是否输出，避免 Controller 漂移污染校准标签。
+在冻结模型权重后运行 `tools/collect_score_calibration.py`。工具用生产 Geometry 与 ARTrack backend 收集稳定 oracle views，保存 presence、quality、二者乘积、运动分、局部/球面真值误差及投影诊断。标签依据局部预测回投后的真实命中生成，而不是依据最终 Controller 是否输出，避免 Controller 漂移污染校准标签。
 
 ## 数据划分
 

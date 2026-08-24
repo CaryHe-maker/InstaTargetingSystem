@@ -18,15 +18,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-hit = [
+artrackv2 = [
   "torch>=2.11,<2.12",
   "torchvision>=0.26,<0.27",
-  "timm>=0.5.4",
-  "yacs>=0.1.8",
+  "timm==0.5.4",
   "easydict>=1.13,<2",
-  "scipy>=1,<2",
-  "pandas>=2,<4",
-  "tensorboard>=2.18,<3",
 ]
 dev = [
   "pytest>=8,<9",
@@ -36,13 +32,12 @@ dev = [
 [project.scripts]
 run = "instatarget.app.commands:runMain"
 getInstanceID = "instatarget.app.commands:getInstanceIdMain"
-trainBackend = "instatarget.training.train_backend:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"instatarget.vendor.hit" = ["LICENSE", "configs/*.yaml", "lib/**/*.py"]
+"instatarget.vendor.artrackv2" = ["*.yaml", "lib/**/*.py"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

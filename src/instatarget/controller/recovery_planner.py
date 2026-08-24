@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from math import asin, atan2, cos, isfinite, pi, sin, sqrt, tan
@@ -68,11 +69,7 @@ def ViewSpecType1(
         raise ProtocolError("viewIdStart must be non-negative")
     if outputWidthPx <= 0 or outputHeightPx <= 0:
         raise ProtocolError("view output dimensions must be positive")
-    if (
-        not isfinite(minFovRad)
-        or not isfinite(maxFovRad)
-        or not 0.0 < minFovRad <= maxFovRad < pi
-    ):
+    if not isfinite(minFovRad) or not isfinite(maxFovRad) or not 0.0 < minFovRad <= maxFovRad < pi:
         raise ProtocolError("FOV limits must satisfy 0 < minFovRad <= maxFovRad < pi")
 
     # The target angular extent is tripled independently on each axis.  Keep the
@@ -142,7 +139,7 @@ class RecoveryPlanner:
         recoveryMemory: RecoveryMemory | None = None,
         targetCenters: Sequence[SphericalPoint] | None = None,
     ) -> tuple[PlannedView, ...]:
-        del frameIndex, anchorBox, currentBox, recoveryMemory, targetCenters
+        del frameIndex, anchorBox, recoveryMemory, targetCenters
         if frameWidthPx <= 0 or frameHeightPx <= 0:
             raise ProtocolError("frame dimensions must be positive")
         if attemptIndex < 0 or attemptIndex >= self._tracking.maxAttemptsPerFrame:
@@ -193,6 +190,8 @@ class RecoveryPlanner:
                 attemptIndex,
                 dynamicSize=trackingSize,
                 forceMaxFov=status is TrackStatus.UNCERTAIN,
+                targetAreaRatio=(currentBox.widthPx * currentBox.heightPx)
+                / max(float(frameWidthPx * frameHeightPx), 1.0),
             )
         return self._fourCorners(
             center,
@@ -200,6 +199,8 @@ class RecoveryPlanner:
             attemptIndex,
             dynamicSize=trackingSize,
             forceMaxFov=status is TrackStatus.UNCERTAIN,
+            targetAreaRatio=(currentBox.widthPx * currentBox.heightPx)
+            / max(float(frameWidthPx * frameHeightPx), 1.0),
         )
 
     def contextBfov(
@@ -232,7 +233,60 @@ class RecoveryPlanner:
         *,
         dynamicSize: tuple[float, float] | None = None,
         forceMaxFov: bool = False,
+        targetAreaRatio: float = 0.0,
     ) -> tuple[PlannedView, ...]:
+        singleView = os.environ.get("INSTARGET_ARTRACK_SINGLE_VIEW", "0") == "1"
+        if os.environ.get("INSTARGET_ARTRACK_ADAPTIVE", "0") == "1" and dynamicSize is not None:
+            # ERP pixel area is misleading for panoramic targets. Use angular
+            # extent so genuinely large objects get the four-view context path.
+            horizontalSize, verticalSize = (float(dynamicSize[0]), float(dynamicSize[1]))
+            # Four-view recovery is reserved for genuinely panoramic targets;
+            # medium 45--75 degree objects remain on the more stable center view.
+            largeTarget = max(horizontalSize, verticalSize) >= 75.0 * pi / 180.0
+            singleView = not largeTarget and targetAreaRatio < 0.20
+        if singleView:
+            if dynamicSize is None:
+                dynamicSize = (pi / 6.0, pi / 6.0)
+            horizontalFov = _dynamicFov(
+                3.0 * float(dynamicSize[0]),
+                self._geometry.minFovRad,
+                self._geometry.maxFovRad,
+            )
+            verticalFov = _dynamicFov(
+                3.0 * float(dynamicSize[1]),
+                self._geometry.minFovRad,
+                self._geometry.maxFovRad,
+            )
+            capDeg = os.environ.get("INSTARGET_ARTRACK_SINGLE_FOV_DEG")
+            capHDeg = os.environ.get("INSTARGET_ARTRACK_SINGLE_HFOV_DEG", capDeg)
+            capVDeg = os.environ.get("INSTARGET_ARTRACK_SINGLE_VFOV_DEG", capDeg)
+            if capHDeg is not None or capVDeg is not None:
+                try:
+                    if capHDeg is not None:
+                        capRad = float(capHDeg) * pi / 180.0
+                        if isfinite(capRad) and capRad > 0.0:
+                            horizontalFov = min(horizontalFov, capRad)
+                    if capVDeg is not None:
+                        capRad = float(capVDeg) * pi / 180.0
+                        if isfinite(capRad) and capRad > 0.0:
+                            verticalFov = min(verticalFov, capRad)
+                except ValueError:
+                    pass
+            return (
+                PlannedView(
+                    spec=ViewSpec(
+                        viewId=viewIdStart,
+                        bfov=BFoV(
+                            center=center,
+                            horizontalFovRad=horizontalFov,
+                            verticalFovRad=verticalFov,
+                        ),
+                        outputWidthPx=self._geometry.viewWidthPx,
+                        outputHeightPx=self._geometry.viewHeightPx,
+                    ),
+                    role=f"round{attemptIndex + 1}_artrack_center",
+                ),
+            )
         roles = (
             "left_top",
             "right_top",
@@ -240,14 +294,23 @@ class RecoveryPlanner:
             "right_bottom",
         )
         if dynamicSize is not None:
+            maxFovRad = self._geometry.maxFovRad
+            capDeg = os.environ.get("INSTARGET_ARTRACK_FOV_CAP_DEG")
+            if capDeg is not None:
+                try:
+                    candidateCap = float(capDeg) * pi / 180.0
+                    if isfinite(candidateCap) and candidateCap >= pi / 6.0:
+                        maxFovRad = min(maxFovRad, candidateCap)
+                except ValueError:
+                    pass
             specs = ViewSpecType1(
                 center,
                 dynamicSize,
                 viewIdStart=viewIdStart,
                 outputWidthPx=self._geometry.viewWidthPx,
                 outputHeightPx=self._geometry.viewHeightPx,
-                minFovRad=self._geometry.maxFovRad if forceMaxFov else pi / 6.0,
-                maxFovRad=self._geometry.maxFovRad,
+                minFovRad=maxFovRad if forceMaxFov else pi / 6.0,
+                maxFovRad=maxFovRad,
             )
         else:
             offset = 40.0 * pi / 180.0
@@ -283,7 +346,9 @@ class RecoveryPlanner:
                 spec=self._viewSpec(viewIdStart + index, target),
                 role=f"round{attemptIndex + 1}_{rolePrefix}_{role}",
             )
-            for index, (role, target) in enumerate(_cubeDirections(center),)
+            for index, (role, target) in enumerate(
+                _cubeDirections(center),
+            )
         )
 
     def _viewSpec(self, viewId: int, center: SphericalPoint) -> ViewSpec:
@@ -312,8 +377,7 @@ def _offsetDirection(
     yawScale = tan(localYawOffsetRad)
     pitchScale = tan(localPitchOffsetRad)
     vector = tuple(
-        forward[index] + yawScale * right[index] + pitchScale * up[index]
-        for index in range(3)
+        forward[index] + yawScale * right[index] + pitchScale * up[index] for index in range(3)
     )
     norm = sqrt(sum(value * value for value in vector))
     if norm <= 1e-12:

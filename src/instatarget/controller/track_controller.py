@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from math import asin, atan2, tan
+from math import asin, atan2, isfinite, tan
 from typing import TYPE_CHECKING
 
 from instatarget.controller.motion_estimator import SphericalMotionEstimator
@@ -189,10 +190,22 @@ class TrackControllerImpl(TrackControllerProtocol):
         if int(frame.frameIndex) != 0:
             raise ProtocolError("initialization must use frameIndex 0")
         objectBfov = self._geometry.bboxToBfov(initialBox, frame.rgb.shape[1], frame.rgb.shape[0])
+        try:
+            templateScale = float(os.environ.get("INSTARGET_ARTRACK_TEMPLATE_FOV_SCALE", "2.0"))
+        except ValueError:
+            templateScale = 2.0
+        if not isfinite(templateScale) or templateScale < 1.0:
+            templateScale = 2.0
         templateBfov = BFoV(
             center=objectBfov.center,
-            horizontalFovRad=self._geometryConfig.maxFovRad,
-            verticalFovRad=self._geometryConfig.maxFovRad,
+            horizontalFovRad=_clampFov(
+                templateScale * objectBfov.horizontalFovRad,
+                self._geometryConfig,
+            ),
+            verticalFovRad=_clampFov(
+                templateScale * objectBfov.verticalFovRad,
+                self._geometryConfig,
+            ),
         )
         plan = InitializationPlan(
             sequenceId=frame.sequenceId,
@@ -513,9 +526,7 @@ class TrackControllerImpl(TrackControllerProtocol):
                 "finalAttemptIndex": int(plan.attemptIndex),
                 "finalMeasurementAccepted": bool(decision.acceptMeasurement),
                 "finalStateRevision": int(planned.plan.stateRevision),
-                "provisionalReplacedAtCommit": bool(
-                    transaction.provisionalPrediction is not None
-                ),
+                "provisionalReplacedAtCommit": bool(transaction.provisionalPrediction is not None),
             }
         )
         self._stateMachine.recordScore(evaluation.stateScore)
@@ -635,12 +646,11 @@ class TrackControllerImpl(TrackControllerProtocol):
             self._recovery = self._transaction.recoveryMemory
         hasCandidate = evaluation.bestCandidate is not None
         accepted = decision.acceptMeasurement and hasCandidate
+        holdingWeak = False
         outputBfov = evaluation.proposedOutputBfov
         outputBox = evaluation.proposedOutputBbox
         outputConfidence = (
-            evaluation.stateScore
-            if hasCandidate
-            else max(0.0, planned.prediction.confidence * 0.5)
+            evaluation.stateScore if hasCandidate else max(0.0, planned.prediction.confidence * 0.5)
         )
         if accepted:
             assert evaluation.measuredBfov is not None
@@ -668,6 +678,20 @@ class TrackControllerImpl(TrackControllerProtocol):
             source = (
                 ResultSource.OBSERVED_WEAK_BLEND if hasCandidate else ResultSource.MOTION_PREDICTED
             )
+            currentArea = (
+                self._currentBox.widthPx * self._currentBox.heightPx
+                if self._currentBox is not None
+                else 0.0
+            )
+            frameArea = float(planned.frame.rgb.shape[1] * planned.frame.rgb.shape[0])
+            if (
+                os.environ.get("INSTARGET_ARTRACK_HOLD_WEAK", "0") == "1"
+                and currentArea >= 0.10 * frameArea
+            ):
+                assert self._currentBox is not None and self._currentBfov is not None
+                outputBox = self._currentBox
+                outputBfov = self._currentBfov
+                holdingWeak = True
             # Break the motion/acceptance bootstrap cycle without committing a weak box as the
             # public target state.  A single bounded provisional observation supplies the second
             # timestamped point required for velocity fitting; subsequent weak frames do not
@@ -729,7 +753,7 @@ class TrackControllerImpl(TrackControllerProtocol):
             bfov=outputBfov,
             confidence=outputConfidence,
             status=_publicStatus(self._mode),
-            valid=accepted,
+            valid=accepted or holdingWeak,
             resultSource=source,
         )
 

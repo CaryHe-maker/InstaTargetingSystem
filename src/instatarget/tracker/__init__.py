@@ -1,16 +1,22 @@
-"""Tracker backend implementations and model adapters."""
+"""ARTrackV2 tracker backend and model adapters."""
 
-from instatarget.tracker.backend import TrackerBackend, TrackerBackendImpl
-from instatarget.tracker.hit_backend import HiTBackend, HiTPrediction, HiTSession
+from instatarget.tracker.artrack_backend import TrackerBackend, TrackerBackendImpl
+from instatarget.tracker.artrack_model import (
+    ARTrackBackend,
+    ARTrackPrediction,
+    ARTrackSession,
+    ARTrackTemplate,
+    PyTorchARTrackV2Session,
+)
 from instatarget.tracker.observation import buildRgbObservation, clipLocalBox
-from instatarget.tracker.pytorch_hit_session import PyTorchHiTSession
-from instatarget.tracker.template import TemplateCache, TemplateSample, TemplateSnapshot
+from instatarget.tracker.template_cache import TemplateCache, TemplateSample, TemplateSnapshot
 
 __all__ = [
-    "HiTBackend",
-    "HiTPrediction",
-    "HiTSession",
-    "PyTorchHiTSession",
+    "ARTrackBackend",
+    "ARTrackPrediction",
+    "ARTrackSession",
+    "ARTrackTemplate",
+    "PyTorchARTrackV2Session",
     "TemplateCache",
     "TemplateSample",
     "TemplateSnapshot",

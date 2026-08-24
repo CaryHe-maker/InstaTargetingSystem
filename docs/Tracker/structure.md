@@ -1,12 +1,12 @@
-# Tracker 模块结构
+# ARTrackV2 Tracker
 
-Tracker 管理局部 RGB 视图推理和模板特征，不负责球面搜索或状态转移。
+运行时由三层组成：`PyTorchARTrackV2Session` 负责官方 ARTrackV2-B-256 网络，
+`ARTrackBackend` 做批量输入/输出校验，`TrackerBackendImpl` 将模板 revision、
+局部框和 controller 的视图事务串起来。
 
-| 文件 | 职责 |
-|---|---|
-| `hit_backend.py` | HiTSession 协议与异常边界 |
-| `pytorch_hit_session.py` | 真实 HiT-Small 推理 |
-| `backend.py` | 批量 RGB 视图和模板命令编排 |
-| `template.py` | 模板特征缓存和 revision |
+ARTrackV2 使用 128x128 模板、256x256 搜索 crop 和 400-bin 自回归坐标。每个
+perspective view 都在自己的局部坐标系中以模板框为中心生成搜索 crop，输出再映射
+回 `LocalView`，随后由现有球面 Geometry 和 Controller 完成 IoU 优化相关的融合。
 
-深入阅读：[hitRuntime.md](hitRuntime.md)、[templateCache.md](templateCache.md)、[parameters.md](parameters.md)。
+官方代码位于 `src/instatarget/vendor/artrackv2`，运行时依赖保持项目已有的
+PyTorch、torchvision、timm、easydict 和 OpenCV 版本。

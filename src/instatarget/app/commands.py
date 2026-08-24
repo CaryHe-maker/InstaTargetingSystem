@@ -19,7 +19,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 def runMain(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run",
-        description="Run one AirSim360 sequence with the RGB-only HiT pipeline.",
+        description="Run one AirSim360 sequence with the RGB-only ARTrackV2 pipeline.",
     )
     parser.add_argument("-RGB_only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("data")

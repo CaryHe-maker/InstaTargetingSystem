@@ -23,6 +23,8 @@ class ModelConfig:
     def __post_init__(self) -> None:
         if self.backend not in {"pytorch", "onnxruntime", "tensorrt"}:
             raise ConfigError(f"unsupported model.backend: {self.backend}")
+        if self.variant.lower().replace("-", "_") != "artrackv2_b_256":
+            raise ConfigError("model.variant must be artrackv2_b_256")
         if not self.variant.strip():
             raise ConfigError("model.variant must be non-empty")
         if self.precision not in {"fp32", "fp16"}:
@@ -324,8 +326,8 @@ class TrainingModelConfig:
     dropout: float
 
     def __post_init__(self) -> None:
-        if self.variant != "hit_small":
-            raise ConfigError("training currently supports only model.variant=hit_small")
+        if self.variant != "artrackv2_b_256":
+            raise ConfigError("training currently supports only model.variant=artrackv2_b_256")
         if self.stage not in {1, 2, 3, 4}:
             raise ConfigError("model.stage must be one of 1, 2, 3, 4")
         if self.hiddenDim <= 0:

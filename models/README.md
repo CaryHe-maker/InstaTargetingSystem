@@ -1,10 +1,13 @@
-# Stage 3 模型产物
+# ARTrackV2-B-256 模型产物
 
-生产运行只使用以下已纳入 Git 的配对产物：
+将官方 `ARTrackV2-B-256` checkpoint 通过 Git LFS 获取到本目录，文件名固定为
+`artrackv2_b_256.pth.tar`。文件应包含 `net` state dictionary；代码会严格加载 ViT-B、
+256 搜索尺寸对应的权重。
 
-- `hit_small_stage3_inference.pth`：紧凑 Stage 3 checkpoint，只保留非空 `model` state。
-- `hit_small_stage3_inference.calibration.json`：外观校准、SingleScore 权重与 Controller 工作点。
+当前发布文件 SHA-256：
+`a99b7f8086e4827ecfe32ec8a9d32ad41c1ca9ff3cac551b62ec95576ca01d05`
 
-生产 checkpoint SHA-256 为 `f9ee8e946f29a813ee359d5e417245651b622863759145abce82690e3fc12c66`。校准文件记录同一哈希与 `E:\NewDownload\train\manifest.jsonl` 的 SHA-256；Runtime 默认逐字节核对 checkpoint，并拒绝阈值与 `configs/RGBonly.yaml` 不一致的产物。
-
-维护者替换 Stage 3 原始权重时，在持有本地 `hit_small_stage3.pth` 与配对校准文件的机器上运行 `docker/compact_checkpoint.py`。脚本逐张量确认紧凑文件保留完全相同的 `model` state，并把校准副本绑定到新 SHA-256。原始训练 checkpoint、旧 `net` checkpoint 和本机 engine 继续忽略；远端构建服务器不得重新生成或替换上述生产配对产物。
+ARTrackV2 的分数不是校准产物，首次部署前可使用项目的验证集重新拟合
+`ScoreCalibration`，再把生成的 JSON 写入 `configs/RGBonly.yaml` 的
+`scoring.calibrationArtifact`。没有校准文件时，开发调用可显式使用
+`buildRuntime(..., allowUncalibratedScoring=True)`。

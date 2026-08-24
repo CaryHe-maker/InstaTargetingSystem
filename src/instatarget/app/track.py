@@ -43,7 +43,9 @@ def main(argv: list[str] | None = None) -> int:
     source = None
     try:
         config = loadConfig(args.config)
-        runtime = buildRuntime(config)
+        runtime = buildRuntime(
+            config, allowUncalibratedScoring=config.scoring.calibrationArtifact is None
+        )
         source = FrameSource(recursive=args.recursive, sequenceId=args.sequence_id)
         source.open(args.input)
         openSink(runtime.sink, args.output)
@@ -58,9 +60,7 @@ def main(argv: list[str] | None = None) -> int:
             recorder=runtime.recorder,
             scoreCalibration=runtime.scoreCalibration,
         )
-        expectedCount = (
-            resultCount if getattr(source, "frameCount", 0) <= 0 else source.frameCount
-        )
+        expectedCount = resultCount if getattr(source, "frameCount", 0) <= 0 else source.frameCount
         finalizeSink(runtime.sink, expectedCount)
         return 0
     except ConfigError as error:

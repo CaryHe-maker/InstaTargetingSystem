@@ -28,8 +28,14 @@ from instatarget.training.dataset import (
 
 
 class ManifestVideoSource:
-    def __init__(self, records: tuple[ManifestRecord, ...], maxFrames: int | None) -> None:
+    def __init__(
+        self,
+        records: tuple[ManifestRecord, ...],
+        maxFrames: int | None,
+        frameOffset: int = 0,
+    ) -> None:
         self._records = records[:maxFrames] if maxFrames is not None else records
+        self._frameOffset = frameOffset
         self._capture: Any = None
         self._offset = 0
 
@@ -43,8 +49,9 @@ class ManifestVideoSource:
         if self._offset >= len(self._records):
             return None
         record = self._records[self._offset]
-        if int(self._capture.get(cv2.CAP_PROP_POS_FRAMES)) != record.frameIndex:
-            self._capture.set(cv2.CAP_PROP_POS_FRAMES, record.frameIndex)
+        sourceFrameIndex = int(record.frameIndex) + self._frameOffset
+        if int(self._capture.get(cv2.CAP_PROP_POS_FRAMES)) != sourceFrameIndex:
+            self._capture.set(cv2.CAP_PROP_POS_FRAMES, sourceFrameIndex)
         ok, bgr = self._capture.read()
         if not ok or bgr is None:
             raise RuntimeError(f"cannot decode frame {record.frameIndex}")
@@ -200,6 +207,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sequence", required=True)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--max-frames", type=int)
+    parser.add_argument(
+        "--start-frame",
+        type=int,
+        default=0,
+        help="Start a short diagnostic window at this source frame; output indices are re-based to zero.",
+    )
     parser.add_argument("--spherical-samples-yaw", type=int, default=128)
     parser.add_argument("--spherical-samples-pitch", type=int, default=64)
     parser.add_argument("--allow-holdout", action="store_true")
@@ -238,6 +251,26 @@ def main(argv: list[str] | None = None) -> int:
     if outside:
         raise RuntimeError(f"manifest video is outside canonical dataset root: {outside[0]}")
     records = tuple(sorted(records, key=lambda item: item.frameIndex))
+    if args.start_frame < 0:
+        raise ValueError("--start-frame must be non-negative")
+    frameOffset = 0
+    if args.start_frame:
+        startIndex = next(
+            (index for index, record in enumerate(records) if record.frameIndex >= args.start_frame),
+            None,
+        )
+        if startIndex is None:
+            raise RuntimeError(f"sequence has no frame at or after --start-frame={args.start_frame}")
+        frameOffset = records[startIndex].frameIndex
+        baseTimestamp = records[startIndex].timestamp
+        records = tuple(
+            replace(
+                record,
+                frameIndex=record.frameIndex - frameOffset,
+                timestamp=record.timestamp - baseTimestamp,
+            )
+            for record in records[startIndex:]
+        )
     if records[0].frameIndex != 0 or not records[0].visible or records[0].bbox is None:
         raise RuntimeError("sequence requires a visible frame-0 initialization")
     if args.max_frames is not None and args.max_frames < 2:
@@ -256,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     selected = records[: args.max_frames] if args.max_frames is not None else records
     truth = {record.frameIndex: record for record in selected}
-    source = ManifestVideoSource(records, args.max_frames)
+    source = ManifestVideoSource(records, args.max_frames, frameOffset=frameOffset)
     sink = MemoryResultSink()
     timer = IntervalTimer()
     recorder = CandidateRecorder(truth)
