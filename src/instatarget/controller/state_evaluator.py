@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
+from math import isfinite
 
 from instatarget.controller.fusor import FUSION_OVERLAP_RATE, FusionBoxMode, Fusor
 from instatarget.controller.state_model import (
@@ -64,12 +65,17 @@ class StateEvaluator:
             "INSTARGET_ARTRACK_FUSION_BOX_MODE",
             self._config.fusionBoxMode,
         )
+        overlapRate = _artrackFusionFloat("INSTARGET_ARTRACK_FUSION_OVERLAP", FUSION_OVERLAP_RATE)
+        configuredSourceMin = (
+            0.0 if self._artrackAcceptAny else self._config.fusionSourceMinConfidence
+        )
+        sourceMinConfidence = _artrackFusionFloat(
+            "INSTARGET_ARTRACK_FUSION_SOURCE_MIN", configuredSourceMin
+        )
         best = Fusor(
             geometry,
-            overlapRate=FUSION_OVERLAP_RATE,
-            sourceMinConfidence=(
-                0.0 if self._artrackAcceptAny else self._config.fusionSourceMinConfidence
-            ),
+            overlapRate=overlapRate,
+            sourceMinConfidence=sourceMinConfidence,
             boxMode=FusionBoxMode(boxMode),
             allowFusion=not self._artrackDirect,
         ).fuse(
@@ -121,9 +127,9 @@ class StateEvaluator:
             isFinalAttempt=isFinalAttempt,
             appearanceOnlyScoring=False,
             successRate=self._config.successRate,
-            fusionThreshold=FUSION_OVERLAP_RATE,
-            overlapThreshold=FUSION_OVERLAP_RATE,
-            fusionSourceMinConfidence=self._config.fusionSourceMinConfidence,
+            fusionThreshold=overlapRate,
+            overlapThreshold=overlapRate,
+            fusionSourceMinConfidence=sourceMinConfidence,
             bestCandidate=best,
             predictedCenter=prediction.center,
             searchSeedCenter=best.bfov.center if best is not None else prediction.center,
@@ -214,6 +220,18 @@ class StateEvaluator:
             raise ProtocolError("projected observation contains an unknown viewId")
         if actual and actual != tuple(item for item in expected if item in set(actual)):
             raise ProtocolError("projected observations must preserve requested view order")
+
+
+def _artrackFusionFloat(name: str, default: float) -> float:
+    """Read bounded ARTrack fusion overrides without malformed env state."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return float(default)
+    try:
+        value = float(raw)
+    except ValueError:
+        return float(default)
+    return value if isfinite(value) and 0.0 <= value <= 1.0 else float(default)
 
 
 def _measurementAccepted(candidate: EvaluatedCandidate | None, minimumScore: float) -> bool:

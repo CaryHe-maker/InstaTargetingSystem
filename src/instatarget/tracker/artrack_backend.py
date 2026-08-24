@@ -134,10 +134,19 @@ class TrackerBackendImpl(TrackerBackendProtocol):
                 tuple(deviceViews),
                 tuple((view.spec.outputWidthPx, view.spec.outputHeightPx) for view in views),
                 templateFeatures,
+                tuple(
+                    (view.spec.bfov.horizontalFovRad, view.spec.bfov.verticalFovRad)
+                    for view in views
+                ),
             )
         else:
             predictions = self._artrackBackend.inferBatch(
-                tuple(view.rgb for view in views), templateFeatures
+                tuple(view.rgb for view in views),
+                templateFeatures,
+                tuple(
+                    (view.spec.bfov.horizontalFovRad, view.spec.bfov.verticalFovRad)
+                    for view in views
+                ),
             )
         sharedInferenceNs = (perf_counter_ns() - inferenceStartedNs) // len(views) if views else 0
         return tuple(

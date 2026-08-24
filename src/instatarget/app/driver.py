@@ -157,16 +157,35 @@ def buildRuntime(
     sessionFactory = artrackSessionFactory or PyTorchARTrackV2Session
     if config.model.variant.lower().replace("-", "_") == "artrackv2_b_256":
         # ARTrack already performs appearance/localization scoring internally.
-        # These defaults remove legacy controller priors and select the
-        # low-cost single-view route for ordinary targets while retaining a
-        # multi-view fallback for very large ERP targets.
+        # These defaults favor IoU over throughput: use the full multi-view,
+        # two-round route so small/changed targets get geometric corroboration.
+        # Callers can still opt into the low-latency route with environment
+        # overrides when FPS is more important than accuracy.
+        # ARTrack's raw sigmoid quality is a ranking signal (roughly 0.49 on
+        # this checkpoint), not the calibrated HiViT probability encoded in
+        # tracking.candidateMinScore. Let the evaluator use its best candidate
+        # and rely on anchor/recent safeguards for template integrity.
         os.environ.setdefault("INSTARGET_ARTRACK_ACCEPT_ANY", "1")
-        os.environ.setdefault("INSTARGET_ARTRACK_ADAPTIVE", "1")
-        os.environ.setdefault("INSTARGET_ARTRACK_SINGLE_ROUND", "1")
+        os.environ.setdefault("INSTARGET_ARTRACK_ADAPTIVE", "0")
+        os.environ.setdefault("INSTARGET_ARTRACK_SINGLE_ROUND", "0")
         os.environ.setdefault("INSTARGET_ARTRACK_DISABLE_MOTION", "1")
         os.environ.setdefault("INSTARGET_ARTRACK_SINGLE_FOV_DEG", "90")
         os.environ.setdefault("INSTARGET_ARTRACK_TEMPLATE_FOV_SCALE", "2.5")
         os.environ.setdefault("INSTARGET_ARTRACK_HOLD_WEAK", "1")
+        # ARTrack raw quality scores cluster near 0.50 on this checkpoint;
+        # only promote the upper tail into the recent template stream so a
+        # drifting box cannot overwrite the anchor.
+        os.environ.setdefault("INSTARGET_ARTRACK_TEMPLATE_MIN_CONF", "0.515")
+        os.environ.setdefault("INSTARGET_ARTRACK_ALLOW_SINGLE_TEMPLATE", "1")
+        # The legacy 0.70 overlap / 0.740642 source gate was calibrated for
+        # HiViT. ARTrack views are independent perspective crops with raw
+        # scores near 0.5, so use the empirically validated ARTrack fusion
+        # operating point and keep both values overrideable for new sequences.
+        os.environ.setdefault("INSTARGET_ARTRACK_FUSION_SOURCE_MIN", "0.35")
+        os.environ.setdefault("INSTARGET_ARTRACK_FUSION_OVERLAP", "0.45")
+        # Keep the immutable frame-zero anchor while allowing safe recent/stable
+        # appearance refreshes after confirmed observations.
+        os.environ.setdefault("INSTARGET_ARTRACK_ONLINE_TEMPLATE", "1")
     # ARTrack's reference preprocessing is OpenCV/uint8 based. Keep that
     # numerically faithful path as the default for IoU; opt into CUDA geometry
     # only after a workload-specific A/B check proves no accuracy regression.
@@ -505,7 +524,7 @@ def _projectObservation(
             motion.effectiveProbability,
             scoreCalibration,
         )
-    scaleScore = _scaleScore(observation.bbox, view)
+    scaleScore = _scaleScore(observation.bbox, view, predictedMotion)
     normalizedRadius, edgeMargin = _projectionQuality(observation.bbox, view)
     return ProjectedObservation(
         viewId=view.spec.viewId,
@@ -562,10 +581,36 @@ def _projectValidObservations(
     return tuple(projected)
 
 
-def _scaleScore(box: BBoxXYWH, view: LocalView) -> float:
-    viewArea = max(float(view.spec.outputWidthPx * view.spec.outputHeightPx), 1.0)
-    boxArea = max(float(box.widthPx * box.heightPx), 1e-6)
-    return float(np.clip(1.0 - abs(math.log(boxArea / viewArea)) / 4.0, 0.0, 1.0))
+def _scaleScore(
+    box: BBoxXYWH,
+    view: LocalView,
+    predictedMotion: MotionState3D | None = None,
+) -> float:
+    """Score scale against the predicted angular target, not the whole view.
+
+    The old implementation compared object area with the 256x256 crop area,
+    assigning inherently low scores to small targets.  That made correct
+    detections lose the fusion gate exactly when the object shrank.
+    """
+    expectedWidth = expectedHeight = None
+    if (
+        predictedMotion is not None
+        and predictedMotion.horizontalSizeRad > 0.0
+        and predictedMotion.verticalSizeRad > 0.0
+    ):
+        expectedWidth = view.spec.outputWidthPx * math.tan(
+            predictedMotion.horizontalSizeRad * 0.5
+        ) / max(math.tan(view.spec.bfov.horizontalFovRad * 0.5), 1e-6)
+        expectedHeight = view.spec.outputHeightPx * math.tan(
+            predictedMotion.verticalSizeRad * 0.5
+        ) / max(math.tan(view.spec.bfov.verticalFovRad * 0.5), 1e-6)
+    if expectedWidth is None or expectedHeight is None:
+        # Conservative neutral fallback during frame-zero motion bootstrap.
+        expectedWidth = max(8.0, view.spec.outputWidthPx * 0.18)
+        expectedHeight = max(8.0, view.spec.outputHeightPx * 0.18)
+    widthResidual = abs(math.log(max(box.widthPx, 1e-3) / max(expectedWidth, 1e-3)))
+    heightResidual = abs(math.log(max(box.heightPx, 1e-3) / max(expectedHeight, 1e-3)))
+    return float(np.clip(math.exp(-0.5 * (widthResidual + heightResidual)), 0.0, 1.0))
 
 
 def _projectionQuality(box: BBoxXYWH, view: LocalView) -> tuple[float, float]:

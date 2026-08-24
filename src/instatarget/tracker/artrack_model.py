@@ -11,7 +11,7 @@ import math
 import os
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import perf_counter_ns
 from types import ModuleType
@@ -58,6 +58,10 @@ class ARTrackPrediction:
 class ARTrackTemplate:
     tensor: Any
     bbox: BBoxXYWH
+    # Source view FOV lets the search crop preserve angular scale when the
+    # controller changes perspective FOV between frames.
+    sourceHorizontalFovRad: float | None = None
+    sourceVerticalFovRad: float | None = None
 
 
 @runtime_checkable
@@ -108,19 +112,29 @@ class ARTrackBackend:
         deviceRgb = getattr(view, "deviceRgb", None)
         if deviceRgb is not None and callable(getattr(self._session, "encodeTemplateDevice", None)):
             try:
-                return self._session.encodeTemplateDevice(
+                encoded = self._session.encodeTemplateDevice(
                     deviceRgb,
                     bbox,
                     (view.spec.outputWidthPx, view.spec.outputHeightPx),
+                )
+                return replace(
+                    encoded,
+                    sourceHorizontalFovRad=view.spec.bfov.horizontalFovRad,
+                    sourceVerticalFovRad=view.spec.bfov.verticalFovRad,
                 )
             except (ModelError, ProtocolError):
                 raise
             except Exception as error:
                 raise ModelError(f"ARTrackV2 device template encoding failed: {error}") from error
-        return (
+        encoded = (
             self.encodeTemplate(_deviceRgbToNumpy(deviceRgb), bbox)
             if deviceRgb is not None
             else self.encodeTemplate(view.rgb, bbox)
+        )
+        return replace(
+            encoded,
+            sourceHorizontalFovRad=view.spec.bfov.horizontalFovRad,
+            sourceVerticalFovRad=view.spec.bfov.verticalFovRad,
         )
 
     def infer(
@@ -132,9 +146,12 @@ class ARTrackBackend:
         self,
         rgbs: Sequence[NDArray[np.uint8]],
         templateFeatures: Sequence[object],
+        imageFovs: Sequence[tuple[float, float]] | None = None,
     ) -> tuple[ARTrackPrediction, ...]:
         self._requireOpen()
         images = tuple(rgbs)
+        if imageFovs is not None and len(imageFovs) != len(images):
+            raise ProtocolError("ARTrackV2 image FOV metadata must match the image batch")
         for rgb in images:
             _requireRgb(rgb)
         if not images:
@@ -142,11 +159,14 @@ class ARTrackBackend:
         if not templateFeatures:
             raise ProtocolError("ARTrackV2 inference requires at least one template feature")
         try:
-            predictions = (
-                tuple(self._session.inferBatch(images, templateFeatures))
-                if callable(getattr(self._session, "inferBatch", None))
-                else tuple(self._session.infer(rgb, templateFeatures) for rgb in images)
-            )
+            if imageFovs and callable(getattr(self._session, "inferBatchWithFovs", None)):
+                predictions = tuple(
+                    self._session.inferBatchWithFovs(images, templateFeatures, imageFovs)
+                )
+            elif callable(getattr(self._session, "inferBatch", None)):
+                predictions = tuple(self._session.inferBatch(images, templateFeatures))
+            else:
+                predictions = tuple(self._session.infer(rgb, templateFeatures) for rgb in images)
         except (ModelError, ProtocolError):
             raise
         except Exception as error:
@@ -162,10 +182,18 @@ class ARTrackBackend:
         deviceRgbs: Sequence[Any],
         imageSizes: Sequence[tuple[int, int]],
         templateFeatures: Sequence[object],
+        imageFovs: Sequence[tuple[float, float]] | None = None,
     ) -> tuple[ARTrackPrediction, ...]:
         if len(deviceRgbs) != len(imageSizes):
             raise ProtocolError("device RGBs and image sizes must have equal length")
+        if imageFovs is not None and len(imageFovs) != len(deviceRgbs):
+            raise ProtocolError("ARTrackV2 device FOV metadata must match the image batch")
         inferDeviceBatch = getattr(self._session, "inferDeviceBatch", None)
+        inferDeviceBatchWithFovs = getattr(self._session, "inferDeviceBatchWithFovs", None)
+        if imageFovs and callable(inferDeviceBatchWithFovs):
+            return tuple(
+                inferDeviceBatchWithFovs(deviceRgbs, imageSizes, templateFeatures, imageFovs)
+            )
         if callable(inferDeviceBatch):
             return tuple(inferDeviceBatch(deviceRgbs, imageSizes, templateFeatures))
         return self.inferBatch(
@@ -249,12 +277,16 @@ class PyTorchARTrackV2Session:
         self,
         rgbs: Sequence[NDArray[np.uint8]],
         templateFeatures: Sequence[object],
+        *,
+        imageFovs: Sequence[tuple[float, float]] | None = None,
     ) -> tuple[ARTrackPrediction, ...]:
         self._requireOpen()
         templates = tuple(item for item in templateFeatures if isinstance(item, ARTrackTemplate))
         if not templates:
             raise ProtocolError("ARTrackV2 template features are invalid")
         images = tuple(rgbs)
+        if imageFovs is not None and len(imageFovs) != len(images):
+            raise ProtocolError("ARTrackV2 image FOV metadata must match the image batch")
         states: list[BBoxXYWH] = []
         crops: list[NDArray[np.uint8]] = []
         resizeFactors: list[float] = []
@@ -264,7 +296,12 @@ class PyTorchARTrackV2Session:
             # Each perspective view is an independent coordinate system. The
             # spherical controller centers its views on the current estimate, so
             # carrying a previous local box across viewIds would introduce drift.
-            state = _centeredPrior(templates[0].bbox, image.shape[1], image.shape[0])
+            fov = imageFovs[index] if imageFovs is not None else None
+            state = _scaledPrior(
+                templates[-1], image.shape[1], image.shape[0],
+                fov[0] if fov is not None else None,
+                fov[1] if fov is not None else None,
+            )
             if useFullView:
                 crop = np.ascontiguousarray(image)
                 resizeFactor = _SEARCH_SIZE / float(image.shape[1])
@@ -317,11 +354,21 @@ class PyTorchARTrackV2Session:
         }
         return tuple(predictions)
 
+    def inferBatchWithFovs(
+        self,
+        rgbs: Sequence[NDArray[np.uint8]],
+        templateFeatures: Sequence[object],
+        imageFovs: Sequence[tuple[float, float]],
+    ) -> tuple[ARTrackPrediction, ...]:
+        return self.inferBatch(rgbs, templateFeatures, imageFovs=imageFovs)
+
     def inferDeviceBatch(
         self,
         deviceRgbs: Sequence[Any],
         imageSizes: Sequence[tuple[int, int]],
         templateFeatures: Sequence[object],
+        *,
+        imageFovs: Sequence[tuple[float, float]] | None = None,
     ) -> tuple[ARTrackPrediction, ...]:
         """Run the same official crop/decode path directly on normalized CUDA views."""
         self._requireOpen()
@@ -330,13 +377,20 @@ class PyTorchARTrackV2Session:
             raise ProtocolError("ARTrackV2 template features are invalid")
         if len(deviceRgbs) != len(imageSizes):
             raise ProtocolError("device RGBs and image sizes must have equal length")
+        if imageFovs is not None and len(imageFovs) != len(deviceRgbs):
+            raise ProtocolError("ARTrackV2 device FOV metadata must match the image batch")
         states: list[BBoxXYWH] = []
         crops: list[Any] = []
         resizeFactors: list[float] = []
         useFullView = os.environ.get("INSTARGET_ARTRACK_FULL_VIEW", "0") == "1"
         for deviceRgb, (width, height) in zip(deviceRgbs, imageSizes, strict=True):
             _requireDeviceRgb(deviceRgb, width, height)
-            state = _centeredPrior(templates[0].bbox, width, height)
+            fov = imageFovs[len(states)] if imageFovs is not None else None
+            state = _scaledPrior(
+                templates[-1], width, height,
+                fov[0] if fov is not None else None,
+                fov[1] if fov is not None else None,
+            )
             if useFullView:
                 crop = deviceRgb
                 resizeFactor = _SEARCH_SIZE / float(width)
@@ -368,6 +422,17 @@ class PyTorchARTrackV2Session:
             output = self._model(template=template, search=search)
         elapsed = (perf_counter_ns() - started) // max(1, len(deviceRgbs))
         return self._decodeOutput(output, states, resizeFactors, imageSizes, elapsed)
+
+    def inferDeviceBatchWithFovs(
+        self,
+        deviceRgbs: Sequence[Any],
+        imageSizes: Sequence[tuple[int, int]],
+        templateFeatures: Sequence[object],
+        imageFovs: Sequence[tuple[float, float]],
+    ) -> tuple[ARTrackPrediction, ...]:
+        return self.inferDeviceBatch(
+            deviceRgbs, imageSizes, templateFeatures, imageFovs=imageFovs
+        )
 
     def close(self) -> None:
         if self._closed:
@@ -555,6 +620,49 @@ def _centeredPrior(templateBox: BBoxXYWH, width: int, height: int) -> BBoxXYWH:
         yPx=max(0.0, height * 0.5 - templateBox.heightPx * 0.5),
         widthPx=min(templateBox.widthPx, float(width)),
         heightPx=min(templateBox.heightPx, float(height)),
+    )
+
+
+def _scaledPrior(
+    template: ARTrackTemplate,
+    width: int,
+    height: int,
+    targetHorizontalFovRad: float | None,
+    targetVerticalFovRad: float | None,
+) -> BBoxXYWH:
+    """Center the newest template and optionally preserve angular extent.
+
+    The public backend historically passed only RGB arrays, so target FOVs are
+    optional.  When unavailable this still improves appearance/scale changes by
+    using the newest online template instead of the immutable anchor.
+    """
+    box = template.bbox
+    scaleX = scaleY = 1.0
+    if (
+        targetHorizontalFovRad is not None
+        and targetVerticalFovRad is not None
+        and template.sourceHorizontalFovRad is not None
+        and template.sourceVerticalFovRad is not None
+    ):
+        import math
+
+        scaleX = math.tan(0.5 * template.sourceHorizontalFovRad) / max(
+            math.tan(0.5 * targetHorizontalFovRad), 1e-6
+        )
+        scaleY = math.tan(0.5 * template.sourceVerticalFovRad) / max(
+            math.tan(0.5 * targetVerticalFovRad), 1e-6
+        )
+        scaleX = min(3.0, max(0.35, scaleX))
+        scaleY = min(3.0, max(0.35, scaleY))
+    return _centeredPrior(
+        BBoxXYWH(
+            xPx=box.xPx,
+            yPx=box.yPx,
+            widthPx=max(1.0, box.widthPx * scaleX),
+            heightPx=max(1.0, box.heightPx * scaleY),
+        ),
+        width,
+        height,
     )
 
 

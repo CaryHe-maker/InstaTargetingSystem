@@ -37,11 +37,12 @@ class TemplateSnapshot:
 
     @property
     def features(self) -> tuple[object, ...]:
-        # ARTrackV2 has exactly two template streams.  Keep the immutable
-        # anchor and select the newest stable sample when available, otherwise
-        # the newest recent sample.  Passing all three cache slots would create
-        # an invalid template batch and silently discard the intended update.
-        secondary = self.stable if self.stable is not None else self.recent
+        # ARTrackV2 has exactly two template streams. Keep the immutable anchor
+        # and select the newest online sample. Once a stable sample exists, a
+        # later recent update must still be visible to the model; otherwise the
+        # supposedly adaptive path silently freezes after the first promotion.
+        candidates = tuple(item for item in (self.recent, self.stable) if item is not None)
+        secondary = max(candidates, key=lambda item: int(item.frameIndex)) if candidates else None
         return (
             (self.anchor.features,)
             if secondary is None
