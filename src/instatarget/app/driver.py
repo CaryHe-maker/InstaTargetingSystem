@@ -309,6 +309,7 @@ def runTracking(
                                         geometry=geometry,
                                         scoreCalibration=scoreCalibration,
                                     )
+                                # PostTrainV2.4 keeps recorder inputs host-only at this boundary.
                                 # Recorders only consume the compatibility RGB and view
                                 # metadata.  Never retain CUDA tensors after this round.
                                 if recorder is not None:
