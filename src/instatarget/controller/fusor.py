@@ -30,15 +30,6 @@ class FusionBoxMode(StrEnum):
     BEST_SOURCE = "best_source"
 
 
-class FusionStrategy(StrEnum):
-    """Source evidence used when ranking overlapping observations."""
-
-    LEGACY = "legacy"
-    PRESENCE_QUALITY = "presence_quality"
-    GEOMETRIC_CONSENSUS = "geometric_consensus"
-    WEIGHTED_BOX = "weighted_box"
-
-
 class Fusor:
     """Return exactly one best single or two-source fused candidate."""
 
@@ -49,7 +40,6 @@ class Fusor:
         overlapRate: float = FUSION_OVERLAP_RATE,
         sourceMinConfidence: float = 0.80,
         boxMode: FusionBoxMode | str = FusionBoxMode.MAX_INTERSECTION,
-        strategy: FusionStrategy | str = FusionStrategy.LEGACY,
     ) -> None:
         if not 0.0 <= overlapRate <= 1.0:
             raise ValueError("fusion overlapRate must be in [0, 1]")
@@ -64,13 +54,6 @@ class Fusor:
             raise ValueError(
                 "fusion boxMode must be 'max_intersection', 'min_union', "
                 "'reference_adaptive', or 'best_source'"
-            ) from error
-        try:
-            self._strategy = FusionStrategy(strategy)
-        except ValueError as error:
-            raise ValueError(
-                "fusion strategy must be 'legacy', 'presence_quality', "
-                "'geometric_consensus', or 'weighted_box'"
             ) from error
 
     def fuse(
@@ -94,39 +77,28 @@ class Fusor:
         ):
             raise ProtocolError("reference-adaptive fusion requires a positive reference area")
 
-        candidates = [
-            _singleCandidate(item, self._sourceScore(item)) for item in observations
-        ]
-        if self._strategy is FusionStrategy.GEOMETRIC_CONSENSUS:
-            candidates.extend(
-                self._consensusCandidates(observations, frameWidthPx, frameHeightPx)
-            )
-        else:
-            for firstIndex, first in enumerate(observations):
-                for second in observations[firstIndex + 1 :]:
-                    firstScore = self._sourceScore(first)
-                    secondScore = self._sourceScore(second)
-                    if min(firstScore, secondScore) < self._sourceMinConfidence:
-                        continue
-                    overlap = _overlapRate(first.bbox, second.bbox, frameWidthPx)
-                    if overlap < self._overlapRate:
-                        continue
-                    candidate = self._fusedCandidate(
-                        first,
-                        second,
-                        overlap,
-                        _agreementIou(first.bbox, second.bbox, frameWidthPx),
-                        frameWidthPx,
-                        frameHeightPx,
-                    )
-                    if candidate is not None:
-                        candidates.append(candidate)
+        candidates = [_singleCandidate(item) for item in observations]
+        for firstIndex, first in enumerate(observations):
+            for second in observations[firstIndex + 1 :]:
+                firstScore = _singleScore(first)
+                secondScore = _singleScore(second)
+                if min(firstScore, secondScore) < self._sourceMinConfidence:
+                    continue
+                overlap = _overlapRate(first.bbox, second.bbox, frameWidthPx)
+                if overlap < self._overlapRate:
+                    continue
+                candidate = self._fusedCandidate(
+                    first,
+                    second,
+                    overlap,
+                    _agreementIou(first.bbox, second.bbox, frameWidthPx),
+                    frameWidthPx,
+                    frameHeightPx,
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
         best = max(candidates, key=_candidateRank)
-        if (
-            self._boxMode is not FusionBoxMode.REFERENCE_ADAPTIVE
-            or not best.fused
-            or len(best.sourceViewIds) != 2
-        ):
+        if self._boxMode is not FusionBoxMode.REFERENCE_ADAPTIVE or not best.fused:
             return best
         observationsById = {item.viewId: item for item in observations}
         first, second = (observationsById[viewId] for viewId in best.sourceViewIds)
@@ -145,74 +117,6 @@ class Fusor:
             bfov=_intersectionBfov(bbox, self._geometry, frameWidthPx, frameHeightPx),
         )
 
-    def _sourceScore(self, observation: ProjectedObservation) -> float:
-        if self._strategy is not FusionStrategy.PRESENCE_QUALITY:
-            return _singleScore(observation)
-        presence = _optionalProbability(observation.presenceProbability, observation.modelScore)
-        quality = _optionalProbability(
-            observation.qualityProbability,
-            observation.appearanceProbability,
-        )
-        calibrated = _singleScore(observation)
-        # Presence rejects confident-looking background boxes; calibrated score
-        # remains a small stabilizer when either auxiliary head is unavailable.
-        return float(np.clip(0.65 * sqrt(presence * quality) + 0.35 * calibrated, 0.0, 1.0))
-
-    def _consensusCandidates(
-        self,
-        observations: Sequence[ProjectedObservation],
-        frameWidthPx: int,
-        frameHeightPx: int,
-    ) -> list[EvaluatedCandidate]:
-        eligible = [
-            item
-            for item in observations
-            if self._sourceScore(item) >= self._sourceMinConfidence
-        ]
-        candidates: list[EvaluatedCandidate] = []
-        for representative in eligible:
-            supporters = [
-                item
-                for item in eligible
-                if item.viewId != representative.viewId
-                and _overlapRate(representative.bbox, item.bbox, frameWidthPx)
-                >= self._overlapRate
-            ]
-            if not supporters:
-                continue
-            weightedSupport = sum(
-                self._sourceScore(item)
-                * _agreementIou(representative.bbox, item.bbox, frameWidthPx)
-                for item in supporters
-            )
-            totalWeight = sum(self._sourceScore(item) for item in supporters)
-            support = weightedSupport / totalWeight if totalWeight else 0.0
-            sourceScore = self._sourceScore(representative)
-            confidence = min(
-                FUSION_SCORE_CAP,
-                sourceScore + 0.06 * support * (1.0 - sourceScore),
-            )
-            sourceIds = tuple(
-                sorted(item.viewId for item in (representative, *supporters))
-            )
-            candidates.append(
-                EvaluatedCandidate(
-                    bfov=representative.bfov,
-                    bbox=representative.bbox,
-                    confidence=confidence,
-                    sourceViewIds=sourceIds,
-                    fused=True,
-                    overlapRate=support,
-                    minSourceConfidence=min(
-                        self._sourceScore(item) for item in (representative, *supporters)
-                    ),
-                    sourceConfidencePassed=True,
-                    representativeViewId=representative.viewId,
-                    representativeLocalBox=representative.localBox,
-                )
-            )
-        return candidates
-
     def _fusedCandidate(
         self,
         first: ProjectedObservation,
@@ -222,23 +126,14 @@ class Fusor:
         frameWidthPx: int,
         frameHeightPx: int,
     ) -> EvaluatedCandidate | None:
-        firstScore = self._sourceScore(first)
-        secondScore = self._sourceScore(second)
-        if self._strategy is FusionStrategy.WEIGHTED_BOX:
-            bbox = _weightedBox(
-                first.bbox,
-                second.bbox,
-                firstScore,
-                secondScore,
-                frameWidthPx,
-                frameHeightPx,
-            )
-        elif self._boxMode is FusionBoxMode.MIN_UNION:
+        if self._boxMode is FusionBoxMode.MIN_UNION:
             bbox = _unionBox(first.bbox, second.bbox, frameWidthPx, frameHeightPx)
         else:
             bbox = _intersectionBox(first.bbox, second.bbox, frameWidthPx, frameHeightPx)
         if bbox is None:
             return None
+        firstScore = _singleScore(first)
+        secondScore = _singleScore(second)
         base = sqrt(firstScore * secondScore)
         consistency = 1.0 - abs(firstScore - secondScore)
         bonus = (
@@ -254,12 +149,9 @@ class Fusor:
         )
         representative = max(
             (first, second),
-            key=lambda item: (self._sourceScore(item), -item.viewId),
+            key=lambda item: (_singleScore(item), -item.viewId),
         )
-        if (
-            self._boxMode is FusionBoxMode.BEST_SOURCE
-            and self._strategy is not FusionStrategy.WEIGHTED_BOX
-        ):
+        if self._boxMode is FusionBoxMode.BEST_SOURCE:
             bbox = representative.bbox
             bfov = representative.bfov
         else:
@@ -288,14 +180,12 @@ def fuse(
     sourceMinConfidence: float = 0.80,
     boxMode: FusionBoxMode | str = FusionBoxMode.MAX_INTERSECTION,
     referenceBoxAreaPx: float | None = None,
-    strategy: FusionStrategy | str = FusionStrategy.LEGACY,
 ) -> EvaluatedCandidate | None:
     return Fusor(
         geometry,
         overlapRate=overlapRate,
         sourceMinConfidence=sourceMinConfidence,
         boxMode=boxMode,
-        strategy=strategy,
     ).fuse(
         observations,
         frameWidthPx=frameWidthPx,
@@ -316,21 +206,11 @@ def _singleScore(observation: ProjectedObservation) -> float:
     )
 
 
-def _optionalProbability(value: float | None, fallback: float | None) -> float:
-    selected = fallback if value is None else value
-    if selected is None:
-        return 0.0
-    return float(np.clip(selected, 0.0, 1.0))
-
-
-def _singleCandidate(
-    observation: ProjectedObservation,
-    confidence: float | None = None,
-) -> EvaluatedCandidate:
+def _singleCandidate(observation: ProjectedObservation) -> EvaluatedCandidate:
     return EvaluatedCandidate(
         bfov=observation.bfov,
         bbox=observation.bbox,
-        confidence=_singleScore(observation) if confidence is None else confidence,
+        confidence=_singleScore(observation),
         sourceViewIds=(observation.viewId,),
         fused=False,
         overlapRate=None,
@@ -462,41 +342,6 @@ def _unionBox(
     )
 
 
-def _weightedBox(
-    first: BBoxXYWH,
-    second: BBoxXYWH,
-    firstWeight: float,
-    secondWeight: float,
-    frameWidthPx: int,
-    frameHeightPx: int,
-) -> BBoxXYWH | None:
-    """Average two boxes in an unwrapped circular x-coordinate system."""
-    total = max(firstWeight + secondWeight, 1e-9)
-    firstWidth = min(float(frameWidthPx), first.widthPx)
-    secondWidth = min(float(frameWidthPx), second.widthPx)
-    firstCenter = first.xPx + 0.5 * firstWidth
-    secondCenter = second.xPx + 0.5 * secondWidth
-    while secondCenter - firstCenter > 0.5 * frameWidthPx:
-        secondCenter -= frameWidthPx
-    while secondCenter - firstCenter < -0.5 * frameWidthPx:
-        secondCenter += frameWidthPx
-    center = (firstWeight * firstCenter + secondWeight * secondCenter) / total
-    width = (firstWeight * firstWidth + secondWeight * secondWidth) / total
-    height = (firstWeight * first.heightPx + secondWeight * second.heightPx) / total
-    yCenter = (
-        firstWeight * (first.yPx + 0.5 * first.heightPx)
-        + secondWeight * (second.yPx + 0.5 * second.heightPx)
-    ) / total
-    width = min(float(frameWidthPx), max(1e-6, width))
-    height = min(float(frameHeightPx), max(1e-6, height))
-    return BBoxXYWH(
-        xPx=(center - 0.5 * width) % frameWidthPx,
-        yPx=min(float(frameHeightPx) - height, max(0.0, yCenter - 0.5 * height)),
-        widthPx=width,
-        heightPx=height,
-    )
-
-
 def _referenceAdaptiveBox(
     first: BBoxXYWH,
     second: BBoxXYWH,
@@ -586,7 +431,6 @@ __all__ = [
     "FUSION_OVERLAP_RATE",
     "FUSION_SCORE_CAP",
     "FusionBoxMode",
-    "FusionStrategy",
     "Fusor",
     "fuse",
 ]

@@ -25,7 +25,6 @@ evaluator:
   overlapThreshold: 0.70
   fusionSourceMinConfidence: 0.740642
   fusionBoxMode: best_source
-  fusionStrategy: legacy
 motion:
   minSamplesForVelocity: 2
   maxTangentSpanRad: 1.20

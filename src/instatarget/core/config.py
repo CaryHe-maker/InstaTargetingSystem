@@ -80,7 +80,6 @@ class EvaluatorConfig:
     overlapThreshold: float = 0.70
     fusionSourceMinConfidence: float = 0.80
     fusionBoxMode: str = "reference_adaptive"
-    fusionStrategy: str = "legacy"
 
     def __post_init__(self) -> None:
         _requireProbability("evaluator.supportWeight", self.supportWeight)
@@ -100,16 +99,6 @@ class EvaluatorConfig:
         if self.fusionBoxMode not in {"reference_adaptive", "best_source"}:
             raise ConfigError(
                 "evaluator.fusionBoxMode must be 'reference_adaptive' or 'best_source'"
-            )
-        if self.fusionStrategy not in {
-            "legacy",
-            "presence_quality",
-            "geometric_consensus",
-            "weighted_box",
-        }:
-            raise ConfigError(
-                "evaluator.fusionStrategy must be 'legacy', 'presence_quality', "
-                "'geometric_consensus', or 'weighted_box'"
             )
         if self.firstRoundFusionOverlap >= self.overlapThreshold:
             raise ConfigError(
@@ -669,7 +658,6 @@ def loadConfig(path: str | Path) -> AppConfig:
             "overlapThreshold",
             "fusionSourceMinConfidence",
             "fusionBoxMode",
-            "fusionStrategy",
         },
     )
     motionRaw = _section(
@@ -820,10 +808,6 @@ def loadConfig(path: str | Path) -> AppConfig:
             fusionBoxMode=_requireStr(
                 "evaluator.fusionBoxMode",
                 evaluatorRaw["fusionBoxMode"],
-            ),
-            fusionStrategy=_requireStr(
-                "evaluator.fusionStrategy",
-                evaluatorRaw.get("fusionStrategy", "legacy"),
             ),
         ),
         motion=MotionConfig(

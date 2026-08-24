@@ -502,8 +502,6 @@ class ProjectedObservation:
     motionProbability: float | None = None
     motionReliability: float = 0.0
     singleScore: float | None = None
-    presenceProbability: float | None = None
-    qualityProbability: float | None = None
     erpBoundary: tuple[tuple[float, float], ...] = ()
     envelopeInflation: float = 1.0
     normalizedRadius: float = 0.0
@@ -527,8 +525,6 @@ class ProjectedObservation:
             ("rawMotionScore", self.rawMotionScore),
             ("motionProbability", self.motionProbability),
             ("singleScore", self.singleScore),
-            ("presenceProbability", self.presenceProbability),
-            ("qualityProbability", self.qualityProbability),
         ):
             if value is not None:
                 _requireProbability(name, value)
